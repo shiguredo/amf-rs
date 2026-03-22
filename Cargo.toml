@@ -1,0 +1,31 @@
+[package]
+name = "shiguredo_amf"
+version = "2026.0.0"
+edition = "2024"
+rust-version = "1.88"
+authors = ["Shiguredo Inc."]
+license = "Apache-2.0"
+description = "Rust bindings for AMD AMF (Advanced Media Framework)"
+homepage = "https://github.com/shiguredo/amf-rs"
+repository = "https://github.com/shiguredo/amf-rs"
+readme = "README.md"
+build = "build.rs"
+include = ["/src/**", "/build.rs", "LICENSE", "README.md"]
+
+[dependencies]
+log = "0.4"
+
+[build-dependencies]
+bindgen = "0.72"
+shiguredo_toml = "2026.1.0"
+
+# AMD AMF 用の外部ライブラリメタデータ
+# (この内容は build.rs の中からのみ参照される)
+#
+# AMF はヘッダーオンリーの API 定義で、ランタイムライブラリは
+# AMD GPU ドライバーに同梱される共有ライブラリ (libamfrt64.so.1) を
+# dlopen で動的にロードする。
+# version は git clone --branch で使用するタグまたはブランチ名
+[package.metadata.external-dependencies.amf]
+url = "https://github.com/GPUOpen-LibrariesAndSDKs/AMF"
+version = "v1.5.0"
