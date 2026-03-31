@@ -7,7 +7,7 @@ use std::collections::VecDeque;
 use std::ptr;
 
 use crate::AmfLibrary;
-use crate::error::{Error, require_vtbl_fn};
+use crate::error::{Error, positive_i32_to_usize, require_vtbl_fn};
 use crate::sys::{
     self, AMF_MEMORY_TYPE, AMF_PLANE_TYPE, AMF_RESULT, AMF_SURFACE_FORMAT, AMFBuffer, AMFComponent,
     AMFContext, AMFData, AMFSurface,
@@ -381,25 +381,21 @@ impl Decoder {
             return Err(Error::new_custom("extract_frame", "failed to get Y plane"));
         }
 
-        let width = unsafe {
+        let width_raw = unsafe {
             let vtbl = &*(*y_plane).pVtbl;
-            require_vtbl_fn(vtbl.GetWidth, "GetWidth")?(y_plane) as usize
+            require_vtbl_fn(vtbl.GetWidth, "GetWidth")?(y_plane)
         };
-        let height = unsafe {
+        let height_raw = unsafe {
             let vtbl = &*(*y_plane).pVtbl;
-            require_vtbl_fn(vtbl.GetHeight, "GetHeight")?(y_plane) as usize
+            require_vtbl_fn(vtbl.GetHeight, "GetHeight")?(y_plane)
         };
-        if width == 0 || height == 0 {
-            unsafe { release_surface(surface) };
-            return Err(Error::new_custom(
-                "extract_frame",
-                &format!("invalid plane dimensions: {width}x{height}"),
-            ));
-        }
-        let y_hpitch = unsafe {
+        let width = positive_i32_to_usize(width_raw, "extract_frame", "width")?;
+        let height = positive_i32_to_usize(height_raw, "extract_frame", "height")?;
+        let y_hpitch_raw = unsafe {
             let vtbl = &*(*y_plane).pVtbl;
-            require_vtbl_fn(vtbl.GetHPitch, "GetHPitch")?(y_plane) as usize
+            require_vtbl_fn(vtbl.GetHPitch, "GetHPitch")?(y_plane)
         };
+        let y_hpitch = positive_i32_to_usize(y_hpitch_raw, "extract_frame", "y_hpitch")?;
         if y_hpitch < width {
             unsafe { release_surface(surface) };
             return Err(Error::new_custom(
@@ -445,14 +441,16 @@ impl Decoder {
             require_vtbl_fn(vtbl.GetPlane, "GetPlane")?(surface, AMF_PLANE_TYPE::AMF_PLANE_UV)
         };
         if !uv_plane.is_null() {
-            let uv_hpitch = unsafe {
+            let uv_hpitch_raw = unsafe {
                 let vtbl = &*(*uv_plane).pVtbl;
-                require_vtbl_fn(vtbl.GetHPitch, "GetHPitch")?(uv_plane) as usize
+                require_vtbl_fn(vtbl.GetHPitch, "GetHPitch")?(uv_plane)
             };
-            let uv_height = unsafe {
+            let uv_hpitch = uv_hpitch_raw.max(0) as usize;
+            let uv_height_raw = unsafe {
                 let vtbl = &*(*uv_plane).pVtbl;
-                require_vtbl_fn(vtbl.GetHeight, "GetHeight")?(uv_plane) as usize
+                require_vtbl_fn(vtbl.GetHeight, "GetHeight")?(uv_plane)
             };
+            let uv_height = uv_height_raw.max(0) as usize;
             let uv_native = unsafe {
                 let vtbl = &*(*uv_plane).pVtbl;
                 require_vtbl_fn(vtbl.GetNative, "GetNative")?(uv_plane) as *const u8

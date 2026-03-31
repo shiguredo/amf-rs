@@ -7,7 +7,7 @@ use std::collections::VecDeque;
 use std::ptr;
 
 use crate::AmfLibrary;
-use crate::error::{Error, require_vtbl_fn};
+use crate::error::{Error, positive_i32_to_usize, require_vtbl_fn};
 use crate::sys::{
     self, AMF_MEMORY_TYPE, AMF_PLANE_TYPE, AMF_RESULT, AMF_SECOND, AMF_SURFACE_FORMAT, AMFBuffer,
     AMFComponent, AMFContext, AMFData, AMFSurface, AMFVariantStruct, amf_int32, amf_int64, amf_pts,
@@ -857,10 +857,14 @@ impl Encoder {
                         "Y plane native pointer is null",
                     ));
                 }
-                let y_hpitch = unsafe {
-                    let vtbl = &*(*y_plane).pVtbl;
-                    require_vtbl_fn(vtbl.GetHPitch, "GetHPitch")?(y_plane) as usize
-                };
+                let y_hpitch = positive_i32_to_usize(
+                    unsafe {
+                        let vtbl = &*(*y_plane).pVtbl;
+                        require_vtbl_fn(vtbl.GetHPitch, "GetHPitch")?(y_plane)
+                    },
+                    "copy_frame_to_surface",
+                    "y_hpitch",
+                )?;
                 if y_hpitch < row_bytes {
                     return Err(Error::new_custom(
                         "copy_frame_to_surface",
@@ -914,10 +918,14 @@ impl Encoder {
                         "UV plane native pointer is null",
                     ));
                 }
-                let uv_hpitch = unsafe {
-                    let vtbl = &*(*uv_plane).pVtbl;
-                    require_vtbl_fn(vtbl.GetHPitch, "GetHPitch")?(uv_plane) as usize
-                };
+                let uv_hpitch = positive_i32_to_usize(
+                    unsafe {
+                        let vtbl = &*(*uv_plane).pVtbl;
+                        require_vtbl_fn(vtbl.GetHPitch, "GetHPitch")?(uv_plane)
+                    },
+                    "copy_frame_to_surface",
+                    "uv_hpitch",
+                )?;
                 if uv_hpitch < row_bytes {
                     return Err(Error::new_custom(
                         "copy_frame_to_surface",
@@ -986,10 +994,14 @@ impl Encoder {
                         "Y plane native pointer is null",
                     ));
                 }
-                let y_hpitch = unsafe {
-                    let vtbl = &*(*y_plane).pVtbl;
-                    require_vtbl_fn(vtbl.GetHPitch, "GetHPitch")?(y_plane) as usize
-                };
+                let y_hpitch = positive_i32_to_usize(
+                    unsafe {
+                        let vtbl = &*(*y_plane).pVtbl;
+                        require_vtbl_fn(vtbl.GetHPitch, "GetHPitch")?(y_plane)
+                    },
+                    "copy_frame_to_surface",
+                    "y_hpitch",
+                )?;
                 if y_hpitch < width {
                     return Err(Error::new_custom(
                         "copy_frame_to_surface",
@@ -1044,10 +1056,14 @@ impl Encoder {
                         "U plane native pointer is null",
                     ));
                 }
-                let u_hpitch = unsafe {
-                    let vtbl = &*(*u_plane).pVtbl;
-                    require_vtbl_fn(vtbl.GetHPitch, "GetHPitch")?(u_plane) as usize
-                };
+                let u_hpitch = positive_i32_to_usize(
+                    unsafe {
+                        let vtbl = &*(*u_plane).pVtbl;
+                        require_vtbl_fn(vtbl.GetHPitch, "GetHPitch")?(u_plane)
+                    },
+                    "copy_frame_to_surface",
+                    "u_hpitch",
+                )?;
                 let uv_width = width / 2;
                 let uv_height = height / 2;
                 if u_hpitch < uv_width {
@@ -1097,10 +1113,14 @@ impl Encoder {
                         "V plane native pointer is null",
                     ));
                 }
-                let v_hpitch = unsafe {
-                    let vtbl = &*(*v_plane).pVtbl;
-                    require_vtbl_fn(vtbl.GetHPitch, "GetHPitch")?(v_plane) as usize
-                };
+                let v_hpitch = positive_i32_to_usize(
+                    unsafe {
+                        let vtbl = &*(*v_plane).pVtbl;
+                        require_vtbl_fn(vtbl.GetHPitch, "GetHPitch")?(v_plane)
+                    },
+                    "copy_frame_to_surface",
+                    "v_hpitch",
+                )?;
                 if v_hpitch < uv_width {
                     return Err(Error::new_custom(
                         "copy_frame_to_surface",
@@ -1140,10 +1160,14 @@ impl Encoder {
                         "plane native pointer is null",
                     ));
                 }
-                let hpitch = unsafe {
-                    let vtbl = &*(*plane).pVtbl;
-                    require_vtbl_fn(vtbl.GetHPitch, "GetHPitch")?(plane) as usize
-                };
+                let hpitch = positive_i32_to_usize(
+                    unsafe {
+                        let vtbl = &*(*plane).pVtbl;
+                        require_vtbl_fn(vtbl.GetHPitch, "GetHPitch")?(plane)
+                    },
+                    "copy_frame_to_surface",
+                    "hpitch",
+                )?;
                 let bpp: usize = match self.frame_format {
                     // Packed 32bit 系
                     FrameFormat::Bgra
