@@ -7,7 +7,7 @@ use std::collections::VecDeque;
 use std::ptr;
 
 use crate::AmfLibrary;
-use crate::error::Error;
+use crate::error::{Error, require_vtbl_fn};
 use crate::sys::{
     self, AMF_MEMORY_TYPE, AMF_PLANE_TYPE, AMF_RESULT, AMF_SURFACE_FORMAT, AMFBuffer, AMFComponent,
     AMFContext, AMFData, AMFSurface,
@@ -96,7 +96,7 @@ impl Decoder {
         let mut component: *mut AMFComponent = ptr::null_mut();
         let result = unsafe {
             let vtbl = &*(*lib.factory()).pVtbl;
-            vtbl.CreateComponent.unwrap()(
+            require_vtbl_fn(vtbl.CreateComponent, "CreateComponent")?(
                 lib.factory(),
                 context,
                 component_id_w.as_ptr(),
@@ -115,7 +115,12 @@ impl Decoder {
         // デコーダーを初期化する (解像度は 0,0 でストリームから自動検出)
         let result = unsafe {
             let vtbl = &*(*component).pVtbl;
-            vtbl.Init.unwrap()(component, AMF_SURFACE_FORMAT::AMF_SURFACE_NV12, 0, 0)
+            require_vtbl_fn(vtbl.Init, "Init")?(
+                component,
+                AMF_SURFACE_FORMAT::AMF_SURFACE_NV12,
+                0,
+                0,
+            )
         };
         Error::check(result, "AMFComponent::Init")?;
 
@@ -143,7 +148,7 @@ impl Decoder {
         let mut buffer: *mut AMFBuffer = ptr::null_mut();
         let result = unsafe {
             let vtbl = &*(*self.context).pVtbl;
-            vtbl.AllocBuffer.unwrap()(
+            require_vtbl_fn(vtbl.AllocBuffer, "AllocBuffer")?(
                 self.context,
                 AMF_MEMORY_TYPE::AMF_MEMORY_HOST,
                 data.len(),
@@ -162,7 +167,7 @@ impl Decoder {
         // データをコピーする
         let buf_native = unsafe {
             let vtbl = &*(*buffer).pVtbl;
-            vtbl.GetNative.unwrap()(buffer) as *mut u8
+            require_vtbl_fn(vtbl.GetNative, "GetNative")?(buffer) as *mut u8
         };
         if buf_native.is_null() {
             return Err(Error::new_custom(
@@ -182,7 +187,10 @@ impl Decoder {
         for retry in 0..max_retries {
             let result = unsafe {
                 let vtbl = &*(*self.component).pVtbl;
-                vtbl.SubmitInput.unwrap()(self.component, buffer as *mut AMFData)
+                require_vtbl_fn(vtbl.SubmitInput, "SubmitInput")?(
+                    self.component,
+                    buffer as *mut AMFData,
+                )
             };
 
             if retry > 0 && retry % 10 == 0 {
@@ -209,14 +217,18 @@ impl Decoder {
             // バッファを解放してエラーを返す
             unsafe {
                 let vtbl = &*(*buffer).pVtbl;
-                vtbl.Release.unwrap()(buffer);
+                if let Some(release) = vtbl.Release {
+                    release(buffer);
+                }
             }
             return Error::check(result, "AMFComponent::SubmitInput");
         }
         if !submitted {
             unsafe {
                 let vtbl = &*(*buffer).pVtbl;
-                vtbl.Release.unwrap()(buffer);
+                if let Some(release) = vtbl.Release {
+                    release(buffer);
+                }
             }
             return Err(Error::new_custom(
                 "Decoder::decode",
@@ -236,7 +248,7 @@ impl Decoder {
         // Drain を呼び出す
         let result = unsafe {
             let vtbl = &*(*self.component).pVtbl;
-            vtbl.Drain.unwrap()(self.component)
+            require_vtbl_fn(vtbl.Drain, "Drain")?(self.component)
         };
         log::debug!("Decoder::finish: Drain result={result:?}");
         if result != AMF_RESULT::AMF_OK && result != AMF_RESULT::AMF_INPUT_FULL {
@@ -253,7 +265,7 @@ impl Decoder {
             let mut data: *mut AMFData = ptr::null_mut();
             let result = unsafe {
                 let vtbl = &*(*self.component).pVtbl;
-                vtbl.QueryOutput.unwrap()(self.component, &mut data)
+                require_vtbl_fn(vtbl.QueryOutput, "QueryOutput")?(self.component, &mut data)
             };
             if result == AMF_RESULT::AMF_EOF {
                 break;
@@ -300,7 +312,7 @@ impl Decoder {
             let mut data: *mut AMFData = ptr::null_mut();
             let result = unsafe {
                 let vtbl = &*(*self.component).pVtbl;
-                vtbl.QueryOutput.unwrap()(self.component, &mut data)
+                require_vtbl_fn(vtbl.QueryOutput, "QueryOutput")?(self.component, &mut data)
             };
 
             if result == AMF_RESULT::AMF_EOF {
@@ -332,45 +344,48 @@ impl Decoder {
             return Err(Error::new_custom("extract_frame", "surface is null"));
         }
 
+        /// Surface のクリーンアップヘルパー
+        ///
+        /// vtable の Release が欠けている場合はリークさせて panic を防ぐ
+        unsafe fn release_surface(surface: *mut AMFSurface) {
+            unsafe {
+                let vtbl = &*(*surface).pVtbl;
+                if let Some(release) = vtbl.Release {
+                    release(surface);
+                }
+            }
+        }
+
         // ホストメモリに変換する
         let result = unsafe {
             let vtbl = &*(*surface).pVtbl;
-            vtbl.Convert.unwrap()(surface, AMF_MEMORY_TYPE::AMF_MEMORY_HOST)
+            require_vtbl_fn(vtbl.Convert, "Convert")?(surface, AMF_MEMORY_TYPE::AMF_MEMORY_HOST)
         };
         if result != AMF_RESULT::AMF_OK {
-            unsafe {
-                let vtbl = &*(*surface).pVtbl;
-                vtbl.Release.unwrap()(surface);
-            }
+            unsafe { release_surface(surface) };
             return Error::check(result, "AMFSurface::Convert");
         }
 
         // Y プレーンを取得する
         let y_plane = unsafe {
             let vtbl = &*(*surface).pVtbl;
-            vtbl.GetPlane.unwrap()(surface, AMF_PLANE_TYPE::AMF_PLANE_Y)
+            require_vtbl_fn(vtbl.GetPlane, "GetPlane")?(surface, AMF_PLANE_TYPE::AMF_PLANE_Y)
         };
         if y_plane.is_null() {
-            unsafe {
-                let vtbl = &*(*surface).pVtbl;
-                vtbl.Release.unwrap()(surface);
-            }
+            unsafe { release_surface(surface) };
             return Err(Error::new_custom("extract_frame", "failed to get Y plane"));
         }
 
         let width = unsafe {
             let vtbl = &*(*y_plane).pVtbl;
-            vtbl.GetWidth.unwrap()(y_plane) as usize
+            require_vtbl_fn(vtbl.GetWidth, "GetWidth")?(y_plane) as usize
         };
         let height = unsafe {
             let vtbl = &*(*y_plane).pVtbl;
-            vtbl.GetHeight.unwrap()(y_plane) as usize
+            require_vtbl_fn(vtbl.GetHeight, "GetHeight")?(y_plane) as usize
         };
         if width == 0 || height == 0 {
-            unsafe {
-                let vtbl = &*(*surface).pVtbl;
-                vtbl.Release.unwrap()(surface);
-            }
+            unsafe { release_surface(surface) };
             return Err(Error::new_custom(
                 "extract_frame",
                 &format!("invalid plane dimensions: {width}x{height}"),
@@ -378,13 +393,10 @@ impl Decoder {
         }
         let y_hpitch = unsafe {
             let vtbl = &*(*y_plane).pVtbl;
-            vtbl.GetHPitch.unwrap()(y_plane) as usize
+            require_vtbl_fn(vtbl.GetHPitch, "GetHPitch")?(y_plane) as usize
         };
         if y_hpitch < width {
-            unsafe {
-                let vtbl = &*(*surface).pVtbl;
-                vtbl.Release.unwrap()(surface);
-            }
+            unsafe { release_surface(surface) };
             return Err(Error::new_custom(
                 "extract_frame",
                 &format!("Y hpitch ({y_hpitch}) < width ({width})"),
@@ -392,13 +404,10 @@ impl Decoder {
         }
         let y_native = unsafe {
             let vtbl = &*(*y_plane).pVtbl;
-            vtbl.GetNative.unwrap()(y_plane) as *const u8
+            require_vtbl_fn(vtbl.GetNative, "GetNative")?(y_plane) as *const u8
         };
         if y_native.is_null() {
-            unsafe {
-                let vtbl = &*(*surface).pVtbl;
-                vtbl.Release.unwrap()(surface);
-            }
+            unsafe { release_surface(surface) };
             return Err(Error::new_custom(
                 "extract_frame",
                 "Y plane native pointer is null",
@@ -428,20 +437,20 @@ impl Decoder {
         // UV プレーンを取得する
         let uv_plane = unsafe {
             let vtbl = &*(*surface).pVtbl;
-            vtbl.GetPlane.unwrap()(surface, AMF_PLANE_TYPE::AMF_PLANE_UV)
+            require_vtbl_fn(vtbl.GetPlane, "GetPlane")?(surface, AMF_PLANE_TYPE::AMF_PLANE_UV)
         };
         if !uv_plane.is_null() {
             let uv_hpitch = unsafe {
                 let vtbl = &*(*uv_plane).pVtbl;
-                vtbl.GetHPitch.unwrap()(uv_plane) as usize
+                require_vtbl_fn(vtbl.GetHPitch, "GetHPitch")?(uv_plane) as usize
             };
             let uv_height = unsafe {
                 let vtbl = &*(*uv_plane).pVtbl;
-                vtbl.GetHeight.unwrap()(uv_plane) as usize
+                require_vtbl_fn(vtbl.GetHeight, "GetHeight")?(uv_plane) as usize
             };
             let uv_native = unsafe {
                 let vtbl = &*(*uv_plane).pVtbl;
-                vtbl.GetNative.unwrap()(uv_plane) as *const u8
+                require_vtbl_fn(vtbl.GetNative, "GetNative")?(uv_plane) as *const u8
             };
             if !uv_native.is_null() && uv_hpitch >= width && uv_height > 0 {
                 // UV プレーンの高さが NV12 バッファの残り領域を超えないか検証する
@@ -460,10 +469,7 @@ impl Decoder {
         }
 
         // Surface を解放する
-        unsafe {
-            let vtbl = &*(*surface).pVtbl;
-            vtbl.Release.unwrap()(surface);
-        }
+        unsafe { release_surface(surface) };
 
         self.decoded_frames.push_back(DecodedFrame {
             width,

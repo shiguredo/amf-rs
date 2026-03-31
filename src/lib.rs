@@ -16,6 +16,7 @@ use std::ptr;
 
 use std::ffi::c_void;
 
+use error::require_vtbl_fn;
 use sys::{
     AMF_DLL_NAME, AMF_FULL_VERSION, AMFContext, AMFContext1, AMFFactory, AMFInit_Fn,
     AMFQueryVersion_Fn, IID_AMF_CONTEXT1, amf_uint64,
@@ -118,7 +119,7 @@ impl AmfLibrary {
         let mut context: *mut AMFContext = ptr::null_mut();
         let result = unsafe {
             let vtbl = &*(*self.factory).pVtbl;
-            vtbl.CreateContext.unwrap()(self.factory, &mut context)
+            require_vtbl_fn(vtbl.CreateContext, "CreateContext")?(self.factory, &mut context)
         };
         Error::check(result, "AMFFactory::CreateContext")?;
 
@@ -141,7 +142,11 @@ impl AmfLibrary {
         let mut context1_ptr: *mut c_void = ptr::null_mut();
         let result = unsafe {
             let vtbl = &*(*context).pVtbl;
-            vtbl.QueryInterface.unwrap()(context, &IID_AMF_CONTEXT1, &mut context1_ptr)
+            require_vtbl_fn(vtbl.QueryInterface, "QueryInterface")?(
+                context,
+                &IID_AMF_CONTEXT1,
+                &mut context1_ptr,
+            )
         };
         Error::check(result, "AMFContext::QueryInterface(AMFContext1)")?;
 
@@ -157,13 +162,15 @@ impl AmfLibrary {
         // Vulkan デバイスを初期化する (NULL = デフォルトデバイス)
         let result = unsafe {
             let vtbl = &*(*context1).pVtbl;
-            vtbl.InitVulkan.unwrap()(context1, ptr::null_mut())
+            require_vtbl_fn(vtbl.InitVulkan, "InitVulkan")?(context1, ptr::null_mut())
         };
 
         // Context1 の参照を解放する
         unsafe {
             let vtbl = &*(*context1).pVtbl;
-            vtbl.Release.unwrap()(context1);
+            if let Some(release) = vtbl.Release {
+                release(context1);
+            }
         }
 
         Error::check(result, "AMFContext1::InitVulkan")

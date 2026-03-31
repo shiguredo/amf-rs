@@ -232,6 +232,14 @@ impl std::fmt::Display for Error {
 
 impl std::error::Error for Error {}
 
+/// vtable の関数ポインタが存在することを検証し、欠けている場合はエラーを返す
+///
+/// AMF ランタイムの vtable エントリが null の場合に panic ではなく
+/// `Result::Err` で失敗させるためのヘルパー。
+pub(crate) fn require_vtbl_fn<F>(f: Option<F>, name: &str) -> Result<F, Error> {
+    f.ok_or_else(|| Error::new_custom("vtable", &format!("missing vtable entry: {name}")))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

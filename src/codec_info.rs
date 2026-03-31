@@ -258,9 +258,15 @@ impl ProbeContext {
         let component_id_w = sys::to_wstring(component_id);
         let mut component: *mut AMFComponent = ptr::null_mut();
 
-        let result = unsafe {
+        let create_fn = unsafe {
             let vtbl = &*(*self.lib.factory()).pVtbl;
-            vtbl.CreateComponent.unwrap()(
+            vtbl.CreateComponent
+        };
+        let Some(create_fn) = create_fn else {
+            return false;
+        };
+        let result = unsafe {
+            create_fn(
                 self.lib.factory(),
                 self.context,
                 component_id_w.as_ptr(),
@@ -278,7 +284,9 @@ impl ProbeContext {
         unsafe {
             let vtbl = &*(*component).pVtbl;
             // Init を呼ばずに作成したコンポーネントでも Release は必要
-            vtbl.Release.unwrap()(component);
+            if let Some(release) = vtbl.Release {
+                release(component);
+            }
         }
 
         true
