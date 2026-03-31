@@ -287,10 +287,16 @@ impl ProbeContext {
 
 impl Drop for ProbeContext {
     fn drop(&mut self) {
+        // Drop 内の panic は二重 panic で abort になるため、
+        // vtable の関数ポインタが欠けている場合は握りつぶす
         unsafe {
             let vtbl = &*(*self.context).pVtbl;
-            let _ = vtbl.Terminate.unwrap()(self.context);
-            vtbl.Release.unwrap()(self.context);
+            if let Some(terminate) = vtbl.Terminate {
+                let _ = terminate(self.context);
+            }
+            if let Some(release) = vtbl.Release {
+                release(self.context);
+            }
         }
     }
 }
