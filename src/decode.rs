@@ -405,7 +405,13 @@ impl Decoder {
             ));
         }
 
-        let nv12_size = width * height * 3 / 2;
+        let y_size = width
+            .checked_mul(height)
+            .ok_or_else(|| Error::new_custom("extract_frame", "Y plane size overflow"))?;
+        let nv12_size = y_size
+            .checked_mul(3)
+            .and_then(|v| v.checked_div(2))
+            .ok_or_else(|| Error::new_custom("extract_frame", "NV12 size overflow"))?;
         let mut frame_data = vec![0u8; nv12_size];
 
         // Y プレーンをコピーする
@@ -438,7 +444,6 @@ impl Decoder {
                 vtbl.GetNative.unwrap()(uv_plane) as *const u8
             };
             if !uv_native.is_null() && uv_hpitch >= width && uv_height > 0 {
-                let y_size = width * height;
                 // UV プレーンの高さが NV12 バッファの残り領域を超えないか検証する
                 let max_uv_rows = (nv12_size - y_size) / width;
                 let copy_rows = uv_height.min(max_uv_rows);

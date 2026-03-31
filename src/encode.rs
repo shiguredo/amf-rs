@@ -722,6 +722,13 @@ impl Encoder {
         };
         Error::check(result, "AMFContext::AllocSurface")?;
 
+        if surface.is_null() {
+            return Err(Error::new_custom(
+                "Encoder::encode",
+                "AllocSurface returned null",
+            ));
+        }
+
         // フレームデータを Surface にコピーする
         self.copy_frame_to_surface(surface, frame_data)?;
 
