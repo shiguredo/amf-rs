@@ -145,6 +145,13 @@ impl AmfLibrary {
         };
         Error::check(result, "AMFContext::QueryInterface(AMFContext1)")?;
 
+        if context1_ptr.is_null() {
+            return Err(Error::new_custom(
+                "AmfLibrary::init_vulkan",
+                "QueryInterface returned null for AMFContext1",
+            ));
+        }
+
         let context1 = context1_ptr as *mut AMFContext1;
 
         // Vulkan デバイスを初期化する (NULL = デフォルトデバイス)

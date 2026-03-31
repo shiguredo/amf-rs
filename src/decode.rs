@@ -105,6 +105,13 @@ impl Decoder {
         };
         Error::check(result, "AMFFactory::CreateComponent")?;
 
+        if component.is_null() {
+            return Err(Error::new_custom(
+                "Decoder::new",
+                "CreateComponent returned null",
+            ));
+        }
+
         // デコーダーを初期化する (解像度は 0,0 でストリームから自動検出)
         let result = unsafe {
             let vtbl = &*(*component).pVtbl;
@@ -145,11 +152,24 @@ impl Decoder {
         };
         Error::check(result, "AMFContext::AllocBuffer")?;
 
+        if buffer.is_null() {
+            return Err(Error::new_custom(
+                "Decoder::decode",
+                "AllocBuffer returned null",
+            ));
+        }
+
         // データをコピーする
         let buf_native = unsafe {
             let vtbl = &*(*buffer).pVtbl;
             vtbl.GetNative.unwrap()(buffer) as *mut u8
         };
+        if buf_native.is_null() {
+            return Err(Error::new_custom(
+                "Decoder::decode",
+                "buffer native pointer is null",
+            ));
+        }
         unsafe {
             ptr::copy_nonoverlapping(data.as_ptr(), buf_native, data.len());
         }

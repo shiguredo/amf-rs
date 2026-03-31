@@ -372,6 +372,13 @@ impl Encoder {
         };
         Error::check(result, "AMFFactory::CreateComponent")?;
 
+        if component.is_null() {
+            return Err(Error::new_custom(
+                "Encoder::new",
+                "CreateComponent returned null",
+            ));
+        }
+
         let surface_format = config.frame_format.to_amf();
 
         // プロパティを設定する
@@ -822,12 +829,24 @@ impl Encoder {
                     let vtbl = &*(*y_plane).pVtbl;
                     vtbl.GetHPitch.unwrap()(y_plane) as usize
                 };
-                let y_height = unsafe {
-                    let vtbl = &*(*y_plane).pVtbl;
-                    vtbl.GetHeight.unwrap()(y_plane) as usize
-                };
+                if y_hpitch < row_bytes {
+                    return Err(Error::new_custom(
+                        "copy_frame_to_surface",
+                        "Y plane hpitch is smaller than row bytes",
+                    ));
+                }
 
-                for row in 0..y_height {
+                let height = self.height as usize;
+                // Y プレーン: height 行 * row_bytes バイト
+                let y_required = height * row_bytes;
+                if y_required > frame_data.len() {
+                    return Err(Error::new_custom(
+                        "copy_frame_to_surface",
+                        "frame data too small for Y plane",
+                    ));
+                }
+
+                for row in 0..height {
                     unsafe {
                         ptr::copy_nonoverlapping(
                             frame_data.as_ptr().add(row * row_bytes),
@@ -862,11 +881,23 @@ impl Encoder {
                     let vtbl = &*(*uv_plane).pVtbl;
                     vtbl.GetHPitch.unwrap()(uv_plane) as usize
                 };
-                let uv_height = unsafe {
-                    let vtbl = &*(*uv_plane).pVtbl;
-                    vtbl.GetHeight.unwrap()(uv_plane) as usize
-                };
-                let y_data_size = row_bytes * self.height as usize;
+                if uv_hpitch < row_bytes {
+                    return Err(Error::new_custom(
+                        "copy_frame_to_surface",
+                        "UV plane hpitch is smaller than row bytes",
+                    ));
+                }
+
+                let uv_height = height / 2;
+                let y_data_size = row_bytes * height;
+                // UV プレーン: uv_height 行 * row_bytes バイト
+                let uv_required = y_data_size + uv_height * row_bytes;
+                if uv_required > frame_data.len() {
+                    return Err(Error::new_custom(
+                        "copy_frame_to_surface",
+                        "frame data too small for UV plane",
+                    ));
+                }
 
                 for row in 0..uv_height {
                     unsafe {
@@ -910,6 +941,21 @@ impl Encoder {
                     let vtbl = &*(*y_plane).pVtbl;
                     vtbl.GetHPitch.unwrap()(y_plane) as usize
                 };
+                if y_hpitch < width {
+                    return Err(Error::new_custom(
+                        "copy_frame_to_surface",
+                        "Y plane hpitch is smaller than width",
+                    ));
+                }
+                // Y + U + V の合計サイズを事前検証する
+                let total_required = y_size + uv_plane_size * 2;
+                if total_required > frame_data.len() {
+                    return Err(Error::new_custom(
+                        "copy_frame_to_surface",
+                        "frame data too small for I420/YV12",
+                    ));
+                }
+
                 for row in 0..height {
                     unsafe {
                         ptr::copy_nonoverlapping(
@@ -947,6 +993,12 @@ impl Encoder {
                 };
                 let uv_width = width / 2;
                 let uv_height = height / 2;
+                if u_hpitch < uv_width {
+                    return Err(Error::new_custom(
+                        "copy_frame_to_surface",
+                        "U plane hpitch is smaller than uv_width",
+                    ));
+                }
 
                 // I420: Y+U+V, YV12: Y+V+U
                 // AMF はフォーマットに応じてプレーン順を管理するため、
@@ -989,6 +1041,12 @@ impl Encoder {
                     let vtbl = &*(*v_plane).pVtbl;
                     vtbl.GetHPitch.unwrap()(v_plane) as usize
                 };
+                if v_hpitch < uv_width {
+                    return Err(Error::new_custom(
+                        "copy_frame_to_surface",
+                        "V plane hpitch is smaller than uv_width",
+                    ));
+                }
 
                 for row in 0..uv_height {
                     unsafe {
@@ -1026,10 +1084,6 @@ impl Encoder {
                     let vtbl = &*(*plane).pVtbl;
                     vtbl.GetHPitch.unwrap()(plane) as usize
                 };
-                let height = unsafe {
-                    let vtbl = &*(*plane).pVtbl;
-                    vtbl.GetHeight.unwrap()(plane) as usize
-                };
                 let row_bytes = self.width as usize
                     * match self.frame_format {
                         // Packed 32bit 系
@@ -1045,6 +1099,20 @@ impl Encoder {
                         FrameFormat::Yuy2 | FrameFormat::Uyvy => 2,
                         _ => unreachable!(),
                     };
+                if hpitch < row_bytes {
+                    return Err(Error::new_custom(
+                        "copy_frame_to_surface",
+                        "plane hpitch is smaller than row bytes",
+                    ));
+                }
+                let height = self.height as usize;
+                let total_required = height * row_bytes;
+                if total_required > frame_data.len() {
+                    return Err(Error::new_custom(
+                        "copy_frame_to_surface",
+                        "frame data too small for packed format",
+                    ));
+                }
                 for row in 0..height {
                     unsafe {
                         ptr::copy_nonoverlapping(
