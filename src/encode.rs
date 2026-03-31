@@ -75,24 +75,29 @@ impl FrameFormat {
     }
 
     /// 指定解像度でのフレームサイズ（バイト数）を計算する
-    pub fn frame_size(&self, width: usize, height: usize) -> usize {
+    ///
+    /// オーバーフローした場合は `None` を返す。
+    pub fn frame_size(&self, width: usize, height: usize) -> Option<usize> {
+        let pixels = width.checked_mul(height)?;
         match self {
             // YUV 4:2:0 8bit 系: width * height * 3 / 2
-            FrameFormat::Nv12 | FrameFormat::Yv12 | FrameFormat::I420 => width * height * 3 / 2,
+            FrameFormat::Nv12 | FrameFormat::Yv12 | FrameFormat::I420 => {
+                pixels.checked_mul(3).map(|v| v / 2)
+            }
             // Packed 32bit 系: width * height * 4
             FrameFormat::Bgra
             | FrameFormat::Argb
             | FrameFormat::Rgba
             | FrameFormat::Ayuv
-            | FrameFormat::Y410 => width * height * 4,
+            | FrameFormat::Y410 => pixels.checked_mul(4),
             // Packed YUV 4:2:2 8bit 系: width * height * 2
-            FrameFormat::Yuy2 | FrameFormat::Uyvy => width * height * 2,
+            FrameFormat::Yuy2 | FrameFormat::Uyvy => pixels.checked_mul(2),
             // Semi-Planar YUV 4:2:0 16bit 系: width * height * 3 (16bit per component)
-            FrameFormat::P010 | FrameFormat::P012 | FrameFormat::P016 => width * height * 3,
+            FrameFormat::P010 | FrameFormat::P012 | FrameFormat::P016 => pixels.checked_mul(3),
             // Packed YUV 4:2:2 10bit (16bit 格納): width * height * 4
-            FrameFormat::Y210 => width * height * 4,
+            FrameFormat::Y210 => pixels.checked_mul(4),
             // Packed YUV 4:4:4 16bit: width * height * 8
-            FrameFormat::Y416 => width * height * 8,
+            FrameFormat::Y416 => pixels.checked_mul(8),
         }
     }
 }
@@ -695,7 +700,10 @@ impl Encoder {
     pub fn encode(&mut self, frame_data: &[u8], options: &EncodeOptions) -> Result<(), Error> {
         let expected_size = self
             .frame_format
-            .frame_size(self.width as usize, self.height as usize);
+            .frame_size(self.width as usize, self.height as usize)
+            .ok_or_else(|| {
+                Error::new_custom("Encoder::encode", "frame size calculation overflow")
+            })?;
         if frame_data.len() != expected_size {
             return Err(Error::new_custom(
                 "Encoder::encode",
@@ -816,7 +824,9 @@ impl Encoder {
                     _ => 2,
                 };
                 let width = self.width as usize;
-                let row_bytes = width * bytes_per_sample;
+                let row_bytes = width.checked_mul(bytes_per_sample).ok_or_else(|| {
+                    Error::new_custom("copy_frame_to_surface", "row bytes overflow")
+                })?;
 
                 // Y プレーン
                 let y_plane = unsafe {
@@ -855,7 +865,9 @@ impl Encoder {
 
                 let height = self.height as usize;
                 // Y プレーン: height 行 * row_bytes バイト
-                let y_required = height * row_bytes;
+                let y_required = height.checked_mul(row_bytes).ok_or_else(|| {
+                    Error::new_custom("copy_frame_to_surface", "Y plane size overflow")
+                })?;
                 if y_required > frame_data.len() {
                     return Err(Error::new_custom(
                         "copy_frame_to_surface",
@@ -909,9 +921,14 @@ impl Encoder {
                 }
 
                 let uv_height = height / 2;
-                let y_data_size = row_bytes * height;
+                let y_data_size = y_required;
                 // UV プレーン: uv_height 行 * row_bytes バイト
-                let uv_required = y_data_size + uv_height * row_bytes;
+                let uv_required = uv_height
+                    .checked_mul(row_bytes)
+                    .and_then(|uv| y_data_size.checked_add(uv))
+                    .ok_or_else(|| {
+                        Error::new_custom("copy_frame_to_surface", "UV plane size overflow")
+                    })?;
                 if uv_required > frame_data.len() {
                     return Err(Error::new_custom(
                         "copy_frame_to_surface",
@@ -933,8 +950,12 @@ impl Encoder {
                 // Planar YUV 4:2:0: Y/U/V (I420) または Y/V/U (YV12) の 3 プレーン
                 let width = self.width as usize;
                 let height = self.height as usize;
-                let y_size = width * height;
-                let uv_plane_size = (width / 2) * (height / 2);
+                let y_size = width.checked_mul(height).ok_or_else(|| {
+                    Error::new_custom("copy_frame_to_surface", "Y plane size overflow")
+                })?;
+                let uv_plane_size = (width / 2).checked_mul(height / 2).ok_or_else(|| {
+                    Error::new_custom("copy_frame_to_surface", "UV plane size overflow")
+                })?;
 
                 // Y プレーン
                 let y_plane = unsafe {
@@ -971,7 +992,12 @@ impl Encoder {
                     ));
                 }
                 // Y + U + V の合計サイズを事前検証する
-                let total_required = y_size + uv_plane_size * 2;
+                let total_required = uv_plane_size
+                    .checked_mul(2)
+                    .and_then(|uv| y_size.checked_add(uv))
+                    .ok_or_else(|| {
+                        Error::new_custom("copy_frame_to_surface", "I420/YV12 total size overflow")
+                    })?;
                 if total_required > frame_data.len() {
                     return Err(Error::new_custom(
                         "copy_frame_to_surface",
@@ -1113,21 +1139,23 @@ impl Encoder {
                     let vtbl = &*(*plane).pVtbl;
                     require_vtbl_fn(vtbl.GetHPitch, "GetHPitch")?(plane) as usize
                 };
-                let row_bytes = self.width as usize
-                    * match self.frame_format {
-                        // Packed 32bit 系
-                        FrameFormat::Bgra
-                        | FrameFormat::Argb
-                        | FrameFormat::Rgba
-                        | FrameFormat::Ayuv
-                        | FrameFormat::Y410
-                        | FrameFormat::Y210 => 4,
-                        // Packed 64bit 系
-                        FrameFormat::Y416 => 8,
-                        // Packed YUV 4:2:2 8bit 系
-                        FrameFormat::Yuy2 | FrameFormat::Uyvy => 2,
-                        _ => unreachable!(),
-                    };
+                let bpp: usize = match self.frame_format {
+                    // Packed 32bit 系
+                    FrameFormat::Bgra
+                    | FrameFormat::Argb
+                    | FrameFormat::Rgba
+                    | FrameFormat::Ayuv
+                    | FrameFormat::Y410
+                    | FrameFormat::Y210 => 4,
+                    // Packed 64bit 系
+                    FrameFormat::Y416 => 8,
+                    // Packed YUV 4:2:2 8bit 系
+                    FrameFormat::Yuy2 | FrameFormat::Uyvy => 2,
+                    _ => unreachable!(),
+                };
+                let row_bytes = (self.width as usize).checked_mul(bpp).ok_or_else(|| {
+                    Error::new_custom("copy_frame_to_surface", "row bytes overflow")
+                })?;
                 if hpitch < row_bytes {
                     return Err(Error::new_custom(
                         "copy_frame_to_surface",
@@ -1135,7 +1163,9 @@ impl Encoder {
                     ));
                 }
                 let height = self.height as usize;
-                let total_required = height * row_bytes;
+                let total_required = height.checked_mul(row_bytes).ok_or_else(|| {
+                    Error::new_custom("copy_frame_to_surface", "packed total size overflow")
+                })?;
                 if total_required > frame_data.len() {
                     return Err(Error::new_custom(
                         "copy_frame_to_surface",

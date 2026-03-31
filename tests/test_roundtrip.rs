@@ -575,7 +575,9 @@ fn roundtrip_format(
         .collect();
 
     // フレームサイズが FrameFormat::frame_size() と一致することを確認する
-    let expected_size = format.frame_size(width as usize, height as usize);
+    let expected_size = format
+        .frame_size(width as usize, height as usize)
+        .expect("frame size overflow");
     for (i, frame) in input_frames.iter().enumerate() {
         assert_eq!(
             frame.len(),
