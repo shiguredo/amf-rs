@@ -13,6 +13,8 @@
 
 - [ADD] Encoder に再初期化なしで動的プロパティを再設定する `reconfigure` API を追加する
   - @melpon
+- [FIX] キーフレーム生成時に SPS/PPS ヘッダーが付与されていなかったのを修正
+  - @melpon
 
 ### misc
 
