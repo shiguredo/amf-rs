@@ -1,4 +1,4 @@
-use std::sync::Mutex;
+use std::sync::{Mutex, MutexGuard};
 
 use shiguredo_amf::{
     Av1EncoderConfig, Av1Profile, CodecConfig, Decoder, DecoderCodec, DecoderConfig, EncodeOptions,
@@ -124,6 +124,171 @@ fn collect_encoded_frames(encoder: &mut Encoder, out: &mut Vec<EncodedFrame>) {
     while let Some(encoded) = encoder.next_frame() {
         out.push(encoded);
     }
+}
+
+/// 強制キーフレームを含むシーケンスをエンコードする
+fn encode_with_forced_keyframe(
+    config: EncoderConfig,
+    force_at: usize,
+    num_frames: usize,
+) -> Vec<EncodedFrame> {
+    let width = config.width as usize;
+    let height = config.height as usize;
+    let mut encoder = Encoder::new(config).expect("failed to create encoder");
+    let mut encoded_frames = Vec::new();
+
+    for i in 0..num_frames {
+        let frame = generate_dummy_nv12(width, height, i);
+        let options = if i == force_at {
+            EncodeOptions {
+                frame_type: frame_type::IDR | frame_type::I | frame_type::REF,
+            }
+        } else {
+            EncodeOptions {
+                frame_type: frame_type::UNKNOWN,
+            }
+        };
+        encoder.encode(&frame, &options).expect("failed to encode");
+        collect_encoded_frames(&mut encoder, &mut encoded_frames);
+    }
+    encoder.finish().expect("failed to finish");
+    collect_encoded_frames(&mut encoder, &mut encoded_frames);
+
+    encoded_frames
+}
+
+/// n 回目の IDR フレームのインデックスを返す（n は 1 始まり）
+fn nth_idr_frame_index(encoded_frames: &[EncodedFrame], nth: usize) -> usize {
+    let mut count = 0usize;
+    for (i, frame) in encoded_frames.iter().enumerate() {
+        if frame.picture_type() == PictureType::Idr {
+            count += 1;
+            if count == nth {
+                return i;
+            }
+        }
+    }
+    panic!("expected at least {nth} IDR frames, got {count}");
+}
+
+/// Annex-B のスタートコードを検索する
+fn find_annex_b_start_code(data: &[u8], from: usize) -> Option<(usize, usize)> {
+    let mut i = from;
+    while i + 3 <= data.len() {
+        if i + 4 <= data.len() && data[i..i + 4] == [0, 0, 0, 1] {
+            return Some((i, 4));
+        }
+        if data[i..i + 3] == [0, 0, 1] {
+            return Some((i, 3));
+        }
+        i += 1;
+    }
+    None
+}
+
+/// H.264 ビットストリーム内に SPS と PPS が含まれているかを判定する
+fn h264_contains_sps_pps(data: &[u8]) -> bool {
+    let mut has_sps = false;
+    let mut has_pps = false;
+    let mut pos = 0usize;
+
+    while let Some((sc, sc_len)) = find_annex_b_start_code(data, pos) {
+        let nal_start = sc + sc_len;
+        let nal_end = find_annex_b_start_code(data, nal_start)
+            .map(|(idx, _)| idx)
+            .unwrap_or(data.len());
+        if nal_start < nal_end {
+            let nal_type = data[nal_start] & 0x1f;
+            has_sps |= nal_type == 7;
+            has_pps |= nal_type == 8;
+        }
+        pos = nal_start;
+    }
+
+    has_sps && has_pps
+}
+
+/// HEVC ビットストリーム内に VPS / SPS / PPS が含まれているかを判定する
+fn hevc_contains_vps_sps_pps(data: &[u8]) -> bool {
+    let mut has_vps = false;
+    let mut has_sps = false;
+    let mut has_pps = false;
+    let mut pos = 0usize;
+
+    while let Some((sc, sc_len)) = find_annex_b_start_code(data, pos) {
+        let nal_start = sc + sc_len;
+        let nal_end = find_annex_b_start_code(data, nal_start)
+            .map(|(idx, _)| idx)
+            .unwrap_or(data.len());
+        if nal_start + 1 < nal_end {
+            let nal_type = (data[nal_start] >> 1) & 0x3f;
+            has_vps |= nal_type == 32;
+            has_sps |= nal_type == 33;
+            has_pps |= nal_type == 34;
+        }
+        pos = nal_start;
+    }
+
+    has_vps && has_sps && has_pps
+}
+
+/// AV1 OBU の leb128 サイズを読み取る
+fn read_av1_leb128(data: &[u8], pos: &mut usize) -> Option<usize> {
+    let mut value = 0usize;
+    let mut shift = 0usize;
+    for _ in 0..8 {
+        if *pos >= data.len() {
+            return None;
+        }
+        let byte = data[*pos];
+        *pos += 1;
+        value |= ((byte & 0x7f) as usize) << shift;
+        if byte & 0x80 == 0 {
+            return Some(value);
+        }
+        shift += 7;
+    }
+    None
+}
+
+/// AV1 ビットストリーム内に Sequence Header OBU が含まれているかを判定する
+fn av1_contains_sequence_header_obu(data: &[u8]) -> bool {
+    let mut pos = 0usize;
+    while pos < data.len() {
+        let obu_header = data[pos];
+        pos += 1;
+
+        let obu_type = (obu_header >> 3) & 0x0f;
+        let has_extension = (obu_header & 0b0000_0100) != 0;
+        let has_size_field = (obu_header & 0b0000_0010) != 0;
+        if has_extension {
+            if pos >= data.len() {
+                return false;
+            }
+            pos += 1;
+        }
+
+        let payload_size = if has_size_field {
+            match read_av1_leb128(data, &mut pos) {
+                Some(v) => v,
+                None => return false,
+            }
+        } else {
+            data.len() - pos
+        };
+        if pos + payload_size > data.len() {
+            return false;
+        }
+        if obu_type == 1 {
+            return true;
+        }
+        pos += payload_size;
+        if !has_size_field {
+            break;
+        }
+    }
+
+    false
 }
 
 /// エンコード済みフレームをフレーム単位でデコードして返すヘルパー
@@ -321,6 +486,35 @@ fn test_roundtrip_h264_force_idr() {
     assert_eq!(decoded_frames.len(), 15);
 }
 
+/// H.264 で force_picture_type 指定時に IDR と SPS / PPS が出力されることを確認する
+#[test]
+fn test_force_picture_type_h264_outputs_idr_and_sps_pps() {
+    let _lock = AMF_LOCK.lock().unwrap();
+    let mut config = EncoderConfig::new(
+        CodecConfig::H264(H264EncoderConfig {
+            profile: Some(H264Profile::High),
+        }),
+        320,
+        240,
+        FrameFormat::Nv12,
+        30,
+        1,
+        RateControlMode::Cbr,
+    );
+    config.target_kbps = Some(1000);
+    config.gop_pic_size = Some(300);
+
+    let encoded_frames = encode_with_forced_keyframe(config, 10, 15);
+    let forced_idr_index = nth_idr_frame_index(&encoded_frames, 2);
+    let forced_idr = &encoded_frames[forced_idr_index];
+
+    assert_eq!(forced_idr.picture_type(), PictureType::Idr);
+    assert!(
+        h264_contains_sps_pps(forced_idr.data()),
+        "forced H.264 IDR frame must include SPS and PPS"
+    );
+}
+
 // --- H.265 ---
 
 /// H.265 CBR カラーバーのラウンドトリップ（PSNR 検証）
@@ -367,6 +561,35 @@ fn test_roundtrip_hevc_cqp() {
     roundtrip_colorbar(config, DecoderCodec::Hevc, 10, 25.0);
 }
 
+/// HEVC で force_picture_type 指定時に IDR と VPS / SPS / PPS が出力されることを確認する
+#[test]
+fn test_force_picture_type_hevc_outputs_idr_and_vps_sps_pps() {
+    let _lock = AMF_LOCK.lock().unwrap();
+    let mut config = EncoderConfig::new(
+        CodecConfig::Hevc(HevcEncoderConfig {
+            profile: Some(HevcProfile::Main),
+        }),
+        320,
+        240,
+        FrameFormat::Nv12,
+        30,
+        1,
+        RateControlMode::Cbr,
+    );
+    config.target_kbps = Some(1000);
+    config.gop_pic_size = Some(300);
+
+    let encoded_frames = encode_with_forced_keyframe(config, 10, 15);
+    let forced_idr_index = nth_idr_frame_index(&encoded_frames, 2);
+    let forced_idr = &encoded_frames[forced_idr_index];
+
+    assert_eq!(forced_idr.picture_type(), PictureType::Idr);
+    assert!(
+        hevc_contains_vps_sps_pps(forced_idr.data()),
+        "forced HEVC IDR frame must include VPS, SPS and PPS"
+    );
+}
+
 // --- AV1 ---
 
 /// AV1 CBR カラーバーのラウンドトリップ（PSNR 検証）
@@ -411,6 +634,35 @@ fn test_roundtrip_av1_cqp() {
     config.gop_pic_size = Some(10);
 
     roundtrip_colorbar(config, DecoderCodec::Av1, 10, 25.0);
+}
+
+/// AV1 で force_picture_type 指定時にキーフレームと Sequence Header が出力されることを確認する
+#[test]
+fn test_force_picture_type_av1_outputs_keyframe_and_sequence_header() {
+    let _lock = AMF_LOCK.lock().unwrap();
+    let mut config = EncoderConfig::new(
+        CodecConfig::Av1(Av1EncoderConfig {
+            profile: Some(Av1Profile::Main),
+        }),
+        320,
+        240,
+        FrameFormat::Nv12,
+        30,
+        1,
+        RateControlMode::Cbr,
+    );
+    config.target_kbps = Some(1000);
+    config.gop_pic_size = Some(300);
+
+    let encoded_frames = encode_with_forced_keyframe(config, 10, 15);
+    let forced_key_index = nth_idr_frame_index(&encoded_frames, 2);
+    let forced_key = &encoded_frames[forced_key_index];
+
+    assert_eq!(forced_key.picture_type(), PictureType::Idr);
+    assert!(
+        av1_contains_sequence_header_obu(forced_key.data()),
+        "forced AV1 key frame must include sequence header OBU"
+    );
 }
 
 /// reconfigure で 0 を含むフレームレートを指定するとエラーになることを確認する
