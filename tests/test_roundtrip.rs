@@ -3,7 +3,7 @@ use std::sync::Mutex;
 use shiguredo_amf::{
     Av1EncoderConfig, Av1Profile, CodecConfig, Decoder, DecoderCodec, DecoderConfig, EncodeOptions,
     EncodedFrame, Encoder, EncoderConfig, FrameFormat, H264EncoderConfig, H264Profile,
-    HevcEncoderConfig, HevcProfile, PictureType, RateControlMode, frame_type,
+    HevcEncoderConfig, HevcProfile, PictureType, RateControlMode, ReconfigureParams, frame_type,
 };
 
 /// AMF はスレッドセーフではないためテストを直列化する
@@ -117,6 +117,13 @@ fn encode(config: EncoderConfig, frames: &[Vec<u8>]) -> Vec<EncodedFrame> {
     }
 
     encoded_frames
+}
+
+/// Encoder のキューに溜まっている出力フレームをすべて回収する
+fn collect_encoded_frames(encoder: &mut Encoder, out: &mut Vec<EncodedFrame>) {
+    while let Some(encoded) = encoder.next_frame() {
+        out.push(encoded);
+    }
 }
 
 /// エンコード済みフレームをフレーム単位でデコードして返すヘルパー
@@ -404,6 +411,197 @@ fn test_roundtrip_av1_cqp() {
     config.gop_pic_size = Some(10);
 
     roundtrip_colorbar(config, DecoderCodec::Av1, 10, 25.0);
+}
+
+/// reconfigure で 0 を含むフレームレートを指定するとエラーになることを確認する
+#[test]
+fn test_reconfigure_invalid_framerate_zero() {
+    let _lock = AMF_LOCK.lock().unwrap();
+    let config = EncoderConfig::new(
+        CodecConfig::H264(H264EncoderConfig {
+            profile: Some(H264Profile::High),
+        }),
+        320,
+        240,
+        FrameFormat::Nv12,
+        30,
+        1,
+        RateControlMode::Cbr,
+    );
+    let mut encoder = Encoder::new(config).expect("failed to create encoder");
+
+    let err = encoder
+        .reconfigure(ReconfigureParams {
+            framerate_num: Some(0),
+            framerate_den: Some(1),
+            ..ReconfigureParams::default()
+        })
+        .expect_err("reconfigure should fail for zero framerate");
+    assert!(
+        err.to_string().contains("invalid framerate"),
+        "unexpected error: {err}"
+    );
+}
+
+/// H.264 でエンコード途中にビットレートとフレームレートを再設定できることを確認する
+#[test]
+fn test_reconfigure_h264_runtime_change() {
+    let _lock = AMF_LOCK.lock().unwrap();
+    let mut config = EncoderConfig::new(
+        CodecConfig::H264(H264EncoderConfig {
+            profile: Some(H264Profile::High),
+        }),
+        320,
+        240,
+        FrameFormat::Nv12,
+        30,
+        1,
+        RateControlMode::Cbr,
+    );
+    config.target_kbps = Some(1000);
+    let mut encoder = Encoder::new(config).expect("failed to create encoder");
+    let options = EncodeOptions {
+        frame_type: frame_type::UNKNOWN,
+    };
+    let mut encoded_frames = Vec::new();
+
+    for i in 0..5 {
+        let frame = generate_dummy_nv12(320, 240, i);
+        encoder.encode(&frame, &options).expect("failed to encode");
+        collect_encoded_frames(&mut encoder, &mut encoded_frames);
+    }
+
+    encoder
+        .reconfigure(ReconfigureParams {
+            framerate_num: Some(15),
+            framerate_den: Some(1),
+            target_kbps: Some(1500),
+            ..ReconfigureParams::default()
+        })
+        .expect("failed to reconfigure");
+
+    for i in 5..10 {
+        let frame = generate_dummy_nv12(320, 240, i);
+        encoder.encode(&frame, &options).expect("failed to encode");
+        collect_encoded_frames(&mut encoder, &mut encoded_frames);
+    }
+
+    encoder.finish().expect("failed to finish");
+    collect_encoded_frames(&mut encoder, &mut encoded_frames);
+    assert!(!encoded_frames.is_empty(), "no encoded frames produced");
+
+    let decoded = decode(DecoderCodec::H264, &encoded_frames);
+    assert_eq!(decoded.len(), 10);
+}
+
+/// HEVC で非対応項目 qpb/gop_pic_size を指定しても失敗せず継続できることを確認する
+#[test]
+fn test_reconfigure_hevc_ignores_qpb_and_gop() {
+    let _lock = AMF_LOCK.lock().unwrap();
+    let mut config = EncoderConfig::new(
+        CodecConfig::Hevc(HevcEncoderConfig {
+            profile: Some(HevcProfile::Main),
+        }),
+        320,
+        240,
+        FrameFormat::Nv12,
+        30,
+        1,
+        RateControlMode::Cbr,
+    );
+    config.target_kbps = Some(1000);
+    let mut encoder = Encoder::new(config).expect("failed to create encoder");
+    let options = EncodeOptions {
+        frame_type: frame_type::UNKNOWN,
+    };
+    let mut encoded_frames = Vec::new();
+
+    for i in 0..4 {
+        let frame = generate_dummy_nv12(320, 240, i);
+        encoder.encode(&frame, &options).expect("failed to encode");
+        collect_encoded_frames(&mut encoder, &mut encoded_frames);
+    }
+
+    encoder
+        .reconfigure(ReconfigureParams {
+            framerate_num: Some(24),
+            framerate_den: Some(1),
+            target_kbps: Some(1200),
+            qpi: Some(24),
+            qpp: Some(26),
+            qpb: Some(28),
+            gop_pic_size: Some(20),
+            ..ReconfigureParams::default()
+        })
+        .expect("failed to reconfigure");
+
+    for i in 4..8 {
+        let frame = generate_dummy_nv12(320, 240, i);
+        encoder.encode(&frame, &options).expect("failed to encode");
+        collect_encoded_frames(&mut encoder, &mut encoded_frames);
+    }
+
+    encoder.finish().expect("failed to finish");
+    collect_encoded_frames(&mut encoder, &mut encoded_frames);
+    assert!(!encoded_frames.is_empty(), "no encoded frames produced");
+
+    let decoded = decode(DecoderCodec::Hevc, &encoded_frames);
+    assert_eq!(decoded.len(), 8);
+}
+
+/// AV1 で qpb と gop_pic_size の再設定を適用して継続できることを確認する
+#[test]
+fn test_reconfigure_av1_qpb_and_gop() {
+    let _lock = AMF_LOCK.lock().unwrap();
+    let mut config = EncoderConfig::new(
+        CodecConfig::Av1(Av1EncoderConfig {
+            profile: Some(Av1Profile::Main),
+        }),
+        320,
+        240,
+        FrameFormat::Nv12,
+        30,
+        1,
+        RateControlMode::Cbr,
+    );
+    config.target_kbps = Some(1000);
+    let mut encoder = Encoder::new(config).expect("failed to create encoder");
+    let options = EncodeOptions {
+        frame_type: frame_type::UNKNOWN,
+    };
+    let mut encoded_frames = Vec::new();
+
+    for i in 0..4 {
+        let frame = generate_dummy_nv12(320, 240, i);
+        encoder.encode(&frame, &options).expect("failed to encode");
+        collect_encoded_frames(&mut encoder, &mut encoded_frames);
+    }
+
+    encoder
+        .reconfigure(ReconfigureParams {
+            framerate_num: Some(24),
+            framerate_den: Some(1),
+            target_kbps: Some(1300),
+            qpi: Some(96),
+            qpp: Some(104),
+            qpb: Some(112),
+            gop_pic_size: Some(16),
+            ..ReconfigureParams::default()
+        })
+        .expect("failed to reconfigure");
+
+    for i in 4..8 {
+        let frame = generate_dummy_nv12(320, 240, i);
+        encoder.encode(&frame, &options).expect("failed to encode");
+        collect_encoded_frames(&mut encoder, &mut encoded_frames);
+    }
+
+    encoder.finish().expect("failed to finish");
+    collect_encoded_frames(&mut encoder, &mut encoded_frames);
+    assert!(!encoded_frames.is_empty(), "no encoded frames produced");
+
+    let decoded = decode(DecoderCodec::Av1, &encoded_frames);
+    assert_eq!(decoded.len(), 8);
 }
 
 // ---------------------------------------------------------------------------
