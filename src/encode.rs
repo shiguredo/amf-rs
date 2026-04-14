@@ -567,6 +567,7 @@ impl Encoder {
     }
 
     /// codec 共通の動的プロパティを設定する
+    #[allow(clippy::too_many_arguments)]
     fn set_codec_dynamic_properties(
         component: *mut AMFComponent,
         params: &ReconfigureParams,
