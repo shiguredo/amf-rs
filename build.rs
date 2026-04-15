@@ -230,6 +230,8 @@ pub struct AMFContext { pub pVtbl: *const std::ffi::c_void }
 #[repr(C)]
 pub struct AMFContext1 { pub pVtbl: *const std::ffi::c_void }
 #[repr(C)]
+pub struct AMFPropertyStorage { pub pVtbl: *const std::ffi::c_void }
+#[repr(C)]
 pub struct AMFComponent { pub pVtbl: *const std::ffi::c_void }
 #[repr(C)]
 pub struct AMFSurface { pub pVtbl: *const std::ffi::c_void }
