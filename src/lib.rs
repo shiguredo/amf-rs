@@ -30,7 +30,7 @@ pub use decode::{DecodedFrame, Decoder, DecoderCodec, DecoderConfig};
 pub use encode::{
     Av1EncoderConfig, Av1Profile, CodecConfig, EncodeOptions, EncodedFrame, Encoder, EncoderConfig,
     FrameFormat, H264EncoderConfig, H264Profile, HevcEncoderConfig, HevcProfile, PictureType,
-    RateControlMode, frame_type,
+    RateControlMode, ReconfigureParams, frame_type,
 };
 pub use error::Error;
 
