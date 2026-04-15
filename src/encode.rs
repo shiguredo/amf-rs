@@ -10,7 +10,8 @@ use crate::AmfLibrary;
 use crate::error::{Error, positive_i32_to_usize, require_vtbl_fn};
 use crate::sys::{
     self, AMF_MEMORY_TYPE, AMF_PLANE_TYPE, AMF_RESULT, AMF_SECOND, AMF_SURFACE_FORMAT, AMFBuffer,
-    AMFComponent, AMFContext, AMFData, AMFSurface, AMFVariantStruct, amf_int32, amf_int64, amf_pts,
+    AMFComponent, AMFContext, AMFData, AMFPropertyStorage, AMFSurface, AMFVariantStruct, amf_int32,
+    amf_int64, amf_pts,
 };
 
 // ---------------------------------------------------------------------------
@@ -238,6 +239,21 @@ pub struct EncodeOptions {
     pub frame_type: u16,
 }
 
+/// エンコーダー再設定パラメータ
+///
+/// `None` の項目は変更しない。
+#[derive(Debug, Clone, Default)]
+pub struct ReconfigureParams {
+    pub framerate_num: Option<u32>,
+    pub framerate_den: Option<u32>,
+    pub target_kbps: Option<u32>,
+    pub max_kbps: Option<u32>,
+    pub qpi: Option<u16>,
+    pub qpp: Option<u16>,
+    pub qpb: Option<u16>,
+    pub gop_pic_size: Option<u16>,
+}
+
 /// エンコード済みフレーム
 pub struct EncodedFrame {
     data: Vec<u8>,
@@ -289,8 +305,6 @@ pub mod frame_type {
 
 /// AMF ハードウェアエンコーダー
 pub struct Encoder {
-    // ライブラリハンドルを保持して Drop 順序で dlclose が最後に呼ばれることを保証する
-    _lib: AmfLibrary,
     context: *mut AMFContext,
     component: *mut AMFComponent,
     surface_format: AMF_SURFACE_FORMAT,
@@ -302,6 +316,8 @@ pub struct Encoder {
     framerate_num: u64,
     framerate_den: u64,
     codec_config: CodecConfig,
+    // ライブラリハンドルを保持して Drop 順序で dlclose が最後に呼ばれることを保証する
+    _lib: AmfLibrary,
 }
 
 // 安全性:
@@ -363,9 +379,9 @@ impl Encoder {
 
         // コーデック固有のコンポーネント ID を選択する
         let component_id = match &config.codec {
-            CodecConfig::H264(_) => sys::AMFVideoEncoderVCE_AVC,
-            CodecConfig::Hevc(_) => sys::AMFVideoEncoder_HEVC,
-            CodecConfig::Av1(_) => sys::AMFVideoEncoder_AV1,
+            CodecConfig::H264(_) => sys::str::AMFVideoEncoderVCE_AVC,
+            CodecConfig::Hevc(_) => sys::str::AMFVideoEncoder_HEVC,
+            CodecConfig::Av1(_) => sys::str::AMFVideoEncoder_AV1,
         };
         let component_id_w = sys::to_wstring(component_id);
 
@@ -392,7 +408,7 @@ impl Encoder {
         let surface_format = config.frame_format.to_amf();
 
         // プロパティを設定する
-        Self::set_properties(component, &config)?;
+        Self::set_properties(component as *mut AMFPropertyStorage, &config)?;
 
         // エンコーダーを初期化する
         let result = unsafe {
@@ -423,29 +439,181 @@ impl Encoder {
     }
 
     /// エンコーダーにプロパティを設定する
-    fn set_properties(component: *mut AMFComponent, config: &EncoderConfig) -> Result<(), Error> {
+    fn set_properties(prop: *mut AMFPropertyStorage, config: &EncoderConfig) -> Result<(), Error> {
         match &config.codec {
             CodecConfig::H264(h264) => {
-                Self::set_h264_properties(component, config, h264)?;
+                Self::set_h264_properties(prop, config, h264)?;
             }
             CodecConfig::Hevc(hevc) => {
-                Self::set_hevc_properties(component, config, hevc)?;
+                Self::set_hevc_properties(prop, config, hevc)?;
             }
             CodecConfig::Av1(av1) => {
-                Self::set_av1_properties(component, config, av1)?;
+                Self::set_av1_properties(prop, config, av1)?;
             }
+        }
+        Ok(())
+    }
+
+    /// エンコーダーの動的プロパティを再設定する
+    ///
+    /// 変更は次回 `SubmitInput` 前に AMF エンコーダーへ反映される。
+    pub fn reconfigure(&mut self, params: ReconfigureParams) -> Result<(), Error> {
+        let framerate = Self::resolve_reconfigure_framerate(&params)?;
+        let prop = self.component as *mut AMFPropertyStorage;
+
+        match &self.codec_config {
+            CodecConfig::H264(_) => {
+                Self::set_h264_dynamic_properties(prop, &params, framerate)?;
+            }
+            CodecConfig::Hevc(_) => {
+                Self::set_hevc_dynamic_properties(prop, &params, framerate)?;
+            }
+            CodecConfig::Av1(_) => {
+                Self::set_av1_dynamic_properties(prop, &params, framerate)?;
+            }
+        }
+
+        // PTS 計算に使うフレームレートも同期して更新する
+        if let Some((num, den)) = framerate {
+            self.framerate_num = num as u64;
+            self.framerate_den = den as u64;
+        }
+
+        Ok(())
+    }
+
+    /// 再設定時のフレームレート指定を検証する
+    fn resolve_reconfigure_framerate(
+        params: &ReconfigureParams,
+    ) -> Result<Option<(u32, u32)>, Error> {
+        match (params.framerate_num, params.framerate_den) {
+            (None, None) => Ok(None),
+            (Some(num), Some(den)) => {
+                if num == 0 || den == 0 {
+                    return Err(Error::new_custom(
+                        "Encoder::reconfigure",
+                        &format!(
+                            "invalid framerate: {num}/{den} (must be non-zero when specified)"
+                        ),
+                    ));
+                }
+                Ok(Some((num, den)))
+            }
+            _ => Err(Error::new_custom(
+                "Encoder::reconfigure",
+                "framerate_num and framerate_den must be set together",
+            )),
+        }
+    }
+
+    /// H.264 の動的プロパティを設定する
+    fn set_h264_dynamic_properties(
+        prop: *mut AMFPropertyStorage,
+        params: &ReconfigureParams,
+        framerate: Option<(u32, u32)>,
+    ) -> Result<(), Error> {
+        Self::set_codec_dynamic_properties(
+            prop,
+            params,
+            framerate,
+            sys::str::AMF_VIDEO_ENCODER_FRAMERATE,
+            sys::str::AMF_VIDEO_ENCODER_TARGET_BITRATE,
+            sys::str::AMF_VIDEO_ENCODER_PEAK_BITRATE,
+            sys::str::AMF_VIDEO_ENCODER_QP_I,
+            sys::str::AMF_VIDEO_ENCODER_QP_P,
+            Some(sys::str::AMF_VIDEO_ENCODER_QP_B),
+            Some(sys::str::AMF_VIDEO_ENCODER_IDR_PERIOD),
+        )
+    }
+
+    /// HEVC の動的プロパティを設定する
+    fn set_hevc_dynamic_properties(
+        prop: *mut AMFPropertyStorage,
+        params: &ReconfigureParams,
+        framerate: Option<(u32, u32)>,
+    ) -> Result<(), Error> {
+        Self::set_codec_dynamic_properties(
+            prop,
+            params,
+            framerate,
+            sys::str::AMF_VIDEO_ENCODER_HEVC_FRAMERATE,
+            sys::str::AMF_VIDEO_ENCODER_HEVC_TARGET_BITRATE,
+            sys::str::AMF_VIDEO_ENCODER_HEVC_PEAK_BITRATE,
+            sys::str::AMF_VIDEO_ENCODER_HEVC_QP_I,
+            sys::str::AMF_VIDEO_ENCODER_HEVC_QP_P,
+            // AMF HEVC エンコーダーには B フレーム用の QP プロパティが存在しないため
+            // qpb は設定しない (H.264 の AMF_VIDEO_ENCODER_QP_B に相当するものがない)
+            None,
+            None,
+        )
+    }
+
+    /// AV1 の動的プロパティを設定する
+    fn set_av1_dynamic_properties(
+        prop: *mut AMFPropertyStorage,
+        params: &ReconfigureParams,
+        framerate: Option<(u32, u32)>,
+    ) -> Result<(), Error> {
+        Self::set_codec_dynamic_properties(
+            prop,
+            params,
+            framerate,
+            sys::str::AMF_VIDEO_ENCODER_AV1_FRAMERATE,
+            sys::str::AMF_VIDEO_ENCODER_AV1_TARGET_BITRATE,
+            sys::str::AMF_VIDEO_ENCODER_AV1_PEAK_BITRATE,
+            sys::str::AMF_VIDEO_ENCODER_AV1_Q_INDEX_INTRA,
+            sys::str::AMF_VIDEO_ENCODER_AV1_Q_INDEX_INTER,
+            Some(sys::str::AMF_VIDEO_ENCODER_AV1_Q_INDEX_INTER_B),
+            Some(sys::str::AMF_VIDEO_ENCODER_AV1_GOP_SIZE),
+        )
+    }
+
+    /// codec 共通の動的プロパティを設定する
+    #[allow(clippy::too_many_arguments)]
+    fn set_codec_dynamic_properties(
+        prop: *mut AMFPropertyStorage,
+        params: &ReconfigureParams,
+        framerate: Option<(u32, u32)>,
+        framerate_name: &'static str,
+        target_bitrate_name: &'static str,
+        peak_bitrate_name: &'static str,
+        qp_i_name: &'static str,
+        qp_p_name: &'static str,
+        qp_b_name: Option<&'static str>,
+        gop_pic_size_name: Option<&'static str>,
+    ) -> Result<(), Error> {
+        if let Some((num, den)) = framerate {
+            set_property_rate(prop, framerate_name, num, den)?;
+        }
+        if let Some(target_kbps) = params.target_kbps {
+            set_property_int64(prop, target_bitrate_name, target_kbps as amf_int64 * 1000)?;
+        }
+        if let Some(max_kbps) = params.max_kbps {
+            set_property_int64(prop, peak_bitrate_name, max_kbps as amf_int64 * 1000)?;
+        }
+        if let Some(qpi) = params.qpi {
+            set_property_int64(prop, qp_i_name, qpi as amf_int64)?;
+        }
+        if let Some(qpp) = params.qpp {
+            set_property_int64(prop, qp_p_name, qpp as amf_int64)?;
+        }
+        if let (Some(qpb_name), Some(qpb)) = (qp_b_name, params.qpb) {
+            set_property_int64(prop, qpb_name, qpb as amf_int64)?;
+        }
+        if let (Some(gop_name), Some(gop)) = (gop_pic_size_name, params.gop_pic_size) {
+            set_property_int64(prop, gop_name, gop as amf_int64)?;
         }
         Ok(())
     }
 
     /// H.264 固有のプロパティを設定する
     fn set_h264_properties(
-        component: *mut AMFComponent,
+        prop: *mut AMFPropertyStorage,
         config: &EncoderConfig,
         h264: &H264EncoderConfig,
     ) -> Result<(), Error> {
         // Usage: トランスコーディング
-        set_property_int64(component, sys::AMF_VIDEO_ENCODER_USAGE, 0)?;
+        set_property_int64(prop, sys::str::AMF_VIDEO_ENCODER_USAGE, 0)?;
 
         // Profile
         if let Some(profile) = h264.profile {
@@ -456,23 +624,15 @@ impl Encoder {
                 H264Profile::ConstrainedBaseline => 256,
                 H264Profile::ConstrainedHigh => 257,
             };
-            set_property_int64(component, sys::AMF_VIDEO_ENCODER_PROFILE, profile_val)?;
+            set_property_int64(prop, sys::str::AMF_VIDEO_ENCODER_PROFILE, profile_val)?;
         }
 
         // Frame size
         set_property_size(
-            component,
-            sys::AMF_VIDEO_ENCODER_FRAMESIZE,
+            prop,
+            sys::str::AMF_VIDEO_ENCODER_FRAMESIZE,
             config.width as amf_int32,
             config.height as amf_int32,
-        )?;
-
-        // Frame rate
-        set_property_rate(
-            component,
-            sys::AMF_VIDEO_ENCODER_FRAMERATE,
-            config.framerate_num,
-            config.framerate_den,
         )?;
 
         // Rate control
@@ -487,78 +647,50 @@ impl Encoder {
             RateControlMode::HighQualityCbr => 6, // AMF_VIDEO_ENCODER_RATE_CONTROL_METHOD_HIGH_QUALITY_CBR
         };
         set_property_int64(
-            component,
-            sys::AMF_VIDEO_ENCODER_RATE_CONTROL_METHOD,
+            prop,
+            sys::str::AMF_VIDEO_ENCODER_RATE_CONTROL_METHOD,
             rc_method,
         )?;
 
-        // Bitrate
-        if let Some(target_kbps) = config.target_kbps {
-            set_property_int64(
-                component,
-                sys::AMF_VIDEO_ENCODER_TARGET_BITRATE,
-                target_kbps as amf_int64 * 1000,
-            )?;
-        }
-        if let Some(max_kbps) = config.max_kbps {
-            set_property_int64(
-                component,
-                sys::AMF_VIDEO_ENCODER_PEAK_BITRATE,
-                max_kbps as amf_int64 * 1000,
-            )?;
-        }
-
-        // QP
-        if let Some(qpi) = config.qpi {
-            set_property_int64(component, sys::AMF_VIDEO_ENCODER_QP_I, qpi as amf_int64)?;
-        }
-        if let Some(qpp) = config.qpp {
-            set_property_int64(component, sys::AMF_VIDEO_ENCODER_QP_P, qpp as amf_int64)?;
-        }
-        if let Some(qpb) = config.qpb {
-            set_property_int64(component, sys::AMF_VIDEO_ENCODER_QP_B, qpb as amf_int64)?;
-        }
-
-        // GOP / IDR
-        if let Some(gop) = config.gop_pic_size {
-            set_property_int64(
-                component,
-                sys::AMF_VIDEO_ENCODER_IDR_PERIOD,
-                gop as amf_int64,
-            )?;
-        }
+        let params = ReconfigureParams {
+            target_kbps: config.target_kbps,
+            max_kbps: config.max_kbps,
+            qpi: config.qpi,
+            qpp: config.qpp,
+            qpb: config.qpb,
+            gop_pic_size: config.gop_pic_size,
+            ..ReconfigureParams::default()
+        };
+        Self::set_h264_dynamic_properties(
+            prop,
+            &params,
+            Some((config.framerate_num, config.framerate_den)),
+        )?;
 
         Ok(())
     }
 
     /// HEVC 固有のプロパティを設定する
     fn set_hevc_properties(
-        component: *mut AMFComponent,
+        prop: *mut AMFPropertyStorage,
         config: &EncoderConfig,
         hevc: &HevcEncoderConfig,
     ) -> Result<(), Error> {
-        set_property_int64(component, sys::AMF_VIDEO_ENCODER_HEVC_USAGE, 0)?;
+        set_property_int64(prop, sys::str::AMF_VIDEO_ENCODER_HEVC_USAGE, 0)?;
 
         if let Some(profile) = hevc.profile {
             let profile_val: amf_int64 = match profile {
                 HevcProfile::Main => 1,
                 HevcProfile::Main10 => 2,
             };
-            set_property_int64(component, sys::AMF_VIDEO_ENCODER_HEVC_PROFILE, profile_val)?;
+            set_property_int64(prop, sys::str::AMF_VIDEO_ENCODER_HEVC_PROFILE, profile_val)?;
         }
 
         set_property_size(
-            component,
-            sys::AMF_VIDEO_ENCODER_HEVC_FRAMESIZE,
+            prop,
+            sys::str::AMF_VIDEO_ENCODER_HEVC_FRAMESIZE,
             config.width as amf_int32,
             config.height as amf_int32,
-        )?;
-
-        set_property_rate(
-            component,
-            sys::AMF_VIDEO_ENCODER_HEVC_FRAMERATE,
-            config.framerate_num,
-            config.framerate_den,
         )?;
 
         // HEVC のレート制御は列挙値の順序が H.264 と異なる
@@ -573,47 +705,28 @@ impl Encoder {
             RateControlMode::HighQualityCbr => 6, // AMF_VIDEO_ENCODER_HEVC_RATE_CONTROL_METHOD_HIGH_QUALITY_CBR
         };
         set_property_int64(
-            component,
-            sys::AMF_VIDEO_ENCODER_HEVC_RATE_CONTROL_METHOD,
+            prop,
+            sys::str::AMF_VIDEO_ENCODER_HEVC_RATE_CONTROL_METHOD,
             rc_method,
         )?;
 
-        if let Some(target_kbps) = config.target_kbps {
-            set_property_int64(
-                component,
-                sys::AMF_VIDEO_ENCODER_HEVC_TARGET_BITRATE,
-                target_kbps as amf_int64 * 1000,
-            )?;
-        }
-        if let Some(max_kbps) = config.max_kbps {
-            set_property_int64(
-                component,
-                sys::AMF_VIDEO_ENCODER_HEVC_PEAK_BITRATE,
-                max_kbps as amf_int64 * 1000,
-            )?;
-        }
-
-        if let Some(qpi) = config.qpi {
-            set_property_int64(
-                component,
-                sys::AMF_VIDEO_ENCODER_HEVC_QP_I,
-                qpi as amf_int64,
-            )?;
-        }
-        if let Some(qpp) = config.qpp {
-            set_property_int64(
-                component,
-                sys::AMF_VIDEO_ENCODER_HEVC_QP_P,
-                qpp as amf_int64,
-            )?;
-        }
-        // AMF HEVC エンコーダーには B フレーム用の QP プロパティが存在しないため
-        // qpb は設定しない (H.264 の AMF_VIDEO_ENCODER_QP_B に相当するものがない)
+        let params = ReconfigureParams {
+            target_kbps: config.target_kbps,
+            max_kbps: config.max_kbps,
+            qpi: config.qpi,
+            qpp: config.qpp,
+            ..ReconfigureParams::default()
+        };
+        Self::set_hevc_dynamic_properties(
+            prop,
+            &params,
+            Some((config.framerate_num, config.framerate_den)),
+        )?;
 
         if let Some(gop) = config.gop_pic_size {
             set_property_int64(
-                component,
-                sys::AMF_VIDEO_ENCODER_HEVC_GOP_SIZE,
+                prop,
+                sys::str::AMF_VIDEO_ENCODER_HEVC_GOP_SIZE,
                 gop as amf_int64,
             )?;
         }
@@ -623,24 +736,17 @@ impl Encoder {
 
     /// AV1 固有のプロパティを設定する
     fn set_av1_properties(
-        component: *mut AMFComponent,
+        prop: *mut AMFPropertyStorage,
         config: &EncoderConfig,
         _av1: &Av1EncoderConfig,
     ) -> Result<(), Error> {
-        set_property_int64(component, sys::AMF_VIDEO_ENCODER_AV1_USAGE, 0)?;
+        set_property_int64(prop, sys::str::AMF_VIDEO_ENCODER_AV1_USAGE, 0)?;
 
         set_property_size(
-            component,
-            sys::AMF_VIDEO_ENCODER_AV1_FRAMESIZE,
+            prop,
+            sys::str::AMF_VIDEO_ENCODER_AV1_FRAMESIZE,
             config.width as amf_int32,
             config.height as amf_int32,
-        )?;
-
-        set_property_rate(
-            component,
-            sys::AMF_VIDEO_ENCODER_AV1_FRAMERATE,
-            config.framerate_num,
-            config.framerate_den,
         )?;
 
         // AMF_VIDEO_ENCODER_AV1_RATE_CONTROL_METHOD_ENUM の値
@@ -655,48 +761,26 @@ impl Encoder {
             RateControlMode::HighQualityCbr => 6, // AMF_VIDEO_ENCODER_AV1_RATE_CONTROL_METHOD_HIGH_QUALITY_CBR
         };
         set_property_int64(
-            component,
-            sys::AMF_VIDEO_ENCODER_AV1_RATE_CONTROL_METHOD,
+            prop,
+            sys::str::AMF_VIDEO_ENCODER_AV1_RATE_CONTROL_METHOD,
             rc_method,
         )?;
 
-        if let Some(target_kbps) = config.target_kbps {
-            set_property_int64(
-                component,
-                sys::AMF_VIDEO_ENCODER_AV1_TARGET_BITRATE,
-                target_kbps as amf_int64 * 1000,
-            )?;
-        }
-        if let Some(max_kbps) = config.max_kbps {
-            set_property_int64(
-                component,
-                sys::AMF_VIDEO_ENCODER_AV1_PEAK_BITRATE,
-                max_kbps as amf_int64 * 1000,
-            )?;
-        }
-
-        if let Some(qpi) = config.qpi {
-            set_property_int64(
-                component,
-                sys::AMF_VIDEO_ENCODER_AV1_Q_INDEX_INTRA,
-                qpi as amf_int64,
-            )?;
-        }
-        if let Some(qpp) = config.qpp {
-            set_property_int64(
-                component,
-                sys::AMF_VIDEO_ENCODER_AV1_Q_INDEX_INTER,
-                qpp as amf_int64,
-            )?;
-        }
-
-        if let Some(gop) = config.gop_pic_size {
-            set_property_int64(
-                component,
-                sys::AMF_VIDEO_ENCODER_AV1_GOP_SIZE,
-                gop as amf_int64,
-            )?;
-        }
+        let params = ReconfigureParams {
+            target_kbps: config.target_kbps,
+            max_kbps: config.max_kbps,
+            qpi: config.qpi,
+            qpp: config.qpp,
+            // AV1 の初期設定では従来どおり qpb は設定しない
+            qpb: None,
+            gop_pic_size: config.gop_pic_size,
+            ..ReconfigureParams::default()
+        };
+        Self::set_av1_dynamic_properties(
+            prop,
+            &params,
+            Some((config.framerate_num, config.framerate_den)),
+        )?;
 
         Ok(())
     }
@@ -1217,24 +1301,40 @@ impl Encoder {
 
     /// IDR フレームを強制する
     fn force_picture_type(&self, surface: *mut AMFSurface) -> Result<(), Error> {
-        let prop_name = match &self.codec_config {
-            CodecConfig::H264(_) => sys::AMF_VIDEO_ENCODER_FORCE_PICTURE_TYPE,
-            CodecConfig::Hevc(_) => sys::AMF_VIDEO_ENCODER_HEVC_FORCE_PICTURE_TYPE,
-            CodecConfig::Av1(_) => sys::AMF_VIDEO_ENCODER_AV1_FORCE_FRAME_TYPE,
-        };
-        // IDR = 2 (H.264), IDR = 2 (HEVC), KEY = 1 (AV1)
-        let force_type: amf_int64 = match &self.codec_config {
-            CodecConfig::H264(_) => 2, // AMF_VIDEO_ENCODER_PICTURE_TYPE_IDR
-            CodecConfig::Hevc(_) => 2, // AMF_VIDEO_ENCODER_HEVC_PICTURE_TYPE_IDR
-            CodecConfig::Av1(_) => 1,  // AMF_VIDEO_ENCODER_AV1_FORCE_FRAME_TYPE_KEY
-        };
-        let name_w = sys::to_wstring(prop_name);
-        let var = AMFVariantStruct::from_int64(force_type);
-        let result = unsafe {
-            let vtbl = &*(*surface).pVtbl;
-            require_vtbl_fn(vtbl.SetProperty, "SetProperty")?(surface, name_w.as_ptr(), var)
-        };
-        Error::check(result, "AMFSurface::SetProperty(ForcePictureType)")
+        let prop = surface as *mut AMFPropertyStorage;
+        match &self.codec_config {
+            CodecConfig::H264(_) => {
+                set_property_int64(
+                    prop,
+                    sys::str::AMF_VIDEO_ENCODER_FORCE_PICTURE_TYPE,
+                    sys::AMF_VIDEO_ENCODER_PICTURE_TYPE_ENUM_AMF_VIDEO_ENCODER_PICTURE_TYPE_IDR
+                        .into(),
+                )?;
+                set_property_int64(prop, sys::str::AMF_VIDEO_ENCODER_INSERT_SPS, 1)?;
+                set_property_int64(prop, sys::str::AMF_VIDEO_ENCODER_INSERT_PPS, 1)?;
+            }
+            CodecConfig::Hevc(_) => {
+                set_property_int64(
+                    prop,
+                    sys::str::AMF_VIDEO_ENCODER_HEVC_FORCE_PICTURE_TYPE,
+                    sys::AMF_VIDEO_ENCODER_HEVC_PICTURE_TYPE_ENUM_AMF_VIDEO_ENCODER_HEVC_PICTURE_TYPE_IDR.into(),
+                )?;
+                set_property_int64(prop, sys::str::AMF_VIDEO_ENCODER_HEVC_INSERT_HEADER, 1)?;
+            }
+            CodecConfig::Av1(_) => {
+                set_property_int64(
+                    prop,
+                    sys::str::AMF_VIDEO_ENCODER_AV1_FORCE_FRAME_TYPE,
+                    sys::AMF_VIDEO_ENCODER_AV1_FORCE_FRAME_TYPE_ENUM_AMF_VIDEO_ENCODER_AV1_FORCE_FRAME_TYPE_KEY.into(),
+                )?;
+                set_property_int64(
+                    prop,
+                    sys::str::AMF_VIDEO_ENCODER_AV1_FORCE_INSERT_SEQUENCE_HEADER,
+                    1,
+                )?;
+            }
+        }
+        Ok(())
     }
 
     /// AMFData から EncodedFrame を抽出してキューに追加する
@@ -1324,9 +1424,9 @@ impl Encoder {
     /// 出力バッファからピクチャタイプを取得する
     fn get_output_picture_type(&self, buffer: *mut AMFBuffer) -> PictureType {
         let prop_name = match &self.codec_config {
-            CodecConfig::H264(_) => sys::AMF_VIDEO_ENCODER_OUTPUT_DATA_TYPE,
-            CodecConfig::Hevc(_) => sys::AMF_VIDEO_ENCODER_HEVC_OUTPUT_DATA_TYPE,
-            CodecConfig::Av1(_) => sys::AMF_VIDEO_ENCODER_AV1_OUTPUT_FRAME_TYPE,
+            CodecConfig::H264(_) => sys::str::AMF_VIDEO_ENCODER_OUTPUT_DATA_TYPE,
+            CodecConfig::Hevc(_) => sys::str::AMF_VIDEO_ENCODER_HEVC_OUTPUT_DATA_TYPE,
+            CodecConfig::Av1(_) => sys::str::AMF_VIDEO_ENCODER_AV1_OUTPUT_FRAME_TYPE,
         };
         let name_w = sys::to_wstring(prop_name);
         let mut var = AMFVariantStruct::empty();
@@ -1443,9 +1543,9 @@ impl Drop for Encoder {
 // ヘルパー関数
 // ---------------------------------------------------------------------------
 
-/// AMFComponent に Int64 プロパティを設定する
+/// AMFPropertyStorage に Int64 プロパティを設定する
 fn set_property_int64(
-    component: *mut AMFComponent,
+    component: *mut AMFPropertyStorage,
     name: &str,
     value: amf_int64,
 ) -> Result<(), Error> {
@@ -1458,9 +1558,9 @@ fn set_property_int64(
     Error::check(result, format!("SetProperty({name})"))
 }
 
-/// AMFComponent に Size プロパティを設定する
+/// AMFPropertyStorage に Size プロパティを設定する
 fn set_property_size(
-    component: *mut AMFComponent,
+    component: *mut AMFPropertyStorage,
     name: &str,
     width: amf_int32,
     height: amf_int32,
@@ -1474,9 +1574,9 @@ fn set_property_size(
     Error::check(result, format!("SetProperty({name})"))
 }
 
-/// AMFComponent に Rate プロパティを設定する
+/// AMFPropertyStorage に Rate プロパティを設定する
 fn set_property_rate(
-    component: *mut AMFComponent,
+    component: *mut AMFPropertyStorage,
     name: &str,
     num: u32,
     den: u32,

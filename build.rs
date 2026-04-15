@@ -65,19 +65,23 @@ fn main() {
     std::fs::write(
         &wrapper_path,
         [
-            "#include \"core/Platform.h\"",
-            "#include \"core/Result.h\"",
-            "#include \"core/Interface.h\"",
-            "#include \"core/Variant.h\"",
-            "#include \"core/PropertyStorage.h\"",
-            "#include \"core/PropertyStorageEx.h\"",
-            "#include \"core/Data.h\"",
-            "#include \"core/Plane.h\"",
-            "#include \"core/Surface.h\"",
-            "#include \"core/Buffer.h\"",
-            "#include \"core/Context.h\"",
-            "#include \"core/Factory.h\"",
-            "#include \"components/Component.h\"",
+            "#include <core/Platform.h>",
+            "#include <core/Result.h>",
+            "#include <core/Interface.h>",
+            "#include <core/Variant.h>",
+            "#include <core/PropertyStorage.h>",
+            "#include <core/PropertyStorageEx.h>",
+            "#include <core/Data.h>",
+            "#include <core/Plane.h>",
+            "#include <core/Surface.h>",
+            "#include <core/Buffer.h>",
+            "#include <core/Context.h>",
+            "#include <core/Factory.h>",
+            "#include <components/Component.h>",
+            "#include <components/VideoEncoderVCE.h>",
+            "#include <components/VideoEncoderHEVC.h>",
+            "#include <components/VideoEncoderAV1.h>",
+            "#include <components/VideoDecoderUVD.h>",
         ]
         .join("\n"),
     )
@@ -225,6 +229,8 @@ pub struct AMFFactory { pub pVtbl: *const std::ffi::c_void }
 pub struct AMFContext { pub pVtbl: *const std::ffi::c_void }
 #[repr(C)]
 pub struct AMFContext1 { pub pVtbl: *const std::ffi::c_void }
+#[repr(C)]
+pub struct AMFPropertyStorage { pub pVtbl: *const std::ffi::c_void }
 #[repr(C)]
 pub struct AMFComponent { pub pVtbl: *const std::ffi::c_void }
 #[repr(C)]

@@ -31,6 +31,7 @@ AMF ランタイムライブラリ (libamfrt64.so.1) は AMD GPU ドライバー
 - エンコード入力フォーマット選択 (NV12 / YV12 / I420 / BGRA / ARGB / RGBA / YUY2 / UYVY / P010 / P012 / P016 / Y210 / AYUV / Y410 / Y416)
 - デコード出力は NV12 フォーマット
 - フレーム単位のエンコードオプション (IDR フレーム強制)
+- エンコード中の動的プロパティ再設定 (`reconfigure`)
 - CQP / CBR / VBR / LCVBR / QVBR / HQVBR / HQCBR レート制御モード
 - ビルド時に GitHub から AMF ヘッダーを自動取得
 
@@ -65,7 +66,7 @@ DOCS_RS=1 cargo doc --no-deps
 ```rust
 use shiguredo_amf::{
     CodecConfig, EncodeOptions, Encoder, EncoderConfig, FrameFormat,
-    H264EncoderConfig, H264Profile, RateControlMode, frame_type,
+    H264EncoderConfig, H264Profile, RateControlMode, ReconfigureParams, frame_type,
 };
 
 let mut config = EncoderConfig::new(
@@ -82,6 +83,14 @@ let mut config = EncoderConfig::new(
 config.target_kbps = Some(5_000);
 
 let mut encoder = Encoder::new(config)?;
+
+// エンコード中に動的プロパティを再設定
+encoder.reconfigure(ReconfigureParams {
+    framerate_num: Some(15),
+    framerate_den: Some(1),
+    target_kbps: Some(3_000),
+    ..ReconfigureParams::default()
+})?;
 
 // フレームデータをエンコード
 let options = EncodeOptions { frame_type: frame_type::UNKNOWN };
@@ -105,6 +114,14 @@ while let Some(encoded) = encoder.next_frame() {
     println!("flushed: {} bytes", encoded.data().len());
 }
 ```
+
+`reconfigure` で変更できる項目は codec ごとに異なります。
+
+- H.264: `framerate_num` / `framerate_den` / `target_kbps` / `max_kbps` / `qpi` / `qpp` / `qpb` / `gop_pic_size`
+- H.265: `framerate_num` / `framerate_den` / `target_kbps` / `max_kbps` / `qpi` / `qpp`
+- AV1: `framerate_num` / `framerate_den` / `target_kbps` / `max_kbps` / `qpi` / `qpp` / `qpb` / `gop_pic_size`
+
+`framerate_num` と `framerate_den` は必ず同時に指定してください。
 
 ### デコード
 
