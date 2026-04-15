@@ -234,9 +234,9 @@ impl ProbeContext {
     /// エンコーダーの CreateComponent を試みて対応状況を返す
     fn try_create_encoder(&self, codec: VideoCodecType) -> bool {
         let component_id = match codec {
-            VideoCodecType::H264 => sys::AMFVideoEncoderVCE_AVC,
-            VideoCodecType::Hevc => sys::AMFVideoEncoder_HEVC,
-            VideoCodecType::Av1 => sys::AMFVideoEncoder_AV1,
+            VideoCodecType::H264 => sys::str::AMFVideoEncoderVCE_AVC,
+            VideoCodecType::Hevc => sys::str::AMFVideoEncoder_HEVC,
+            VideoCodecType::Av1 => sys::str::AMFVideoEncoder_AV1,
         };
         self.try_create_component(component_id)
     }
@@ -244,9 +244,9 @@ impl ProbeContext {
     /// デコーダーの CreateComponent を試みて対応状況を返す
     fn try_create_decoder(&self, codec: VideoCodecType) -> bool {
         let component_id = match codec {
-            VideoCodecType::H264 => sys::AMFVideoDecoderUVD_H264_AVC,
-            VideoCodecType::Hevc => sys::AMFVideoDecoderHW_H265_HEVC,
-            VideoCodecType::Av1 => sys::AMFVideoDecoderHW_AV1,
+            VideoCodecType::H264 => sys::str::AMFVideoDecoderUVD_H264_AVC,
+            VideoCodecType::Hevc => sys::str::AMFVideoDecoderHW_H265_HEVC,
+            VideoCodecType::Av1 => sys::str::AMFVideoDecoderHW_AV1,
         };
         self.try_create_component(component_id)
     }

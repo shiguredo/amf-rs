@@ -17,7 +17,9 @@ include!(concat!(env!("OUT_DIR"), "/metadata.rs"));
 include!(concat!(env!("OUT_DIR"), "/bindings.rs"));
 
 // ヘッダーのワイド文字列マクロから自動生成されたプロパティ名定数
-include!(concat!(env!("OUT_DIR"), "/properties.rs"));
+pub mod str {
+    include!(concat!(env!("OUT_DIR"), "/properties.rs"));
+}
 
 // ---------------------------------------------------------------------------
 // bindgen で生成できない定義を手動で追加する

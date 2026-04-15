@@ -92,9 +92,9 @@ impl Decoder {
         AmfLibrary::init_vulkan(context)?;
 
         let component_id = match config.codec {
-            DecoderCodec::H264 => sys::AMFVideoDecoderUVD_H264_AVC,
-            DecoderCodec::Hevc => sys::AMFVideoDecoderHW_H265_HEVC,
-            DecoderCodec::Av1 => sys::AMFVideoDecoderHW_AV1,
+            DecoderCodec::H264 => sys::str::AMFVideoDecoderUVD_H264_AVC,
+            DecoderCodec::Hevc => sys::str::AMFVideoDecoderHW_H265_HEVC,
+            DecoderCodec::Av1 => sys::str::AMFVideoDecoderHW_AV1,
         };
         let component_id_w = sys::to_wstring(component_id);
 
