@@ -1,9 +1,7 @@
 //! コーデック情報の照会
 
-use std::ptr;
-
 use crate::AmfLibrary; // AmfLibrary::load() / factory() / create_context() で使用
-use crate::sys::{self, AMF_RESULT, AMFComponent, AMFContext};
+use crate::sys::{self, AMFContext};
 
 // ---------------------------------------------------------------------------
 // 公開型
@@ -254,39 +252,17 @@ impl ProbeContext {
     ///
     /// 成功した場合はコンポーネントを即座に解放して true を返す。
     fn try_create_component(&self, component_id: &str) -> bool {
-        let component_id_w = sys::to_wstring(component_id);
-        let mut component: *mut AMFComponent = ptr::null_mut();
-
         let lib = AmfLibrary::instance();
-        let Ok(factory) = lib.factory_ptr() else {
-            return false;
+        let component = match lib.create_component(self.context, component_id) {
+            Ok(c) => c,
+            Err(_) => return false,
         };
-        let create_fn = unsafe {
-            let vtbl = &*(*factory).pVtbl;
-            vtbl.CreateComponent
-        };
-        let Some(create_fn) = create_fn else {
-            return false;
-        };
-        let result = unsafe {
-            create_fn(
-                factory,
-                self.context,
-                component_id_w.as_ptr(),
-                &mut component,
-            )
-        };
-
-        if result != AMF_RESULT::AMF_OK || component.is_null() {
-            return false;
-        }
 
         // エンコーダーは Init なしでは Terminate できないためスキップする。
         // デコーダーは Init(NV12, 0, 0) で初期化できるが、probe 目的では不要。
         // CreateComponent が成功すればそのコーデックは対応している。
         unsafe {
             let vtbl = &*(*component).pVtbl;
-            // Init を呼ばずに作成したコンポーネントでも Release は必要
             if let Some(release) = vtbl.Release {
                 release(component);
             }

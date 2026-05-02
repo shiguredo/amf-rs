@@ -19,7 +19,7 @@ use std::sync::{LazyLock, Mutex};
 
 use error::require_vtbl_fn;
 use sys::{
-    AMF_DLL_NAME, AMF_FULL_VERSION, AMFContext, AMFContext1, AMFFactory, AMFInit_Fn,
+    AMF_DLL_NAME, AMF_FULL_VERSION, AMFComponent, AMFContext, AMFContext1, AMFFactory, AMFInit_Fn,
     AMFQueryVersion_Fn, IID_AMF_CONTEXT1, amf_uint64,
 };
 
@@ -78,7 +78,7 @@ impl AmfLibrary {
         &AMF_LIBRARY
     }
 
-    /// プロセス全体で単一の AmfLibrary インスタンスを返す
+    /// プロセス全体で単一の AmfLibraryInner インスタンスを返す
     ///
     /// 初回呼び出し時に AMF ランタイムをロードし、2 回目以降はキャッシュされた
     /// インスタンスを返す。
@@ -112,12 +112,6 @@ impl AmfLibrary {
             *inner = Some(AmfLibraryInner { lib, factory });
         }
         Ok(inner.as_mut().unwrap())
-    }
-
-    pub fn factory_ptr(&self) -> Result<*mut AMFFactory, Error> {
-        let mut inner = self.inner.lock().unwrap();
-        let inner = Self::ensure_inner(&mut inner)?;
-        Ok(inner.factory)
     }
 
     /// AMF ランタイムのバージョンを問い合わせる
@@ -168,10 +162,6 @@ impl AmfLibrary {
     ///
     /// AMFContext から QueryInterface で AMFContext1 を取得し、
     /// InitVulkan(NULL) でデフォルトの Vulkan デバイスを初期化する。
-    ///
-    /// この関数は内部で AMFFactoryHelper::Init を呼び出し、
-    /// 共有の AMFFactory 状態にアクセスするため、
-    /// LOCK で排他制御する。
     pub(crate) fn init_vulkan(&self, context: *mut AMFContext) -> Result<(), Error> {
         let _guard = self.inner.lock().unwrap();
 
@@ -195,11 +185,13 @@ impl AmfLibrary {
 
         let context1 = context1_ptr as *mut AMFContext1;
 
+        // Vulkan デバイスを初期化する (NULL = デフォルトデバイス)
         let result = unsafe {
             let vtbl = &*(*context1).pVtbl;
             require_vtbl_fn(vtbl.InitVulkan, "InitVulkan")?(context1, ptr::null_mut())
         };
 
+        // Context1 の参照を解放する
         unsafe {
             let vtbl = &*(*context1).pVtbl;
             if let Some(release) = vtbl.Release {
@@ -209,4 +201,34 @@ impl AmfLibrary {
 
         Error::check(result, "AMFContext1::InitVulkan")
     }
+
+    /// AMFComponent を作成する
+    pub(crate) fn create_component(
+        &self,
+        context: *mut AMFContext,
+        component_id: &str,
+    ) -> Result<*mut AMFComponent, Error> {
+        let mut inner = self.inner.lock().unwrap();
+        let inner = Self::ensure_inner(&mut inner)?;
+        let component_id_w = sys::to_wstring(component_id);
+        let mut component: *mut AMFComponent = ptr::null_mut();
+        let result = unsafe {
+            let vtbl = &*(*inner.factory).pVtbl;
+            require_vtbl_fn(vtbl.CreateComponent, "CreateComponent")?(
+                inner.factory,
+                context,
+                component_id_w.as_ptr(),
+                &mut component,
+            )
+        };
+        Error::check(result, "AMFFactory::CreateComponent")?;
+        if component.is_null() {
+            return Err(Error::new_custom(
+                "AmfLibrary::create_component",
+                "CreateComponent returned null",
+            ));
+        }
+        Ok(component)
+    }
+
 }

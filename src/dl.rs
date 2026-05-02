@@ -14,10 +14,7 @@ impl std::fmt::Debug for DynLib {
     }
 }
 
-// 安全性: DynLib の内部 handle は構築後に変更されず、読み取りのみが行われる。
-// したがって Sync も安全である。
 unsafe impl Send for DynLib {}
-unsafe impl Sync for DynLib {}
 
 impl DynLib {
     /// シンボルを取得して指定の型として返す

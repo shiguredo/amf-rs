@@ -6,7 +6,7 @@
 use std::collections::VecDeque;
 use std::ptr;
 
-use crate::AmfLibrary; // AmfLibrary::load() / factory() / create_context() で使用
+use crate::AmfLibrary;
 use crate::error::{Error, positive_i32_to_usize, require_vtbl_fn};
 use crate::sys::{
     self, AMF_MEMORY_TYPE, AMF_PLANE_TYPE, AMF_RESULT, AMF_SECOND, AMF_SURFACE_FORMAT, AMFBuffer,
@@ -381,28 +381,9 @@ impl Encoder {
             CodecConfig::Hevc(_) => sys::str::AMFVideoEncoder_HEVC,
             CodecConfig::Av1(_) => sys::str::AMFVideoEncoder_AV1,
         };
-        let component_id_w = sys::to_wstring(component_id);
 
         // コンポーネントを作成する
-        let mut component: *mut AMFComponent = ptr::null_mut();
-        let result = unsafe {
-            let factory = lib.factory_ptr()?;
-            let vtbl = &*(*factory).pVtbl;
-            require_vtbl_fn(vtbl.CreateComponent, "CreateComponent")?(
-                factory,
-                context,
-                component_id_w.as_ptr(),
-                &mut component,
-            )
-        };
-        Error::check(result, "AMFFactory::CreateComponent")?;
-
-        if component.is_null() {
-            return Err(Error::new_custom(
-                "Encoder::new",
-                "CreateComponent returned null",
-            ));
-        }
+        let component = lib.create_component(context, component_id)?;
 
         let surface_format = config.frame_format.to_amf();
 

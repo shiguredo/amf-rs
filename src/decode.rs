@@ -6,7 +6,7 @@
 use std::collections::VecDeque;
 use std::ptr;
 
-use crate::AmfLibrary; // AmfLibrary::load() / factory() / create_context() で使用
+use crate::AmfLibrary;
 use crate::error::{Error, positive_i32_to_usize, require_vtbl_fn};
 use crate::sys::{
     self, AMF_MEMORY_TYPE, AMF_PLANE_TYPE, AMF_RESULT, AMF_SURFACE_FORMAT, AMFBuffer, AMFComponent,
@@ -94,27 +94,8 @@ impl Decoder {
             DecoderCodec::Hevc => sys::str::AMFVideoDecoderHW_H265_HEVC,
             DecoderCodec::Av1 => sys::str::AMFVideoDecoderHW_AV1,
         };
-        let component_id_w = sys::to_wstring(component_id);
 
-        let mut component: *mut AMFComponent = ptr::null_mut();
-        let result = unsafe {
-            let factory = lib.factory_ptr()?;
-            let vtbl = &*(*factory).pVtbl;
-            require_vtbl_fn(vtbl.CreateComponent, "CreateComponent")?(
-                factory,
-                context,
-                component_id_w.as_ptr(),
-                &mut component,
-            )
-        };
-        Error::check(result, "AMFFactory::CreateComponent")?;
-
-        if component.is_null() {
-            return Err(Error::new_custom(
-                "Decoder::new",
-                "CreateComponent returned null",
-            ));
-        }
+        let component = lib.create_component(context, component_id)?;
 
         // デコーダーを初期化する (解像度は 0,0 でストリームから自動検出)
         let result = unsafe {
