@@ -6,7 +6,7 @@
 use std::collections::VecDeque;
 use std::ptr;
 
-use crate::AmfLibrary;
+use crate::AmfLibrary; // AmfLibrary::load() / factory() / create_context() で使用
 use crate::error::{Error, positive_i32_to_usize, require_vtbl_fn};
 use crate::sys::{
     self, AMF_MEMORY_TYPE, AMF_PLANE_TYPE, AMF_RESULT, AMF_SECOND, AMF_SURFACE_FORMAT, AMFBuffer,
@@ -316,8 +316,6 @@ pub struct Encoder {
     framerate_num: u64,
     framerate_den: u64,
     codec_config: CodecConfig,
-    // ライブラリハンドルを保持して Drop 順序で dlclose が最後に呼ばれることを保証する
-    _lib: AmfLibrary,
 }
 
 // 安全性:
@@ -371,11 +369,11 @@ impl Encoder {
             ));
         }
 
-        let lib = AmfLibrary::load()?;
+        let lib = AmfLibrary::instance();
         let context = lib.create_context()?;
 
         // Linux では Vulkan/OpenCL でコンテキストを初期化する
-        AmfLibrary::init_vulkan(context)?;
+        lib.init_vulkan(context)?;
 
         // コーデック固有のコンポーネント ID を選択する
         let component_id = match &config.codec {
@@ -388,9 +386,10 @@ impl Encoder {
         // コンポーネントを作成する
         let mut component: *mut AMFComponent = ptr::null_mut();
         let result = unsafe {
-            let vtbl = &*(*lib.factory()).pVtbl;
+            let factory = lib.factory_ptr()?;
+            let vtbl = &*(*factory).pVtbl;
             require_vtbl_fn(vtbl.CreateComponent, "CreateComponent")?(
-                lib.factory(),
+                factory,
                 context,
                 component_id_w.as_ptr(),
                 &mut component,
@@ -423,7 +422,6 @@ impl Encoder {
         Error::check(result, "AMFComponent::Init")?;
 
         Ok(Self {
-            _lib: lib,
             context,
             component,
             surface_format,

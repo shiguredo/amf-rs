@@ -2,7 +2,7 @@
 
 use std::ptr;
 
-use crate::AmfLibrary;
+use crate::AmfLibrary; // AmfLibrary::load() / factory() / create_context() で使用
 use crate::sys::{self, AMF_RESULT, AMFComponent, AMFContext};
 
 // ---------------------------------------------------------------------------
@@ -216,7 +216,6 @@ fn encoding_info(codec: VideoCodecType) -> EncodingInfo {
 ///
 /// Drop で AMFContext を安全に解放する。
 struct ProbeContext {
-    lib: AmfLibrary,
     context: *mut AMFContext,
 }
 
@@ -225,10 +224,10 @@ impl ProbeContext {
     ///
     /// ロードまたは Vulkan 初期化に失敗した場合は None を返す。
     fn new() -> Option<Self> {
-        let lib = AmfLibrary::load().ok()?;
+        let lib = AmfLibrary::instance();
         let context = lib.create_context().ok()?;
-        AmfLibrary::init_vulkan(context).ok()?;
-        Some(Self { lib, context })
+        lib.init_vulkan(context).ok()?;
+        Some(Self { context })
     }
 
     /// エンコーダーの CreateComponent を試みて対応状況を返す
@@ -258,8 +257,12 @@ impl ProbeContext {
         let component_id_w = sys::to_wstring(component_id);
         let mut component: *mut AMFComponent = ptr::null_mut();
 
+        let lib = AmfLibrary::instance();
+        let Ok(factory) = lib.factory_ptr() else {
+            return false;
+        };
         let create_fn = unsafe {
-            let vtbl = &*(*self.lib.factory()).pVtbl;
+            let vtbl = &*(*factory).pVtbl;
             vtbl.CreateComponent
         };
         let Some(create_fn) = create_fn else {
@@ -267,7 +270,7 @@ impl ProbeContext {
         };
         let result = unsafe {
             create_fn(
-                self.lib.factory(),
+                factory,
                 self.context,
                 component_id_w.as_ptr(),
                 &mut component,

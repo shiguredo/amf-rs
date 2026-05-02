@@ -15,6 +15,7 @@ use std::path::Path;
 use std::ptr;
 
 use std::ffi::c_void;
+use std::sync::{LazyLock, Mutex};
 
 use error::require_vtbl_fn;
 use sys::{
@@ -43,54 +44,87 @@ pub mod ffi {
     pub use crate::sys::*;
 }
 
-/// AMF ランタイムライブラリのラッパー
+/// プロセス全体で単一の AmfLibrary インスタンス
 ///
-/// dlopen で libamfrt64.so.1 をロードし、AMFFactory を取得する。
-///
-/// AMFFactory は AMFInit が返すグローバルシングルトンであり、
-/// ライブラリ (DynLib) のアンロード時に自動解放されるため
-/// 明示的な Release は不要。Drop は DynLib 側で dlclose を呼ぶ。
-pub struct AmfLibrary {
-    _lib: dl::DynLib,
+/// AMFInit が返す AMFFactory はプロセスシングルトンであるため、
+/// AmfLibrary も 1 つだけ存在すればよい。
+static AMF_LIBRARY: LazyLock<AmfLibrary> = LazyLock::new(AmfLibrary::new);
+
+struct AmfLibraryInner {
+    lib: dl::DynLib,
     factory: *mut AMFFactory,
 }
 
-// 安全性: AMF のコンポーネントはスレッドセーフではない (Sync は実装しない)。
-// Send のみ実装することで、生成スレッドから使用スレッドへの所有権移動を許可する。
-// 同時アクセスはコンパイラが Sync の欠如によって防止する。
+/// AMF ランタイムライブラリのラッパー
+///
+/// dlopen で libamfrt64.so.1 をロードし、AMFFactory を取得する。
+/// プロセス全体で単一のインスタンスのみ存在し、
+/// [`instance()`] で取得する。
+pub struct AmfLibrary {
+    inner: Mutex<Option<AmfLibraryInner>>,
+}
+
 unsafe impl Send for AmfLibrary {}
+unsafe impl Sync for AmfLibrary {}
 
 impl AmfLibrary {
-    /// AMF ランタイムライブラリをロードする
-    pub fn load() -> Result<Self, Error> {
-        let lib = dl::DynLib::open(Path::new(AMF_DLL_NAME)).map_err(|e| {
-            Error::new_custom(
-                "AmfLibrary::load",
-                &format!("failed to load {AMF_DLL_NAME}: {e}"),
-            )
-        })?;
-
-        let amf_init: AMFInit_Fn = unsafe { lib.get(b"AMFInit") }.map_err(|e| {
-            Error::new_custom("AmfLibrary::load", &format!("failed to find AMFInit: {e}"))
-        })?;
-
-        let mut factory: *mut AMFFactory = ptr::null_mut();
-        let result = unsafe { amf_init(AMF_FULL_VERSION, &mut factory) };
-        Error::check(result, "AMFInit")?;
-
-        if factory.is_null() {
-            return Err(Error::new_custom(
-                "AmfLibrary::load",
-                "AMFInit returned null factory",
-            ));
+    fn new() -> Self {
+        Self {
+            inner: Mutex::new(None),
         }
+    }
 
-        Ok(Self { _lib: lib, factory })
+    pub fn instance() -> &'static AmfLibrary {
+        &AMF_LIBRARY
+    }
+
+    /// プロセス全体で単一の AmfLibrary インスタンスを返す
+    ///
+    /// 初回呼び出し時に AMF ランタイムをロードし、2 回目以降はキャッシュされた
+    /// インスタンスを返す。
+    fn ensure_inner(inner: &mut Option<AmfLibraryInner>) -> Result<&mut AmfLibraryInner, Error> {
+        if inner.is_none() {
+            let lib = dl::DynLib::open(Path::new(AMF_DLL_NAME)).map_err(|e| {
+                Error::new_custom(
+                    "AmfLibrary::instance",
+                    &format!("failed to load {AMF_DLL_NAME}: {e}"),
+                )
+            })?;
+
+            let amf_init: AMFInit_Fn = unsafe { lib.get(b"AMFInit") }.map_err(|e| {
+                Error::new_custom(
+                    "AmfLibrary::instance",
+                    &format!("failed to find AMFInit: {e}"),
+                )
+            })?;
+
+            let mut factory: *mut AMFFactory = ptr::null_mut();
+            let result = unsafe { amf_init(AMF_FULL_VERSION, &mut factory) };
+            Error::check(result, "AMFInit")?;
+
+            if factory.is_null() {
+                return Err(Error::new_custom(
+                    "AmfLibrary::instance",
+                    "AMFInit returned null factory",
+                ));
+            }
+
+            *inner = Some(AmfLibraryInner { lib, factory });
+        }
+        Ok(inner.as_mut().unwrap())
+    }
+
+    pub fn factory_ptr(&self) -> Result<*mut AMFFactory, Error> {
+        let mut inner = self.inner.lock().unwrap();
+        let inner = Self::ensure_inner(&mut inner)?;
+        Ok(inner.factory)
     }
 
     /// AMF ランタイムのバージョンを問い合わせる
     pub fn query_version(&self) -> Result<(u16, u16, u16, u16), Error> {
-        let amf_query_version: AMFQueryVersion_Fn = unsafe { self._lib.get(b"AMFQueryVersion") }
+        let mut inner = self.inner.lock().unwrap();
+        let inner = Self::ensure_inner(&mut inner)?;
+        let amf_query_version: AMFQueryVersion_Fn = unsafe { inner.lib.get(b"AMFQueryVersion") }
             .map_err(|e| {
                 Error::new_custom(
                     "AmfLibrary::query_version",
@@ -109,17 +143,14 @@ impl AmfLibrary {
         Ok((major, minor, release, build))
     }
 
-    /// AMFFactory への生ポインタを返す
-    pub(crate) fn factory(&self) -> *mut AMFFactory {
-        self.factory
-    }
-
     /// AMFContext を作成する
     pub(crate) fn create_context(&self) -> Result<*mut AMFContext, Error> {
+        let mut inner = self.inner.lock().unwrap();
+        let inner = Self::ensure_inner(&mut inner)?;
         let mut context: *mut AMFContext = ptr::null_mut();
         let result = unsafe {
-            let vtbl = &*(*self.factory).pVtbl;
-            require_vtbl_fn(vtbl.CreateContext, "CreateContext")?(self.factory, &mut context)
+            let vtbl = &*(*inner.factory).pVtbl;
+            require_vtbl_fn(vtbl.CreateContext, "CreateContext")?(inner.factory, &mut context)
         };
         Error::check(result, "AMFFactory::CreateContext")?;
 
@@ -137,8 +168,13 @@ impl AmfLibrary {
     ///
     /// AMFContext から QueryInterface で AMFContext1 を取得し、
     /// InitVulkan(NULL) でデフォルトの Vulkan デバイスを初期化する。
-    pub(crate) fn init_vulkan(context: *mut AMFContext) -> Result<(), Error> {
-        // AMFContext1 を QueryInterface で取得する
+    ///
+    /// この関数は内部で AMFFactoryHelper::Init を呼び出し、
+    /// 共有の AMFFactory 状態にアクセスするため、
+    /// LOCK で排他制御する。
+    pub(crate) fn init_vulkan(&self, context: *mut AMFContext) -> Result<(), Error> {
+        let _guard = self.inner.lock().unwrap();
+
         let mut context1_ptr: *mut c_void = ptr::null_mut();
         let result = unsafe {
             let vtbl = &*(*context).pVtbl;
@@ -159,13 +195,11 @@ impl AmfLibrary {
 
         let context1 = context1_ptr as *mut AMFContext1;
 
-        // Vulkan デバイスを初期化する (NULL = デフォルトデバイス)
         let result = unsafe {
             let vtbl = &*(*context1).pVtbl;
             require_vtbl_fn(vtbl.InitVulkan, "InitVulkan")?(context1, ptr::null_mut())
         };
 
-        // Context1 の参照を解放する
         unsafe {
             let vtbl = &*(*context1).pVtbl;
             if let Some(release) = vtbl.Release {
