@@ -1,6 +1,6 @@
 //! コーデック情報の照会
 
-use crate::AmfLibrary; // AmfLibrary::load() / factory() / create_context() で使用
+use crate::AmfLibrary;
 use crate::sys::{self, AMFContext};
 
 // ---------------------------------------------------------------------------
