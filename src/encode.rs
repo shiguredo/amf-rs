@@ -5,6 +5,9 @@
 
 use std::collections::VecDeque;
 use std::ptr;
+use std::sync::mpsc;
+use std::thread::JoinHandle;
+use std::time::Duration;
 
 use crate::AmfLibrary;
 use crate::error::{Error, positive_i32_to_usize, require_vtbl_fn};
@@ -255,6 +258,7 @@ pub struct ReconfigureParams {
 }
 
 /// エンコード済みフレーム
+#[derive(Debug)]
 pub struct EncodedFrame {
     data: Vec<u8>,
     pts: i64,
@@ -300,37 +304,56 @@ pub mod frame_type {
 }
 
 // ---------------------------------------------------------------------------
+// ワーカースレッド用コマンド
+// ---------------------------------------------------------------------------
+
+enum WorkerCommand<T> {
+    Submit(T),
+    Finish(mpsc::SyncSender<()>),
+}
+
+// ---------------------------------------------------------------------------
 // エンコーダー実装
 // ---------------------------------------------------------------------------
 
+/// スレッド間で AMFComponent ポインタを安全に送信するためのラッパー
+///
+/// AMFComponent の関数はスレッドセーフであるとドキュメントに記載されているため、
+/// raw ポインタの Send 実装を明示的に許可する。
+struct SendableComponent(*mut AMFComponent);
+unsafe impl Send for SendableComponent {}
+
 /// AMF ハードウェアエンコーダー
-pub struct Encoder {
+pub struct Encoder<T: Send + 'static> {
     context: *mut AMFContext,
     component: *mut AMFComponent,
     surface_format: AMF_SURFACE_FORMAT,
     frame_format: FrameFormat,
     width: i32,
     height: i32,
-    encoded_frames: VecDeque<EncodedFrame>,
     frame_count: u64,
     framerate_num: u64,
     framerate_den: u64,
     codec_config: CodecConfig,
+    cmd_tx: Option<mpsc::Sender<WorkerCommand<T>>>,
+    poll_thread: Option<JoinHandle<()>>,
 }
 
 // 安全性:
-// AMF のコンテキストとコンポーネントはスレッドセーフではない (同時アクセス不可) が、
-// 所有権の移動は許可されている。AMF API Reference では単一スレッドからの逐次アクセスを
-// 要求しており、スレッド親和性 (特定スレッドへの束縛) は要求していない。
-// Vulkan バックエンドの VkDevice/VkQueue も Vulkan 仕様上スレッド間移動が可能で、
-// 同時アクセスのみ外部同期が必要とされる (Vulkan Spec §3.6)。
-//
-// したがって Send (所有権移動) は安全だが、Sync (共有参照による同時アクセス) は安全ではない。
-unsafe impl Send for Encoder {}
+// AMFComponent の関数はスレッドセーフであるため、SubmitInput (メインスレッド) と
+// QueryOutput (ワーカースレッド) の同時呼び出しは安全。
+// Encoder は raw pointer を保持するため Send は手動実装が必要。
+unsafe impl<T: Send + 'static> Send for Encoder<T> {}
 
-impl Encoder {
+impl<T: Send + 'static> Encoder<T> {
     /// エンコーダーを作成して初期化する
-    pub fn new(config: EncoderConfig) -> Result<Self, Error> {
+    ///
+    /// `callback` はエンコード完了時にワーカースレッドから呼び出される。
+    /// 第 1 引数はエンコード済みフレーム、第 2 引数は `encode()` に渡された `T` の値。
+    pub fn new(
+        config: EncoderConfig,
+        callback: impl FnMut(EncodedFrame, T) + Send + 'static,
+    ) -> Result<Self, Error> {
         // 入力パラメータのバリデーション
         if config.width == 0 || config.height == 0 {
             return Err(Error::new_custom(
@@ -402,6 +425,24 @@ impl Encoder {
         };
         Error::check(result, "AMFComponent::Init")?;
 
+        let codec_config = config.codec;
+
+        // ワーカースレッドを起動する
+        let (cmd_tx, cmd_rx) = mpsc::channel::<WorkerCommand<T>>();
+        let worker_component = SendableComponent(component);
+        let worker_codec_config = codec_config.clone();
+        let poll_thread = std::thread::Builder::new()
+            .name("amf-encoder-worker".into())
+            .spawn(move || {
+                worker(worker_component, callback, cmd_rx, worker_codec_config);
+            })
+            .map_err(|e| {
+                Error::new_custom(
+                    "Encoder::new",
+                    &format!("failed to spawn worker thread: {e}"),
+                )
+            })?;
+
         Ok(Self {
             context,
             component,
@@ -409,11 +450,12 @@ impl Encoder {
             frame_format: config.frame_format,
             width: config.width as i32,
             height: config.height as i32,
-            encoded_frames: VecDeque::new(),
             frame_count: 0,
             framerate_num: config.framerate_num as u64,
             framerate_den: config.framerate_den as u64,
-            codec_config: config.codec,
+            codec_config,
+            cmd_tx: Some(cmd_tx),
+            poll_thread: Some(poll_thread),
         })
     }
 
@@ -765,7 +807,14 @@ impl Encoder {
     }
 
     /// フレームをエンコードする
-    pub fn encode(&mut self, frame_data: &[u8], options: &EncodeOptions) -> Result<(), Error> {
+    ///
+    /// `user_data` はエンコード完了時にコールバックへ渡される。
+    pub fn encode(
+        &mut self,
+        frame_data: &[u8],
+        options: &EncodeOptions,
+        user_data: T,
+    ) -> Result<(), Error> {
         let expected_size = self
             .frame_format
             .frame_size(self.width as usize, self.height as usize)
@@ -822,7 +871,7 @@ impl Encoder {
         }
 
         log::debug!("Encoder::encode: SubmitInput");
-        // SubmitInput (INPUT_FULL の場合は出力をポーリングしてリトライする)
+        // SubmitInput (INPUT_FULL の場合はリトライする)
         let max_retries = 100;
         let mut submitted = false;
         for retry in 0..max_retries {
@@ -842,8 +891,7 @@ impl Encoder {
                 if retry > 0 && retry % 10 == 0 {
                     log::debug!("Encoder::SubmitInput: retry={retry}, result={result:?}");
                 }
-                self.poll_output()?;
-                std::thread::sleep(std::time::Duration::from_millis(1));
+                std::thread::sleep(Duration::from_millis(1));
                 continue;
             }
             // その他のエラー: Surface を解放してエラーを返す
@@ -870,9 +918,12 @@ impl Encoder {
 
         self.frame_count += 1;
 
-        log::debug!("Encoder::encode: poll_output");
-        // 出力をポーリングする
-        self.poll_output()?;
+        // ワーカースレッドに Submit コマンドを送信する
+        self.cmd_tx
+            .as_ref()
+            .unwrap()
+            .send(WorkerCommand::Submit(user_data))
+            .map_err(|_| Error::new_custom("Encoder::encode", "worker thread terminated"))?;
 
         Ok(())
     }
@@ -1316,138 +1367,7 @@ impl Encoder {
         Ok(())
     }
 
-    /// AMFData から EncodedFrame を抽出してキューに追加する
-    fn extract_encoded_output(&mut self, data: *mut AMFData) -> Result<(), Error> {
-        let buffer = data as *mut AMFBuffer;
-        let buf_size = unsafe {
-            let vtbl = &*(*buffer).pVtbl;
-            require_vtbl_fn(vtbl.GetSize, "GetSize")?(buffer)
-        };
-        if buf_size == 0 {
-            unsafe {
-                let vtbl = &*(*buffer).pVtbl;
-                if let Some(release) = vtbl.Release {
-                    release(buffer);
-                }
-            }
-            return Err(Error::new_custom(
-                "extract_encoded_output",
-                "buffer size is 0",
-            ));
-        }
-        let buf_native = unsafe {
-            let vtbl = &*(*buffer).pVtbl;
-            require_vtbl_fn(vtbl.GetNative, "GetNative")?(buffer) as *const u8
-        };
-        if buf_native.is_null() {
-            unsafe {
-                let vtbl = &*(*buffer).pVtbl;
-                if let Some(release) = vtbl.Release {
-                    release(buffer);
-                }
-            }
-            return Err(Error::new_custom(
-                "extract_encoded_output",
-                "buffer native pointer is null",
-            ));
-        }
-        let pts = unsafe {
-            let vtbl = &*(*buffer).pVtbl;
-            require_vtbl_fn(vtbl.GetPts, "GetPts")?(buffer)
-        };
-
-        let frame_data = unsafe { std::slice::from_raw_parts(buf_native, buf_size) }.to_vec();
-        let picture_type = self.get_output_picture_type(buffer);
-
-        self.encoded_frames.push_back(EncodedFrame {
-            data: frame_data,
-            pts,
-            picture_type,
-        });
-
-        unsafe {
-            let vtbl = &*(*buffer).pVtbl;
-            if let Some(release) = vtbl.Release {
-                release(buffer);
-            }
-        }
-        Ok(())
-    }
-
-    /// 出力をポーリングしてエンコード済みフレームを取得する
-    fn poll_output(&mut self) -> Result<(), Error> {
-        loop {
-            let mut data: *mut AMFData = ptr::null_mut();
-            let result = unsafe {
-                let vtbl = &*(*self.component).pVtbl;
-                require_vtbl_fn(vtbl.QueryOutput, "QueryOutput")?(self.component, &mut data)
-            };
-
-            log::debug!("poll_output: QueryOutput result={result:?}");
-            if result == AMF_RESULT::AMF_REPEAT || result == AMF_RESULT::AMF_EOF {
-                break;
-            }
-            if result != AMF_RESULT::AMF_OK {
-                log::debug!("poll_output: unexpected result, breaking");
-                break;
-            }
-            if data.is_null() {
-                break;
-            }
-
-            self.extract_encoded_output(data)?;
-        }
-        Ok(())
-    }
-
-    /// 出力バッファからピクチャタイプを取得する
-    fn get_output_picture_type(&self, buffer: *mut AMFBuffer) -> PictureType {
-        let prop_name = match &self.codec_config {
-            CodecConfig::H264(_) => sys::str::AMF_VIDEO_ENCODER_OUTPUT_DATA_TYPE,
-            CodecConfig::Hevc(_) => sys::str::AMF_VIDEO_ENCODER_HEVC_OUTPUT_DATA_TYPE,
-            CodecConfig::Av1(_) => sys::str::AMF_VIDEO_ENCODER_AV1_OUTPUT_FRAME_TYPE,
-        };
-        let name_w = sys::to_wstring(prop_name);
-        let mut var = AMFVariantStruct::empty();
-        let result = unsafe {
-            let vtbl = &*(*buffer).pVtbl;
-            match vtbl.GetProperty {
-                Some(f) => f(buffer, name_w.as_ptr(), &mut var),
-                None => return PictureType::Unknown,
-            }
-        };
-        if result != AMF_RESULT::AMF_OK {
-            return PictureType::Unknown;
-        }
-
-        let type_val = unsafe { var.__bindgen_anon_1.int64Value };
-        match &self.codec_config {
-            CodecConfig::H264(_) => match type_val {
-                0 => PictureType::Idr,
-                1 => PictureType::I,
-                2 => PictureType::P,
-                3 => PictureType::B,
-                _ => PictureType::Unknown,
-            },
-            CodecConfig::Hevc(_) => match type_val {
-                0 => PictureType::Idr,
-                1 => PictureType::I,
-                2 => PictureType::P,
-                _ => PictureType::Unknown,
-            },
-            CodecConfig::Av1(_) => match type_val {
-                0 => PictureType::Idr, // KEY
-                _ => PictureType::P,
-            },
-        }
-    }
-
-    /// エンコード済みフレームを取り出す
-    pub fn next_frame(&mut self) -> Option<EncodedFrame> {
-        self.encoded_frames.pop_front()
-    }
-
-    /// エンコーダーをフラッシュして残りのフレームを取得する
+    /// エンコーダーをフラッシュして残りのフレームを処理する
     pub fn finish(&mut self) -> Result<(), Error> {
         // Drain を呼び出して残りのフレームを出力させる
         let result = unsafe {
@@ -1459,43 +1379,34 @@ impl Encoder {
             Error::check(result, "AMFComponent::Drain")?;
         }
 
-        // 残りの出力をポーリングする
-        // AMF_REPEAT はエンコード中で出力が未準備の意味なのでリトライする。
-        let max_repeat = 50;
-        let mut repeat_count = 0;
-        loop {
-            let mut data: *mut AMFData = ptr::null_mut();
-            let result = unsafe {
-                let vtbl = &*(*self.component).pVtbl;
-                require_vtbl_fn(vtbl.QueryOutput, "QueryOutput")?(self.component, &mut data)
-            };
-            if result == AMF_RESULT::AMF_EOF {
-                break;
-            }
-            if result == AMF_RESULT::AMF_REPEAT {
-                repeat_count += 1;
-                if repeat_count > max_repeat {
-                    break;
-                }
-                std::thread::sleep(std::time::Duration::from_millis(5));
-                continue;
-            }
-            if result != AMF_RESULT::AMF_OK || data.is_null() {
-                break;
-            }
+        // Finish コマンドでワーカースレッドに残りの出力を処理させる
+        let (tx, rx) = mpsc::sync_channel(1);
+        self.cmd_tx
+            .as_ref()
+            .unwrap()
+            .send(WorkerCommand::Finish(tx))
+            .map_err(|_| Error::new_custom("Encoder::finish", "worker thread terminated"))?;
 
-            repeat_count = 0;
-            self.extract_encoded_output(data)?;
-        }
+        // 全 pending が処理されるのを待つ
+        rx.recv_timeout(Duration::from_secs(5))
+            .map_err(|_| Error::new_custom("Encoder::finish", "Finish wait timed out"))?;
 
         Ok(())
     }
 }
 
-// 安全性: new() が成功した場合のみ Self が構築されるため、
-// component と context は常に有効なポインタであることが保証される。
-impl Drop for Encoder {
+// 安全性:
+// Drop 内でのみ component/context を解放する。
+// ワーカースレッドは Drop より先に停止させる。
+impl<T: Send + 'static> Drop for Encoder<T> {
     fn drop(&mut self) {
+        // ワーカースレッドを停止する (cmd_tx を drop → チャネル切断 → ワーカー終了)
+        self.cmd_tx = None;
+
+        if let Some(handle) = self.poll_thread.take() {
+            let _ = handle.join();
+        }
+
         // Drop 内の panic は二重 panic で abort になるため、
         // vtable の関数ポインタが欠けている場合は握りつぶす
         unsafe {
@@ -1515,6 +1426,224 @@ impl Drop for Encoder {
                 release(self.context);
             }
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// ワーカースレッド
+// ---------------------------------------------------------------------------
+
+/// ワーカースレッドのエントリポイント
+///
+/// メインスレッドから `Submit(T)` コマンドを受け取り、AMFComponent::QueryOutput を
+/// ポーリングしてエンコード済みフレームを取得し、コールバックを呼び出す。
+fn worker<T, F>(
+    component_wrapper: SendableComponent,
+    mut callback: F,
+    cmd_rx: mpsc::Receiver<WorkerCommand<T>>,
+    codec_config: CodecConfig,
+) where
+    T: Send + 'static,
+    F: FnMut(EncodedFrame, T) + Send + 'static,
+{
+    let component = component_wrapper.0;
+    let mut pending: VecDeque<T> = VecDeque::new();
+    let mut output_buffer: VecDeque<EncodedFrame> = VecDeque::new();
+    let mut finish: Option<mpsc::SyncSender<()>> = None;
+
+    loop {
+        // Finish がやってきていて、全てのデータが排出されたら終了する
+        if finish.is_some() && pending.is_empty() {
+            break;
+        }
+
+        let cmd = if pending.is_empty() {
+            match cmd_rx.recv() {
+                Ok(cmd) => cmd,
+                Err(_) => break,
+            }
+        } else {
+            match cmd_rx.recv_timeout(Duration::from_millis(1)) {
+                Ok(cmd) => cmd,
+                Err(mpsc::RecvTimeoutError::Timeout) => {
+                    drain_output(
+                        &mut output_buffer,
+                        &mut pending,
+                        &mut callback,
+                        component,
+                        &codec_config,
+                    );
+                    continue;
+                }
+                Err(mpsc::RecvTimeoutError::Disconnected) => break,
+            }
+        };
+
+        match cmd {
+            WorkerCommand::Submit(t) => {
+                pending.push_back(t);
+            }
+            WorkerCommand::Finish(tx) => {
+                finish = Some(tx);
+            }
+        }
+    }
+
+    if let Some(tx) = finish {
+        let _ = tx.send(());
+    }
+}
+
+/// QueryOutput からの出力をバッファに格納し、pending とマッチングしてコールバックを呼び出す
+fn drain_output<T, F>(
+    output_buffer: &mut VecDeque<EncodedFrame>,
+    pending: &mut VecDeque<T>,
+    callback: &mut F,
+    component: *mut AMFComponent,
+    codec_config: &CodecConfig,
+) where
+    T: Send + 'static,
+    F: FnMut(EncodedFrame, T),
+{
+    // 出力をバッファに格納する
+    loop {
+        let mut data: *mut AMFData = ptr::null_mut();
+        let result = unsafe {
+            let vtbl = &*(*component).pVtbl;
+            match vtbl.QueryOutput {
+                Some(f) => f(component, &mut data),
+                None => {
+                    log::error!("worker: QueryOutput vtable entry missing");
+                    break;
+                }
+            }
+        };
+        log::debug!("worker: QueryOutput result={result:?}");
+        if result == AMF_RESULT::AMF_REPEAT || result == AMF_RESULT::AMF_EOF {
+            break;
+        }
+        if result != AMF_RESULT::AMF_OK || data.is_null() {
+            break;
+        }
+        if let Some(frame) = extract_encoded_output(data, codec_config) {
+            output_buffer.push_back(frame);
+        }
+    }
+
+    // バッファされた出力と pending をマッチングする
+    while !output_buffer.is_empty() && !pending.is_empty() {
+        let frame = output_buffer.pop_front().unwrap();
+        let t = pending.pop_front().unwrap();
+        callback(frame, t);
+    }
+}
+// ---------------------------------------------------------------------------
+// 出力抽出 (standalone)
+// ---------------------------------------------------------------------------
+
+/// AMFData から EncodedFrame を抽出する
+fn extract_encoded_output(data: *mut AMFData, codec_config: &CodecConfig) -> Option<EncodedFrame> {
+    let buffer = data as *mut AMFBuffer;
+    let buf_size = unsafe {
+        let vtbl = &*(*buffer).pVtbl;
+        match vtbl.GetSize {
+            Some(f) => f(buffer),
+            None => {
+                release_buffer(buffer);
+                return None;
+            }
+        }
+    };
+    if buf_size == 0 {
+        release_buffer(buffer);
+        return None;
+    }
+    let buf_native = unsafe {
+        let vtbl = &*(*buffer).pVtbl;
+        match vtbl.GetNative {
+            Some(f) => f(buffer) as *const u8,
+            None => {
+                release_buffer(buffer);
+                return None;
+            }
+        }
+    };
+    if buf_native.is_null() {
+        release_buffer(buffer);
+        return None;
+    }
+    let pts = unsafe {
+        let vtbl = &*(*buffer).pVtbl;
+        match vtbl.GetPts {
+            Some(f) => f(buffer),
+            None => {
+                release_buffer(buffer);
+                return None;
+            }
+        }
+    };
+
+    let frame_data = unsafe { std::slice::from_raw_parts(buf_native, buf_size) }.to_vec();
+    let picture_type = get_output_picture_type(buffer, codec_config);
+
+    release_buffer(buffer);
+
+    Some(EncodedFrame {
+        data: frame_data,
+        pts,
+        picture_type,
+    })
+}
+
+/// バッファの参照を解放する
+fn release_buffer(buffer: *mut AMFBuffer) {
+    unsafe {
+        let vtbl = &*(*buffer).pVtbl;
+        if let Some(release) = vtbl.Release {
+            release(buffer);
+        }
+    }
+}
+
+/// 出力バッファからピクチャタイプを取得する
+fn get_output_picture_type(buffer: *mut AMFBuffer, codec_config: &CodecConfig) -> PictureType {
+    let prop_name = match codec_config {
+        CodecConfig::H264(_) => sys::str::AMF_VIDEO_ENCODER_OUTPUT_DATA_TYPE,
+        CodecConfig::Hevc(_) => sys::str::AMF_VIDEO_ENCODER_HEVC_OUTPUT_DATA_TYPE,
+        CodecConfig::Av1(_) => sys::str::AMF_VIDEO_ENCODER_AV1_OUTPUT_FRAME_TYPE,
+    };
+    let name_w = sys::to_wstring(prop_name);
+    let mut var = AMFVariantStruct::empty();
+    let result = unsafe {
+        let vtbl = &*(*buffer).pVtbl;
+        match vtbl.GetProperty {
+            Some(f) => f(buffer, name_w.as_ptr(), &mut var),
+            None => return PictureType::Unknown,
+        }
+    };
+    if result != AMF_RESULT::AMF_OK {
+        return PictureType::Unknown;
+    }
+
+    let type_val = unsafe { var.__bindgen_anon_1.int64Value };
+    match codec_config {
+        CodecConfig::H264(_) => match type_val {
+            0 => PictureType::Idr,
+            1 => PictureType::I,
+            2 => PictureType::P,
+            3 => PictureType::B,
+            _ => PictureType::Unknown,
+        },
+        CodecConfig::Hevc(_) => match type_val {
+            0 => PictureType::Idr,
+            1 => PictureType::I,
+            2 => PictureType::P,
+            _ => PictureType::Unknown,
+        },
+        CodecConfig::Av1(_) => match type_val {
+            0 => PictureType::Idr, // KEY
+            _ => PictureType::P,
+        },
     }
 }
 
