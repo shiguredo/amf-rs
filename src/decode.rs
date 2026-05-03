@@ -5,6 +5,9 @@
 
 use std::collections::VecDeque;
 use std::ptr;
+use std::sync::mpsc;
+use std::thread::JoinHandle;
+use std::time::Duration;
 
 use crate::AmfLibrary;
 use crate::error::{Error, positive_i32_to_usize, require_vtbl_fn};
@@ -32,6 +35,7 @@ pub struct DecoderConfig {
 }
 
 /// デコード済みフレーム (NV12 形式)
+#[derive(Debug)]
 pub struct DecodedFrame {
     width: usize,
     height: usize,
@@ -61,29 +65,48 @@ impl DecodedFrame {
 }
 
 // ---------------------------------------------------------------------------
+// ワーカースレッド用コマンド
+// ---------------------------------------------------------------------------
+
+enum WorkerCommand<T> {
+    Submit(T),
+    Finish(mpsc::SyncSender<()>),
+}
+
+// ---------------------------------------------------------------------------
 // デコーダー実装
 // ---------------------------------------------------------------------------
 
+/// スレッド間で AMFComponent ポインタを安全に送信するためのラッパー
+///
+/// AMFComponent の関数はスレッドセーフであるとドキュメントに記載されているため、
+/// raw ポインタの Send 実装を明示的に許可する。
+struct SendableComponent(*mut AMFComponent);
+unsafe impl Send for SendableComponent {}
+
 /// AMF ハードウェアデコーダー
-pub struct Decoder {
+pub struct Decoder<T: Send + 'static> {
     context: *mut AMFContext,
     component: *mut AMFComponent,
-    decoded_frames: VecDeque<DecodedFrame>,
+    cmd_tx: Option<mpsc::Sender<WorkerCommand<T>>>,
+    poll_thread: Option<JoinHandle<()>>,
 }
 
 // 安全性:
-// AMF のコンテキストとコンポーネントはスレッドセーフではない (同時アクセス不可) が、
-// 所有権の移動は許可されている。AMF API Reference では単一スレッドからの逐次アクセスを
-// 要求しており、スレッド親和性 (特定スレッドへの束縛) は要求していない。
-// Vulkan バックエンドの VkDevice/VkQueue も Vulkan 仕様上スレッド間移動が可能で、
-// 同時アクセスのみ外部同期が必要とされる (Vulkan Spec §3.6)。
-//
-// したがって Send (所有権移動) は安全だが、Sync (共有参照による同時アクセス) は安全ではない。
-unsafe impl Send for Decoder {}
+// AMFComponent の関数はスレッドセーフであるため、SubmitInput (メインスレッド) と
+// QueryOutput (ワーカースレッド) の同時呼び出しは安全。
+// Decoder は raw pointer を保持するため Send は手動実装が必要。
+unsafe impl<T: Send + 'static> Send for Decoder<T> {}
 
-impl Decoder {
+impl<T: Send + 'static> Decoder<T> {
     /// デコーダーを作成する
-    pub fn new(config: DecoderConfig) -> Result<Self, Error> {
+    ///
+    /// `callback` はデコード完了時にワーカースレッドから呼び出される。
+    /// 第 1 引数はデコード済みフレーム、第 2 引数は `decode()` に渡された `T` の値。
+    pub fn new(
+        config: DecoderConfig,
+        callback: impl FnMut(DecodedFrame, T) + Send + 'static,
+    ) -> Result<Self, Error> {
         let lib = AmfLibrary::instance();
         let context = lib.create_context()?;
 
@@ -97,7 +120,6 @@ impl Decoder {
 
         let component = lib.create_component(context, component_id)?;
 
-        // デコーダーを初期化する (解像度は 0,0 でストリームから自動検出)
         let result = unsafe {
             let vtbl = &*(*component).pVtbl;
             require_vtbl_fn(vtbl.Init, "Init")?(
@@ -109,26 +131,38 @@ impl Decoder {
         };
         Error::check(result, "AMFComponent::Init")?;
 
+        let (cmd_tx, cmd_rx) = mpsc::channel::<WorkerCommand<T>>();
+        let worker_component = SendableComponent(component);
+        let poll_thread = std::thread::Builder::new()
+            .name("amf-decoder-worker".into())
+            .spawn(move || {
+                worker(worker_component, callback, cmd_rx);
+            })
+            .map_err(|e| {
+                Error::new_custom(
+                    "Decoder::new",
+                    &format!("failed to spawn worker thread: {e}"),
+                )
+            })?;
+
         Ok(Self {
             context,
             component,
-            decoded_frames: VecDeque::new(),
+            cmd_tx: Some(cmd_tx),
+            poll_thread: Some(poll_thread),
         })
     }
 
     /// ビットストリームをデコードする
     ///
-    /// エンコーダーが出力した 1 フレーム分のデータを渡すこと。
-    /// 複数フレームを連結したビットストリームの一括送信は
-    /// AMF デコーダーの制約により失敗する場合がある。
-    pub fn decode(&mut self, data: &[u8]) -> Result<(), Error> {
+    /// `user_data` はデコード完了時にコールバックへ渡される。
+    pub fn decode(&mut self, data: &[u8], user_data: T) -> Result<(), Error> {
         if data.is_empty() {
             return Ok(());
         }
 
         log::debug!("Decoder::decode: data size={}", data.len());
 
-        // 入力バッファを確保する
         let mut buffer: *mut AMFBuffer = ptr::null_mut();
         let result = unsafe {
             let vtbl = &*(*self.context).pVtbl;
@@ -148,7 +182,6 @@ impl Decoder {
             ));
         }
 
-        // データをコピーする
         let buf_native = unsafe {
             let vtbl = &*(*buffer).pVtbl;
             require_vtbl_fn(vtbl.GetNative, "GetNative")?(buffer) as *mut u8
@@ -163,9 +196,6 @@ impl Decoder {
             ptr::copy_nonoverlapping(data.as_ptr(), buf_native, data.len());
         }
 
-        // SubmitInput (デバイスビジーの場合はリトライする)
-        // AMF の SubmitInput は成功時にバッファの所有権を取得するため、
-        // 成功パスでは Release を呼ばない。
         let max_retries = 100;
         let mut submitted = false;
         for retry in 0..max_retries {
@@ -189,16 +219,13 @@ impl Decoder {
                 || result == AMF_RESULT::AMF_DECODER_NO_FREE_SURFACES
                 || result == AMF_RESULT::AMF_REPEAT
             {
-                // 出力をポーリングしてからリトライする
-                self.poll_output()?;
-                std::thread::sleep(std::time::Duration::from_millis(1));
+                std::thread::sleep(Duration::from_millis(1));
                 continue;
             }
             if result == AMF_RESULT::AMF_EOF {
                 submitted = true;
                 break;
             }
-            // バッファを解放してエラーを返す
             unsafe {
                 let vtbl = &*(*buffer).pVtbl;
                 if let Some(release) = vtbl.Release {
@@ -220,16 +247,18 @@ impl Decoder {
             ));
         }
 
-        // 出力をポーリングする
-        self.poll_output()?;
+        self.cmd_tx
+            .as_ref()
+            .unwrap()
+            .send(WorkerCommand::Submit(user_data))
+            .map_err(|_| Error::new_custom("Decoder::decode", "worker thread terminated"))?;
 
         Ok(())
     }
 
-    /// デコーダーをフラッシュして残りのフレームを取得する
+    /// デコーダーをフラッシュして残りのフレームを処理する
     pub fn finish(&mut self) -> Result<(), Error> {
         log::debug!("Decoder::finish: calling Drain");
-        // Drain を呼び出す
         let result = unsafe {
             let vtbl = &*(*self.component).pVtbl;
             require_vtbl_fn(vtbl.Drain, "Drain")?(self.component)
@@ -239,236 +268,31 @@ impl Decoder {
             Error::check(result, "AMFComponent::Drain")?;
         }
 
-        // 残りの出力を取得する
-        // AMF_REPEAT はデコード中で出力が未準備の意味なのでリトライする。
-        // Vulkan バックエンドでは非同期処理のため完了まで待機が必要。
-        let max_repeat = 50;
-        let mut flush_count = 0;
-        let mut repeat_count = 0;
-        loop {
-            let mut data: *mut AMFData = ptr::null_mut();
-            let result = unsafe {
-                let vtbl = &*(*self.component).pVtbl;
-                require_vtbl_fn(vtbl.QueryOutput, "QueryOutput")?(self.component, &mut data)
-            };
-            if result == AMF_RESULT::AMF_EOF {
-                break;
-            }
-            if result == AMF_RESULT::AMF_REPEAT {
-                if !data.is_null() {
-                    // AMF_REPEAT でも data が返っている場合はフレームを抽出する
-                    repeat_count = 0;
-                    self.extract_frame(data as *mut AMFSurface)?;
-                    flush_count += 1;
-                    continue;
-                }
-                repeat_count += 1;
-                if repeat_count > max_repeat {
-                    log::debug!(
-                        "Decoder::finish: AMF_REPEAT retry limit, flush_count={flush_count}"
-                    );
-                    break;
-                }
-                std::thread::sleep(std::time::Duration::from_millis(5));
-                continue;
-            }
-            if result != AMF_RESULT::AMF_OK || data.is_null() {
-                break;
-            }
+        let (tx, rx) = mpsc::sync_channel(1);
+        self.cmd_tx
+            .as_ref()
+            .unwrap()
+            .send(WorkerCommand::Finish(tx))
+            .map_err(|_| Error::new_custom("Decoder::finish", "worker thread terminated"))?;
 
-            repeat_count = 0;
-            self.extract_frame(data as *mut AMFSurface)?;
-            flush_count += 1;
-        }
-        log::debug!("Decoder::finish: done, flushed {flush_count} frames");
-
-        Ok(())
-    }
-
-    /// デコード済みフレームを取り出す
-    pub fn next_frame(&mut self) -> Option<DecodedFrame> {
-        self.decoded_frames.pop_front()
-    }
-
-    /// 出力をポーリングする
-    fn poll_output(&mut self) -> Result<(), Error> {
-        loop {
-            let mut data: *mut AMFData = ptr::null_mut();
-            let result = unsafe {
-                let vtbl = &*(*self.component).pVtbl;
-                require_vtbl_fn(vtbl.QueryOutput, "QueryOutput")?(self.component, &mut data)
-            };
-
-            if result == AMF_RESULT::AMF_EOF {
-                break;
-            }
-            if result == AMF_RESULT::AMF_REPEAT {
-                if !data.is_null() {
-                    // AMF_REPEAT でも data が返っている場合はフレームを抽出する
-                    self.extract_frame(data as *mut AMFSurface)?;
-                    continue;
-                }
-                break;
-            }
-            if result != AMF_RESULT::AMF_OK || data.is_null() {
-                break;
-            }
-
-            self.extract_frame(data as *mut AMFSurface)?;
-        }
-        Ok(())
-    }
-
-    /// AMFSurface から NV12 フレームデータを抽出する
-    ///
-    /// null ポインタやサイズ不整合によるメモリアクセス違反を防ぐため、
-    /// 各段階で検証を行う。
-    fn extract_frame(&mut self, surface: *mut AMFSurface) -> Result<(), Error> {
-        if surface.is_null() {
-            return Err(Error::new_custom("extract_frame", "surface is null"));
-        }
-
-        /// Surface のクリーンアップヘルパー
-        ///
-        /// vtable の Release が欠けている場合はリークさせて panic を防ぐ
-        unsafe fn release_surface(surface: *mut AMFSurface) {
-            unsafe {
-                let vtbl = &*(*surface).pVtbl;
-                if let Some(release) = vtbl.Release {
-                    release(surface);
-                }
-            }
-        }
-
-        // ホストメモリに変換する
-        let result = unsafe {
-            let vtbl = &*(*surface).pVtbl;
-            require_vtbl_fn(vtbl.Convert, "Convert")?(surface, AMF_MEMORY_TYPE::AMF_MEMORY_HOST)
-        };
-        if result != AMF_RESULT::AMF_OK {
-            unsafe { release_surface(surface) };
-            return Error::check(result, "AMFSurface::Convert");
-        }
-
-        // Y プレーンを取得する
-        let y_plane = unsafe {
-            let vtbl = &*(*surface).pVtbl;
-            require_vtbl_fn(vtbl.GetPlane, "GetPlane")?(surface, AMF_PLANE_TYPE::AMF_PLANE_Y)
-        };
-        if y_plane.is_null() {
-            unsafe { release_surface(surface) };
-            return Err(Error::new_custom("extract_frame", "failed to get Y plane"));
-        }
-
-        let width_raw = unsafe {
-            let vtbl = &*(*y_plane).pVtbl;
-            require_vtbl_fn(vtbl.GetWidth, "GetWidth")?(y_plane)
-        };
-        let height_raw = unsafe {
-            let vtbl = &*(*y_plane).pVtbl;
-            require_vtbl_fn(vtbl.GetHeight, "GetHeight")?(y_plane)
-        };
-        let width = positive_i32_to_usize(width_raw, "extract_frame", "width")?;
-        let height = positive_i32_to_usize(height_raw, "extract_frame", "height")?;
-        let y_hpitch_raw = unsafe {
-            let vtbl = &*(*y_plane).pVtbl;
-            require_vtbl_fn(vtbl.GetHPitch, "GetHPitch")?(y_plane)
-        };
-        let y_hpitch = positive_i32_to_usize(y_hpitch_raw, "extract_frame", "y_hpitch")?;
-        if y_hpitch < width {
-            unsafe { release_surface(surface) };
-            return Err(Error::new_custom(
-                "extract_frame",
-                &format!("Y hpitch ({y_hpitch}) < width ({width})"),
-            ));
-        }
-        let y_native = unsafe {
-            let vtbl = &*(*y_plane).pVtbl;
-            require_vtbl_fn(vtbl.GetNative, "GetNative")?(y_plane) as *const u8
-        };
-        if y_native.is_null() {
-            unsafe { release_surface(surface) };
-            return Err(Error::new_custom(
-                "extract_frame",
-                "Y plane native pointer is null",
-            ));
-        }
-
-        let y_size = width
-            .checked_mul(height)
-            .ok_or_else(|| Error::new_custom("extract_frame", "Y plane size overflow"))?;
-        let nv12_size = y_size
-            .checked_mul(3)
-            .and_then(|v| v.checked_div(2))
-            .ok_or_else(|| Error::new_custom("extract_frame", "NV12 size overflow"))?;
-        let mut frame_data = vec![0u8; nv12_size];
-
-        // Y プレーンをコピーする
-        for row in 0..height {
-            unsafe {
-                ptr::copy_nonoverlapping(
-                    y_native.add(row * y_hpitch),
-                    frame_data.as_mut_ptr().add(row * width),
-                    width,
-                );
-            }
-        }
-
-        // UV プレーンを取得する
-        let uv_plane = unsafe {
-            let vtbl = &*(*surface).pVtbl;
-            require_vtbl_fn(vtbl.GetPlane, "GetPlane")?(surface, AMF_PLANE_TYPE::AMF_PLANE_UV)
-        };
-        if !uv_plane.is_null() {
-            let uv_hpitch_raw = unsafe {
-                let vtbl = &*(*uv_plane).pVtbl;
-                require_vtbl_fn(vtbl.GetHPitch, "GetHPitch")?(uv_plane)
-            };
-            let uv_hpitch = uv_hpitch_raw.max(0) as usize;
-            let uv_height_raw = unsafe {
-                let vtbl = &*(*uv_plane).pVtbl;
-                require_vtbl_fn(vtbl.GetHeight, "GetHeight")?(uv_plane)
-            };
-            let uv_height = uv_height_raw.max(0) as usize;
-            let uv_native = unsafe {
-                let vtbl = &*(*uv_plane).pVtbl;
-                require_vtbl_fn(vtbl.GetNative, "GetNative")?(uv_plane) as *const u8
-            };
-            if !uv_native.is_null() && uv_hpitch >= width && uv_height > 0 {
-                // UV プレーンの高さが NV12 バッファの残り領域を超えないか検証する
-                let max_uv_rows = (nv12_size - y_size) / width;
-                let copy_rows = uv_height.min(max_uv_rows);
-                for row in 0..copy_rows {
-                    unsafe {
-                        ptr::copy_nonoverlapping(
-                            uv_native.add(row * uv_hpitch),
-                            frame_data.as_mut_ptr().add(y_size + row * width),
-                            width,
-                        );
-                    }
-                }
-            }
-        }
-
-        // Surface を解放する
-        unsafe { release_surface(surface) };
-
-        self.decoded_frames.push_back(DecodedFrame {
-            width,
-            height,
-            data: frame_data,
-        });
+        rx.recv_timeout(Duration::from_secs(5))
+            .map_err(|_| Error::new_custom("Decoder::finish", "Finish wait timed out"))?;
 
         Ok(())
     }
 }
 
-// 安全性: new() が成功した場合のみ Self が構築されるため、
-// component と context は常に有効なポインタであることが保証される。
-impl Drop for Decoder {
+// 安全性:
+// Drop 内でのみ component/context を解放する。
+// ワーカースレッドは Drop より先に停止させる。
+impl<T: Send + 'static> Drop for Decoder<T> {
     fn drop(&mut self) {
-        // Drop 内の panic は二重 panic で abort になるため、
-        // vtable の関数ポインタが欠けている場合は握りつぶす
+        self.cmd_tx = None;
+
+        if let Some(handle) = self.poll_thread.take() {
+            let _ = handle.join();
+        }
+
         unsafe {
             let vtbl = &*(*self.component).pVtbl;
             if let Some(terminate) = vtbl.Terminate {
@@ -487,4 +311,287 @@ impl Drop for Decoder {
             }
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// ワーカースレッド
+// ---------------------------------------------------------------------------
+
+/// ワーカースレッドのエントリポイント
+///
+/// メインスレッドから `Submit(T)` コマンドを受け取り、AMFComponent::QueryOutput を
+/// ポーリングしてデコード済みフレームを取得し、コールバックを呼び出す。
+fn worker<T, F>(
+    component_wrapper: SendableComponent,
+    mut callback: F,
+    cmd_rx: mpsc::Receiver<WorkerCommand<T>>,
+) where
+    T: Send + 'static,
+    F: FnMut(DecodedFrame, T) + Send + 'static,
+{
+    let component = component_wrapper.0;
+    let mut pending: VecDeque<T> = VecDeque::new();
+    let mut output_buffer: VecDeque<DecodedFrame> = VecDeque::new();
+    let mut finish: Option<mpsc::SyncSender<()>> = None;
+
+    loop {
+        if finish.is_some() && pending.is_empty() {
+            break;
+        }
+
+        let cmd = if pending.is_empty() {
+            match cmd_rx.recv() {
+                Ok(cmd) => cmd,
+                Err(_) => break,
+            }
+        } else {
+            match cmd_rx.recv_timeout(Duration::from_millis(1)) {
+                Ok(cmd) => cmd,
+                Err(mpsc::RecvTimeoutError::Timeout) => {
+                    drain_output(&mut output_buffer, &mut pending, &mut callback, component);
+                    continue;
+                }
+                Err(mpsc::RecvTimeoutError::Disconnected) => break,
+            }
+        };
+
+        match cmd {
+            WorkerCommand::Submit(t) => {
+                pending.push_back(t);
+            }
+            WorkerCommand::Finish(tx) => {
+                finish = Some(tx);
+            }
+        }
+    }
+
+    if let Some(tx) = finish {
+        let _ = tx.send(());
+    }
+}
+
+/// QueryOutput からの出力をバッファに格納し、pending とマッチングしてコールバックを呼び出す
+fn drain_output<T, F>(
+    output_buffer: &mut VecDeque<DecodedFrame>,
+    pending: &mut VecDeque<T>,
+    callback: &mut F,
+    component: *mut AMFComponent,
+) where
+    T: Send + 'static,
+    F: FnMut(DecodedFrame, T),
+{
+    loop {
+        let mut data: *mut AMFData = ptr::null_mut();
+        let result = unsafe {
+            let vtbl = &*(*component).pVtbl;
+            match vtbl.QueryOutput {
+                Some(f) => f(component, &mut data),
+                None => {
+                    log::error!("worker: QueryOutput vtable entry missing");
+                    break;
+                }
+            }
+        };
+        log::debug!("worker: QueryOutput result={result:?}");
+        if result == AMF_RESULT::AMF_REPEAT {
+            if !data.is_null() {
+                if let Some(frame) = extract_frame(data as *mut AMFSurface) {
+                    output_buffer.push_back(frame);
+                }
+                continue;
+            }
+            break;
+        }
+        if result == AMF_RESULT::AMF_EOF {
+            break;
+        }
+        if result != AMF_RESULT::AMF_OK || data.is_null() {
+            break;
+        }
+        if let Some(frame) = extract_frame(data as *mut AMFSurface) {
+            output_buffer.push_back(frame);
+        }
+    }
+
+    while !output_buffer.is_empty() && !pending.is_empty() {
+        let frame = output_buffer.pop_front().unwrap();
+        let t = pending.pop_front().unwrap();
+        callback(frame, t);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// フレーム抽出 (standalone)
+// ---------------------------------------------------------------------------
+
+/// AMFSurface から DecodedFrame を抽出する
+///
+/// null ポインタやサイズ不整合によるメモリアクセス違反を防ぐため、
+/// 各段階で検証を行う。エラー時は `None` を返す。
+fn extract_frame(surface: *mut AMFSurface) -> Option<DecodedFrame> {
+    if surface.is_null() {
+        return None;
+    }
+
+    fn release_surface(surface: *mut AMFSurface) {
+        unsafe {
+            let vtbl = &*(*surface).pVtbl;
+            if let Some(release) = vtbl.Release {
+                release(surface);
+            }
+        }
+    }
+
+    let result = unsafe {
+        let vtbl = &*(*surface).pVtbl;
+        match vtbl.Convert {
+            Some(f) => f(surface, AMF_MEMORY_TYPE::AMF_MEMORY_HOST),
+            None => {
+                release_surface(surface);
+                return None;
+            }
+        }
+    };
+    if result != AMF_RESULT::AMF_OK {
+        release_surface(surface);
+        return None;
+    }
+
+    let y_plane = unsafe {
+        let vtbl = &*(*surface).pVtbl;
+        match vtbl.GetPlane {
+            Some(f) => f(surface, AMF_PLANE_TYPE::AMF_PLANE_Y),
+            None => {
+                release_surface(surface);
+                return None;
+            }
+        }
+    };
+    if y_plane.is_null() {
+        release_surface(surface);
+        return None;
+    }
+
+    let width_raw = unsafe {
+        let vtbl = &*(*y_plane).pVtbl;
+        match vtbl.GetWidth {
+            Some(f) => f(y_plane),
+            None => {
+                release_surface(surface);
+                return None;
+            }
+        }
+    };
+    let height_raw = unsafe {
+        let vtbl = &*(*y_plane).pVtbl;
+        match vtbl.GetHeight {
+            Some(f) => f(y_plane),
+            None => {
+                release_surface(surface);
+                return None;
+            }
+        }
+    };
+    let width = positive_i32_to_usize(width_raw, "extract_frame", "width").ok()?;
+    let height = positive_i32_to_usize(height_raw, "extract_frame", "height").ok()?;
+    let y_hpitch_raw = unsafe {
+        let vtbl = &*(*y_plane).pVtbl;
+        match vtbl.GetHPitch {
+            Some(f) => f(y_plane),
+            None => {
+                release_surface(surface);
+                return None;
+            }
+        }
+    };
+    let y_hpitch = positive_i32_to_usize(y_hpitch_raw, "extract_frame", "y_hpitch").ok()?;
+    if y_hpitch < width {
+        release_surface(surface);
+        return None;
+    }
+    let y_native = unsafe {
+        let vtbl = &*(*y_plane).pVtbl;
+        match vtbl.GetNative {
+            Some(f) => f(y_plane) as *const u8,
+            None => {
+                release_surface(surface);
+                return None;
+            }
+        }
+    };
+    if y_native.is_null() {
+        release_surface(surface);
+        return None;
+    }
+
+    let y_size = width.checked_mul(height)?;
+    let nv12_size = y_size.checked_mul(3).and_then(|v| v.checked_div(2))?;
+    let mut frame_data = vec![0u8; nv12_size];
+
+    for row in 0..height {
+        unsafe {
+            ptr::copy_nonoverlapping(
+                y_native.add(row * y_hpitch),
+                frame_data.as_mut_ptr().add(row * width),
+                width,
+            );
+        }
+    }
+
+    let uv_plane = unsafe {
+        let vtbl = &*(*surface).pVtbl;
+        match vtbl.GetPlane {
+            Some(f) => f(surface, AMF_PLANE_TYPE::AMF_PLANE_UV),
+            None => {
+                release_surface(surface);
+                return None;
+            }
+        }
+    };
+    if !uv_plane.is_null() {
+        let uv_hpitch_raw = unsafe {
+            let vtbl = &*(*uv_plane).pVtbl;
+            match vtbl.GetHPitch {
+                Some(f) => f(uv_plane),
+                None => 0,
+            }
+        };
+        let uv_hpitch = uv_hpitch_raw.max(0) as usize;
+        let uv_height_raw = unsafe {
+            let vtbl = &*(*uv_plane).pVtbl;
+            match vtbl.GetHeight {
+                Some(f) => f(uv_plane),
+                None => 0,
+            }
+        };
+        let uv_height = uv_height_raw.max(0) as usize;
+        let uv_native = unsafe {
+            let vtbl = &*(*uv_plane).pVtbl;
+            match vtbl.GetNative {
+                Some(f) => f(uv_plane) as *const u8,
+                None => ptr::null(),
+            }
+        };
+        if !uv_native.is_null() && uv_hpitch >= width && uv_height > 0 {
+            let max_uv_rows = (nv12_size - y_size) / width;
+            let copy_rows = uv_height.min(max_uv_rows);
+            for row in 0..copy_rows {
+                unsafe {
+                    ptr::copy_nonoverlapping(
+                        uv_native.add(row * uv_hpitch),
+                        frame_data.as_mut_ptr().add(y_size + row * width),
+                        width,
+                    );
+                }
+            }
+        }
+    }
+
+    release_surface(surface);
+
+    Some(DecodedFrame {
+        width,
+        height,
+        data: frame_data,
+    })
 }

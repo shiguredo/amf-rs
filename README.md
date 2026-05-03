@@ -129,25 +129,29 @@ for encoded in encoded.lock().unwrap().iter() {
 ### デコード
 
 ```rust
+use std::sync::{Arc, Mutex};
+
 use shiguredo_amf::{Decoder, DecoderCodec, DecoderConfig};
 
 let config = DecoderConfig {
     codec: DecoderCodec::H264,
 };
-let mut decoder = Decoder::new(config)?;
+let decoded = Arc::new(Mutex::new(Vec::new()));
+let d = decoded.clone();
+let mut decoder = Decoder::new(config, move |frame, _: ()| {
+    d.lock().unwrap().push(frame);
+})?;
 
 // ビットストリームデータをデコード
-decoder.decode(&bitstream_data)?;
-
-// デコード済みフレームを取得 (NV12 フォーマット)
-while let Some(frame) = decoder.next_frame() {
-    println!("decoded: {}x{}, {} bytes", frame.width(), frame.height(), frame.data().len());
-}
+decoder.decode(&bitstream_data, ())?;
 
 // 残りのフレームをすべて取得する
 decoder.finish()?;
-while let Some(frame) = decoder.next_frame() {
-    println!("flushed: {}x{}", frame.width(), frame.height());
+drop(decoder);
+
+// デコード済みフレームを確認 (NV12 フォーマット)
+for frame in decoded.lock().unwrap().iter() {
+    println!("decoded: {}x{}, {} bytes", frame.width(), frame.height(), frame.data().len());
 }
 ```
 

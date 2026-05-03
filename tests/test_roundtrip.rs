@@ -303,21 +303,27 @@ fn decode(
     let config = DecoderConfig {
         codec: decoder_codec,
     };
-    let mut decoder = Decoder::new(config).expect("failed to create decoder");
+    let result = Arc::new(Mutex::new(Vec::new()));
+    let r = result.clone();
+    let mut decoder = Decoder::new(config, move |frame, _: ()| {
+        r.lock().unwrap().push(frame);
+    })
+    .expect("failed to create decoder");
 
     // フレーム単位でデコーダーに送信する
     for encoded in encoded_frames {
-        decoder.decode(encoded.data()).expect("failed to decode");
+        decoder
+            .decode(encoded.data(), ())
+            .expect("failed to decode");
     }
 
     decoder.finish().expect("failed to finish");
+    drop(decoder);
 
-    let mut decoded_frames = Vec::new();
-    while let Some(frame) = decoder.next_frame() {
-        decoded_frames.push(frame);
-    }
-
-    decoded_frames
+    Arc::try_unwrap(result)
+        .expect("Arc still referenced")
+        .into_inner()
+        .unwrap()
 }
 
 /// エンコード→デコードのラウンドトリップを検証するヘルパー
