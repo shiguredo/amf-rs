@@ -4,6 +4,7 @@
 //! AMF ランタイムライブラリ (libamfrt64.so.1) はドライバーに同梱されており、
 //! dlopen で動的にロードされる。
 
+pub mod amf;
 mod codec_info;
 mod decode;
 mod dl;
@@ -13,15 +14,11 @@ mod sys;
 
 use std::path::Path;
 use std::ptr;
-
-use std::ffi::c_void;
 use std::sync::{LazyLock, Mutex};
 
+use amf::{Component, Context};
 use error::require_vtbl_fn;
-use sys::{
-    AMF_DLL_NAME, AMF_FULL_VERSION, AMFComponent, AMFContext, AMFContext1, AMFFactory, AMFInit_Fn,
-    AMFQueryVersion_Fn, IID_AMF_CONTEXT1, amf_uint64,
-};
+use sys::{AMF_DLL_NAME, AMF_FULL_VERSION, AMFFactory, AMFInit_Fn, AMFQueryVersion_Fn, amf_uint64};
 
 pub use codec_info::{
     Av1EncodingProfile, CodecInfo, DecodingInfo, EncodingInfo, EncodingProfiles,
@@ -138,10 +135,10 @@ impl AmfLibrary {
     }
 
     /// AMFContext を作成する
-    pub(crate) fn create_context(&self) -> Result<*mut AMFContext, Error> {
+    pub(crate) fn create_context(&self) -> Result<Context, Error> {
         let mut inner = self.inner.lock().unwrap();
         let inner = Self::ensure_inner(&mut inner)?;
-        let mut context: *mut AMFContext = ptr::null_mut();
+        let mut context: *mut sys::AMFContext = ptr::null_mut();
         let result = unsafe {
             let vtbl = &*(*inner.factory).pVtbl;
             require_vtbl_fn(vtbl.CreateContext, "CreateContext")?(inner.factory, &mut context)
@@ -155,68 +152,24 @@ impl AmfLibrary {
             ));
         }
 
-        Ok(context)
-    }
-
-    /// コンテキストに Vulkan デバイスを初期化する (Linux)
-    ///
-    /// AMFContext から QueryInterface で AMFContext1 を取得し、
-    /// InitVulkan(NULL) でデフォルトの Vulkan デバイスを初期化する。
-    pub(crate) fn init_vulkan(&self, context: *mut AMFContext) -> Result<(), Error> {
-        let _guard = self.inner.lock().unwrap();
-
-        let mut context1_ptr: *mut c_void = ptr::null_mut();
-        let result = unsafe {
-            let vtbl = &*(*context).pVtbl;
-            require_vtbl_fn(vtbl.QueryInterface, "QueryInterface")?(
-                context,
-                &IID_AMF_CONTEXT1,
-                &mut context1_ptr,
-            )
-        };
-        Error::check(result, "AMFContext::QueryInterface(AMFContext1)")?;
-
-        if context1_ptr.is_null() {
-            return Err(Error::new_custom(
-                "AmfLibrary::init_vulkan",
-                "QueryInterface returned null for AMFContext1",
-            ));
-        }
-
-        let context1 = context1_ptr as *mut AMFContext1;
-
-        // Vulkan デバイスを初期化する (NULL = デフォルトデバイス)
-        let result = unsafe {
-            let vtbl = &*(*context1).pVtbl;
-            require_vtbl_fn(vtbl.InitVulkan, "InitVulkan")?(context1, ptr::null_mut())
-        };
-
-        // Context1 の参照を解放する
-        unsafe {
-            let vtbl = &*(*context1).pVtbl;
-            if let Some(release) = vtbl.Release {
-                release(context1);
-            }
-        }
-
-        Error::check(result, "AMFContext1::InitVulkan")
+        unsafe { Context::from_raw(context) }
     }
 
     /// AMFComponent を作成する
     pub(crate) fn create_component(
         &self,
-        context: *mut AMFContext,
+        context: &Context,
         component_id: &str,
-    ) -> Result<*mut AMFComponent, Error> {
+    ) -> Result<Component, Error> {
         let mut inner = self.inner.lock().unwrap();
         let inner = Self::ensure_inner(&mut inner)?;
         let component_id_w = sys::to_wstring(component_id);
-        let mut component: *mut AMFComponent = ptr::null_mut();
+        let mut component: *mut sys::AMFComponent = ptr::null_mut();
         let result = unsafe {
             let vtbl = &*(*inner.factory).pVtbl;
             require_vtbl_fn(vtbl.CreateComponent, "CreateComponent")?(
                 inner.factory,
-                context,
+                context.as_ptr(),
                 component_id_w.as_ptr(),
                 &mut component,
             )
@@ -228,6 +181,6 @@ impl AmfLibrary {
                 "CreateComponent returned null",
             ));
         }
-        Ok(component)
+        unsafe { Component::from_raw(component) }
     }
 }

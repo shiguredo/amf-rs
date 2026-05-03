@@ -1,7 +1,8 @@
 //! コーデック情報の照会
 
 use crate::AmfLibrary;
-use crate::sys::{self, AMFContext};
+use crate::amf::Context;
+use crate::sys;
 
 // ---------------------------------------------------------------------------
 // 公開型
@@ -214,7 +215,7 @@ fn encoding_info(codec: VideoCodecType) -> EncodingInfo {
 ///
 /// Drop で AMFContext を安全に解放する。
 struct ProbeContext {
-    context: *mut AMFContext,
+    context: Context,
 }
 
 impl ProbeContext {
@@ -224,7 +225,7 @@ impl ProbeContext {
     fn new() -> Option<Self> {
         let lib = AmfLibrary::instance();
         let context = lib.create_context().ok()?;
-        lib.init_vulkan(context).ok()?;
+        unsafe { context.init_vulkan(std::ptr::null_mut()) }.ok()?;
         Some(Self { context })
     }
 
@@ -253,37 +254,15 @@ impl ProbeContext {
     /// 成功した場合はコンポーネントを即座に解放して true を返す。
     fn try_create_component(&self, component_id: &str) -> bool {
         let lib = AmfLibrary::instance();
-        let component = match lib.create_component(self.context, component_id) {
-            Ok(c) => c,
-            Err(_) => return false,
-        };
-
         // エンコーダーは Init なしでは Terminate できないためスキップする。
         // デコーダーは Init(NV12, 0, 0) で初期化できるが、probe 目的では不要。
         // CreateComponent が成功すればそのコーデックは対応している。
-        unsafe {
-            let vtbl = &*(*component).pVtbl;
-            if let Some(release) = vtbl.Release {
-                release(component);
-            }
-        }
-
-        true
+        lib.create_component(&self.context, component_id).is_ok()
     }
 }
 
 impl Drop for ProbeContext {
     fn drop(&mut self) {
-        // Drop 内の panic は二重 panic で abort になるため、
-        // vtable の関数ポインタが欠けている場合は握りつぶす
-        unsafe {
-            let vtbl = &*(*self.context).pVtbl;
-            if let Some(terminate) = vtbl.Terminate {
-                let _ = terminate(self.context);
-            }
-            if let Some(release) = vtbl.Release {
-                release(self.context);
-            }
-        }
+        let _ = self.context.terminate();
     }
 }
