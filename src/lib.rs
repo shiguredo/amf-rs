@@ -56,7 +56,7 @@ struct AmfLibraryInner {
 ///
 /// dlopen で libamfrt64.so.1 をロードし、AMFFactory を取得する。
 /// プロセス全体で単一のインスタンスのみ存在し、
-/// [`instance()`] で取得する。
+/// [`AmfLibrary::instance()`] で取得する。
 pub struct AmfLibrary {
     inner: Mutex<Option<AmfLibraryInner>>,
 }
