@@ -12,9 +12,7 @@ use std::time::Duration;
 use crate::AmfLibrary;
 use crate::amf::{Buffer, Component, Context, Surface};
 use crate::error::Error;
-use crate::sys::{
-    self, AMF_MEMORY_TYPE, AMF_RESULT, AMF_SURFACE_FORMAT, AMFData, AMFSurface,
-};
+use crate::sys::{self, AMF_MEMORY_TYPE, AMF_RESULT, AMF_SURFACE_FORMAT, AMFData, AMFSurface};
 
 // ---------------------------------------------------------------------------
 // 公開型
