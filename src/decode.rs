@@ -45,19 +45,14 @@ impl<T> DecodedFrame<T> {
         &self.surface
     }
 
-    /// Surface の所有権を取得する
-    pub fn into_surface(self) -> Surface {
-        self.surface
-    }
-
     /// ユーザーデータ
     pub fn user_data(&self) -> &T {
         &self.user_data
     }
 
-    /// ユーザーデータの所有権を取得する
-    pub fn into_user_data(self) -> T {
-        self.user_data
+    /// Surface とユーザーデータの所有権を取得する
+    pub fn into_parts(self) -> (Surface, T) {
+        (self.surface, self.user_data)
     }
 }
 

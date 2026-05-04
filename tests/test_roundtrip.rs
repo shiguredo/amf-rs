@@ -502,7 +502,7 @@ fn decode(
     // フレーム単位でデコーダーに送信する
     for encoded in encoded_frames {
         decoder
-            .decode(encoded.into_buffer(), ())
+            .decode(encoded.into_parts().0, ())
             .expect("failed to decode");
     }
 
@@ -1529,8 +1529,8 @@ fn test_user_data_delivered_in_submit_order() {
     let received = Arc::new(Mutex::new(Vec::new()));
     let r = received.clone();
 
-    let mut encoder = Encoder::new(config, move |_frame: EncodedFrame<usize>| {
-        r.lock().unwrap().push(_frame.into_user_data());
+    let mut encoder = Encoder::new(config, move |frame: EncodedFrame<usize>| {
+        r.lock().unwrap().push(frame.into_parts().1);
     })
     .expect("failed to create encoder");
 

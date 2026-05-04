@@ -271,11 +271,6 @@ impl<T> EncodedFrame<T> {
         &self.buffer
     }
 
-    /// ビットストリームバッファの所有権を取得する
-    pub fn into_buffer(self) -> Buffer {
-        self.buffer
-    }
-
     /// ピクチャタイプ
     pub fn picture_type(&self) -> PictureType {
         self.picture_type
@@ -286,9 +281,9 @@ impl<T> EncodedFrame<T> {
         &self.user_data
     }
 
-    /// ユーザーデータの所有権を取得する
-    pub fn into_user_data(self) -> T {
-        self.user_data
+    /// ビットストリームバッファとユーザーデータの所有権を取得する
+    pub fn into_parts(self) -> (Buffer, T) {
+        (self.buffer, self.user_data)
     }
 }
 
