@@ -19,6 +19,8 @@
   - @melpon
 - [FIX] 別々のインスタンスから異なるスレッドで操作したときに SIGSEGV が発生する問題を修正する
   - @melpon
+- [CHANGE] encode/decode の入出力を Surface/Buffer に変更し、EncodedFrame/DecodedFrame に T 型パラメータを追加する
+  - @melpon
 
 ### misc
 

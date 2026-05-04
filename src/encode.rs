@@ -11,10 +11,10 @@ use std::time::Duration;
 
 use crate::AmfLibrary;
 use crate::amf::{Buffer, Component, Context, PropertyStorage, Surface};
-use crate::error::{Error, positive_i32_to_usize};
+use crate::error::Error;
 use crate::sys::{
-    self, AMF_MEMORY_TYPE, AMF_PLANE_TYPE, AMF_RESULT, AMF_SECOND, AMF_SURFACE_FORMAT, AMFBuffer,
-    AMFData, AMFVariantStruct, amf_int32, amf_int64, amf_pts,
+    self, AMF_MEMORY_TYPE, AMF_RESULT, AMF_SECOND, AMF_SURFACE_FORMAT, AMFBuffer, AMFData,
+    AMFVariantStruct, amf_int32, amf_int64, amf_pts,
 };
 
 // ---------------------------------------------------------------------------
@@ -259,31 +259,36 @@ pub struct ReconfigureParams {
 
 /// エンコード済みフレーム
 #[derive(Debug)]
-pub struct EncodedFrame {
-    data: Vec<u8>,
-    pts: i64,
+pub struct EncodedFrame<T> {
+    buffer: Buffer,
     picture_type: PictureType,
+    user_data: T,
 }
 
-impl EncodedFrame {
-    /// エンコード済みビットストリームデータ
-    pub fn data(&self) -> &[u8] {
-        &self.data
+impl<T> EncodedFrame<T> {
+    /// エンコード済みビットストリームバッファ
+    pub fn buffer(&self) -> &Buffer {
+        &self.buffer
     }
 
-    /// フレームデータの所有権を取得する
-    pub fn into_data(self) -> Vec<u8> {
-        self.data
-    }
-
-    /// PTS (100 ナノ秒単位)
-    pub fn pts(&self) -> i64 {
-        self.pts
+    /// ビットストリームバッファの所有権を取得する
+    pub fn into_buffer(self) -> Buffer {
+        self.buffer
     }
 
     /// ピクチャタイプ
     pub fn picture_type(&self) -> PictureType {
         self.picture_type
+    }
+
+    /// ユーザーデータ
+    pub fn user_data(&self) -> &T {
+        &self.user_data
+    }
+
+    /// ユーザーデータの所有権を取得する
+    pub fn into_user_data(self) -> T {
+        self.user_data
     }
 }
 
@@ -321,7 +326,6 @@ pub struct Encoder<T: Send + 'static> {
     component: Component,
     context: Context,
     surface_format: AMF_SURFACE_FORMAT,
-    frame_format: FrameFormat,
     width: i32,
     height: i32,
     frame_count: u64,
@@ -336,10 +340,10 @@ impl<T: Send + 'static> Encoder<T> {
     /// エンコーダーを作成して初期化する
     ///
     /// `callback` はエンコード完了時にワーカースレッドから呼び出される。
-    /// 第 1 引数はエンコード済みフレーム、第 2 引数は `encode()` に渡された `T` の値。
+    /// 引数は `encode()` に渡されたユーザーデータを含むエンコード済みフレーム。
     pub fn new(
         config: EncoderConfig,
-        callback: impl FnMut(EncodedFrame, T) + Send + 'static,
+        callback: impl FnMut(EncodedFrame<T>) + Send + 'static,
     ) -> Result<Self, Error> {
         // 入力パラメータのバリデーション
         if config.width == 0 || config.height == 0 {
@@ -431,7 +435,6 @@ impl<T: Send + 'static> Encoder<T> {
             component,
             context,
             surface_format,
-            frame_format: config.frame_format,
             width: config.width as i32,
             height: config.height as i32,
             frame_count: 0,
@@ -777,43 +780,28 @@ impl<T: Send + 'static> Encoder<T> {
         Ok(())
     }
 
+    /// エンコード用の Surface を確保する
+    ///
+    /// 確保された Surface は呼び出し元がフレームデータを書き込んでから
+    /// [`encode()`] に渡す。
+    pub fn alloc_surface(&self) -> Result<Surface, Error> {
+        self.context.alloc_surface(
+            AMF_MEMORY_TYPE::AMF_MEMORY_HOST,
+            self.surface_format,
+            self.width,
+            self.height,
+        )
+    }
+
     /// フレームをエンコードする
     ///
     /// `user_data` はエンコード完了時にコールバックへ渡される。
     pub fn encode(
         &mut self,
-        frame_data: &[u8],
+        surface: Surface,
         options: &EncodeOptions,
         user_data: T,
     ) -> Result<(), Error> {
-        let expected_size = self
-            .frame_format
-            .frame_size(self.width as usize, self.height as usize)
-            .ok_or_else(|| {
-                Error::new_custom("Encoder::encode", "frame size calculation overflow")
-            })?;
-        if frame_data.len() != expected_size {
-            return Err(Error::new_custom(
-                "Encoder::encode",
-                &format!(
-                    "frame data size mismatch: expected {expected_size}, got {}",
-                    frame_data.len()
-                ),
-            ));
-        }
-
-        log::debug!("Encoder::encode: AllocSurface");
-        // Surface を確保する
-        let surface = self.context.alloc_surface(
-            AMF_MEMORY_TYPE::AMF_MEMORY_HOST,
-            self.surface_format,
-            self.width,
-            self.height,
-        )?;
-
-        // フレームデータを Surface にコピーする
-        self.copy_frame_to_surface(&surface, frame_data)?;
-
         // PTS を設定する
         let pts = (self.frame_count * self.framerate_den * AMF_SECOND as u64 / self.framerate_num)
             as amf_pts;
@@ -845,7 +833,7 @@ impl<T: Send + 'static> Encoder<T> {
                 std::thread::sleep(Duration::from_millis(1));
                 continue;
             }
-            // その他のエラー: Surface を解放してエラーを返す
+            // その他のエラー
             return Error::check(result, "AMFComponent::SubmitInput");
         }
         if !submitted {
@@ -864,295 +852,6 @@ impl<T: Send + 'static> Encoder<T> {
             .send(WorkerCommand::Submit(user_data))
             .map_err(|_| Error::new_custom("Encoder::encode", "worker thread terminated"))?;
 
-        Ok(())
-    }
-
-    /// フレームデータを AMFSurface にコピーする
-    fn copy_frame_to_surface(&self, surface: &Surface, frame_data: &[u8]) -> Result<(), Error> {
-        match self.frame_format {
-            FrameFormat::Nv12 | FrameFormat::P010 | FrameFormat::P012 | FrameFormat::P016 => {
-                // Semi-Planar YUV 4:2:0: Y プレーン + UV インターリーブプレーン
-                // NV12 は 8bit (1 バイト/サンプル)、P010/P012/P016 は 16bit (2 バイト/サンプル)
-                let bytes_per_sample: usize = match self.frame_format {
-                    FrameFormat::Nv12 => 1,
-                    _ => 2,
-                };
-                let width = self.width as usize;
-                let row_bytes = width.checked_mul(bytes_per_sample).ok_or_else(|| {
-                    Error::new_custom("copy_frame_to_surface", "row bytes overflow")
-                })?;
-
-                // Y プレーン
-                let y_plane = surface.get_plane(AMF_PLANE_TYPE::AMF_PLANE_Y)?;
-                let y_native = y_plane.get_native() as *mut u8;
-                if y_native.is_null() {
-                    return Err(Error::new_custom(
-                        "copy_frame_to_surface",
-                        "Y plane native pointer is null",
-                    ));
-                }
-                let y_hpitch = positive_i32_to_usize(
-                    y_plane.get_hpitch(),
-                    "copy_frame_to_surface",
-                    "y_hpitch",
-                )?;
-                if y_hpitch < row_bytes {
-                    return Err(Error::new_custom(
-                        "copy_frame_to_surface",
-                        "Y plane hpitch is smaller than row bytes",
-                    ));
-                }
-
-                let height = self.height as usize;
-                // Y プレーン: height 行 * row_bytes バイト
-                let y_required = height.checked_mul(row_bytes).ok_or_else(|| {
-                    Error::new_custom("copy_frame_to_surface", "Y plane size overflow")
-                })?;
-                if y_required > frame_data.len() {
-                    return Err(Error::new_custom(
-                        "copy_frame_to_surface",
-                        "frame data too small for Y plane",
-                    ));
-                }
-
-                for row in 0..height {
-                    unsafe {
-                        ptr::copy_nonoverlapping(
-                            frame_data.as_ptr().add(row * row_bytes),
-                            y_native.add(row * y_hpitch),
-                            row_bytes,
-                        );
-                    }
-                }
-
-                // UV プレーン
-                let uv_plane = surface.get_plane(AMF_PLANE_TYPE::AMF_PLANE_UV)?;
-                let uv_native = uv_plane.get_native() as *mut u8;
-                if uv_native.is_null() {
-                    return Err(Error::new_custom(
-                        "copy_frame_to_surface",
-                        "UV plane native pointer is null",
-                    ));
-                }
-                let uv_hpitch = positive_i32_to_usize(
-                    uv_plane.get_hpitch(),
-                    "copy_frame_to_surface",
-                    "uv_hpitch",
-                )?;
-                if uv_hpitch < row_bytes {
-                    return Err(Error::new_custom(
-                        "copy_frame_to_surface",
-                        "UV plane hpitch is smaller than row bytes",
-                    ));
-                }
-
-                let uv_height = height / 2;
-                let y_data_size = y_required;
-                // UV プレーン: uv_height 行 * row_bytes バイト
-                let uv_required = uv_height
-                    .checked_mul(row_bytes)
-                    .and_then(|uv| y_data_size.checked_add(uv))
-                    .ok_or_else(|| {
-                        Error::new_custom("copy_frame_to_surface", "UV plane size overflow")
-                    })?;
-                if uv_required > frame_data.len() {
-                    return Err(Error::new_custom(
-                        "copy_frame_to_surface",
-                        "frame data too small for UV plane",
-                    ));
-                }
-
-                for row in 0..uv_height {
-                    unsafe {
-                        ptr::copy_nonoverlapping(
-                            frame_data.as_ptr().add(y_data_size + row * row_bytes),
-                            uv_native.add(row * uv_hpitch),
-                            row_bytes,
-                        );
-                    }
-                }
-            }
-            FrameFormat::I420 | FrameFormat::Yv12 => {
-                // Planar YUV 4:2:0: Y/U/V (I420) または Y/V/U (YV12) の 3 プレーン
-                let width = self.width as usize;
-                let height = self.height as usize;
-                let y_size = width.checked_mul(height).ok_or_else(|| {
-                    Error::new_custom("copy_frame_to_surface", "Y plane size overflow")
-                })?;
-                let uv_plane_size = (width / 2).checked_mul(height / 2).ok_or_else(|| {
-                    Error::new_custom("copy_frame_to_surface", "UV plane size overflow")
-                })?;
-
-                // Y プレーン
-                let y_plane = surface.get_plane(AMF_PLANE_TYPE::AMF_PLANE_Y)?;
-                let y_native = y_plane.get_native() as *mut u8;
-                if y_native.is_null() {
-                    return Err(Error::new_custom(
-                        "copy_frame_to_surface",
-                        "Y plane native pointer is null",
-                    ));
-                }
-                let y_hpitch = positive_i32_to_usize(
-                    y_plane.get_hpitch(),
-                    "copy_frame_to_surface",
-                    "y_hpitch",
-                )?;
-                if y_hpitch < width {
-                    return Err(Error::new_custom(
-                        "copy_frame_to_surface",
-                        "Y plane hpitch is smaller than width",
-                    ));
-                }
-                // Y + U + V の合計サイズを事前検証する
-                let total_required = uv_plane_size
-                    .checked_mul(2)
-                    .and_then(|uv| y_size.checked_add(uv))
-                    .ok_or_else(|| {
-                        Error::new_custom("copy_frame_to_surface", "I420/YV12 total size overflow")
-                    })?;
-                if total_required > frame_data.len() {
-                    return Err(Error::new_custom(
-                        "copy_frame_to_surface",
-                        "frame data too small for I420/YV12",
-                    ));
-                }
-
-                for row in 0..height {
-                    unsafe {
-                        ptr::copy_nonoverlapping(
-                            frame_data.as_ptr().add(row * width),
-                            y_native.add(row * y_hpitch),
-                            width,
-                        );
-                    }
-                }
-
-                // U プレーン
-                let u_plane = surface.get_plane(AMF_PLANE_TYPE::AMF_PLANE_U)?;
-                let u_native = u_plane.get_native() as *mut u8;
-                if u_native.is_null() {
-                    return Err(Error::new_custom(
-                        "copy_frame_to_surface",
-                        "U plane native pointer is null",
-                    ));
-                }
-                let u_hpitch = positive_i32_to_usize(
-                    u_plane.get_hpitch(),
-                    "copy_frame_to_surface",
-                    "u_hpitch",
-                )?;
-                let uv_width = width / 2;
-                let uv_height = height / 2;
-                if u_hpitch < uv_width {
-                    return Err(Error::new_custom(
-                        "copy_frame_to_surface",
-                        "U plane hpitch is smaller than uv_width",
-                    ));
-                }
-
-                // I420: Y+U+V, YV12: Y+V+U
-                // AMF はフォーマットに応じてプレーン順を管理するため、
-                // GetPlane(AMF_PLANE_U/V) で正しいプレーンが返る
-                let first_uv_offset = y_size;
-                let second_uv_offset = y_size + uv_plane_size;
-
-                for row in 0..uv_height {
-                    unsafe {
-                        ptr::copy_nonoverlapping(
-                            frame_data.as_ptr().add(first_uv_offset + row * uv_width),
-                            u_native.add(row * u_hpitch),
-                            uv_width,
-                        );
-                    }
-                }
-
-                // V プレーン
-                let v_plane = surface.get_plane(AMF_PLANE_TYPE::AMF_PLANE_V)?;
-                let v_native = v_plane.get_native() as *mut u8;
-                if v_native.is_null() {
-                    return Err(Error::new_custom(
-                        "copy_frame_to_surface",
-                        "V plane native pointer is null",
-                    ));
-                }
-                let v_hpitch = positive_i32_to_usize(
-                    v_plane.get_hpitch(),
-                    "copy_frame_to_surface",
-                    "v_hpitch",
-                )?;
-                if v_hpitch < uv_width {
-                    return Err(Error::new_custom(
-                        "copy_frame_to_surface",
-                        "V plane hpitch is smaller than uv_width",
-                    ));
-                }
-
-                for row in 0..uv_height {
-                    unsafe {
-                        ptr::copy_nonoverlapping(
-                            frame_data.as_ptr().add(second_uv_offset + row * uv_width),
-                            v_native.add(row * v_hpitch),
-                            uv_width,
-                        );
-                    }
-                }
-            }
-            _ => {
-                // Packed フォーマット: 単一プレーンにコピーする
-                let plane = surface.get_plane_at(0)?;
-                let native = plane.get_native() as *mut u8;
-                if native.is_null() {
-                    return Err(Error::new_custom(
-                        "copy_frame_to_surface",
-                        "plane native pointer is null",
-                    ));
-                }
-                let hpitch =
-                    positive_i32_to_usize(plane.get_hpitch(), "copy_frame_to_surface", "hpitch")?;
-                let bpp: usize = match self.frame_format {
-                    // Packed 32bit 系
-                    FrameFormat::Bgra
-                    | FrameFormat::Argb
-                    | FrameFormat::Rgba
-                    | FrameFormat::Ayuv
-                    | FrameFormat::Y410
-                    | FrameFormat::Y210 => 4,
-                    // Packed 64bit 系
-                    FrameFormat::Y416 => 8,
-                    // Packed YUV 4:2:2 8bit 系
-                    FrameFormat::Yuy2 | FrameFormat::Uyvy => 2,
-                    _ => unreachable!(),
-                };
-                let row_bytes = (self.width as usize).checked_mul(bpp).ok_or_else(|| {
-                    Error::new_custom("copy_frame_to_surface", "row bytes overflow")
-                })?;
-                if hpitch < row_bytes {
-                    return Err(Error::new_custom(
-                        "copy_frame_to_surface",
-                        "plane hpitch is smaller than row bytes",
-                    ));
-                }
-                let height = self.height as usize;
-                let total_required = height.checked_mul(row_bytes).ok_or_else(|| {
-                    Error::new_custom("copy_frame_to_surface", "packed total size overflow")
-                })?;
-                if total_required > frame_data.len() {
-                    return Err(Error::new_custom(
-                        "copy_frame_to_surface",
-                        "frame data too small for packed format",
-                    ));
-                }
-                for row in 0..height {
-                    unsafe {
-                        ptr::copy_nonoverlapping(
-                            frame_data.as_ptr().add(row * row_bytes),
-                            native.add(row * hpitch),
-                            row_bytes,
-                        );
-                    }
-                }
-            }
-        }
         Ok(())
     }
 
@@ -1247,10 +946,10 @@ fn worker<T, F>(
     codec_config: CodecConfig,
 ) where
     T: Send + 'static,
-    F: FnMut(EncodedFrame, T) + Send + 'static,
+    F: FnMut(EncodedFrame<T>) + Send + 'static,
 {
     let mut pending: VecDeque<T> = VecDeque::new();
-    let mut output_buffer: VecDeque<EncodedFrame> = VecDeque::new();
+    let mut output_buffer: VecDeque<(Buffer, PictureType)> = VecDeque::new();
     let mut finish: Option<mpsc::SyncSender<()>> = None;
 
     loop {
@@ -1300,7 +999,7 @@ fn worker<T, F>(
 
 /// QueryOutput からの出力をバッファに格納し、pending とマッチングしてコールバックを呼び出す
 fn drain_output<T, F>(
-    output_buffer: &mut VecDeque<EncodedFrame>,
+    output_buffer: &mut VecDeque<(Buffer, PictureType)>,
     pending: &mut VecDeque<T>,
     callback: &mut F,
     component: &Component,
@@ -1308,7 +1007,7 @@ fn drain_output<T, F>(
 ) -> Result<(), Error>
 where
     T: Send + 'static,
-    F: FnMut(EncodedFrame, T),
+    F: FnMut(EncodedFrame<T>),
 {
     // 出力をバッファに格納する
     loop {
@@ -1322,29 +1021,30 @@ where
             break;
         }
         match extract_encoded_output(data, codec_config) {
-            Ok(frame) => output_buffer.push_back(frame),
+            Ok(tuple) => output_buffer.push_back(tuple),
             Err(e) => log::error!("Failed to extract encoded output: {e}"),
         }
     }
 
     // バッファされた出力と pending をマッチングする
     while !output_buffer.is_empty() && !pending.is_empty() {
-        let frame = output_buffer.pop_front().unwrap();
-        let t = pending.pop_front().unwrap();
-        callback(frame, t);
+        let (buffer, picture_type) = output_buffer.pop_front().unwrap();
+        let user_data = pending.pop_front().unwrap();
+        callback(EncodedFrame {
+            buffer,
+            picture_type,
+            user_data,
+        });
     }
 
     Ok(())
 }
-// ---------------------------------------------------------------------------
-// 出力抽出 (standalone)
-// ---------------------------------------------------------------------------
 
-/// AMFData から EncodedFrame を抽出する
+/// AMFData から Buffer とピクチャタイプを抽出する
 fn extract_encoded_output(
     data: *mut AMFData,
     codec_config: &CodecConfig,
-) -> Result<EncodedFrame, Error> {
+) -> Result<(Buffer, PictureType), Error> {
     let buffer = data as *mut AMFBuffer;
     if buffer.is_null() {
         return Err(Error::new_custom(
@@ -1367,16 +1067,10 @@ fn extract_encoded_output(
             "buffer native is null",
         ));
     }
-    let pts = buffer.get_pts();
+    let _ = buf_native;
 
-    let frame_data = unsafe { std::slice::from_raw_parts(buf_native, buf_size) }.to_vec();
     let picture_type = get_output_picture_type(&buffer, codec_config);
-
-    Ok(EncodedFrame {
-        data: frame_data,
-        pts,
-        picture_type,
-    })
+    Ok((buffer, picture_type))
 }
 
 /// 出力バッファからピクチャタイプを取得する

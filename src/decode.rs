@@ -10,10 +10,10 @@ use std::thread::JoinHandle;
 use std::time::Duration;
 
 use crate::AmfLibrary;
-use crate::amf::{Component, Context, Surface};
-use crate::error::{Error, positive_i32_to_usize};
+use crate::amf::{Buffer, Component, Context, Surface};
+use crate::error::Error;
 use crate::sys::{
-    self, AMF_MEMORY_TYPE, AMF_PLANE_TYPE, AMF_RESULT, AMF_SURFACE_FORMAT, AMFData, AMFSurface,
+    self, AMF_MEMORY_TYPE, AMF_RESULT, AMF_SURFACE_FORMAT, AMFData, AMFSurface,
 };
 
 // ---------------------------------------------------------------------------
@@ -34,33 +34,32 @@ pub struct DecoderConfig {
     pub codec: DecoderCodec,
 }
 
-/// デコード済みフレーム (NV12 形式)
+/// デコード済みフレーム
 #[derive(Debug)]
-pub struct DecodedFrame {
-    width: usize,
-    height: usize,
-    data: Vec<u8>,
+pub struct DecodedFrame<T> {
+    surface: Surface,
+    user_data: T,
 }
 
-impl DecodedFrame {
-    /// NV12 フレームデータへの参照
-    pub fn data(&self) -> &[u8] {
-        &self.data
+impl<T> DecodedFrame<T> {
+    /// デコード後の Surface (convert 済み)
+    pub fn surface(&self) -> &Surface {
+        &self.surface
     }
 
-    /// フレームデータの所有権を取得する
-    pub fn into_data(self) -> Vec<u8> {
-        self.data
+    /// Surface の所有権を取得する
+    pub fn into_surface(self) -> Surface {
+        self.surface
     }
 
-    /// フレーム幅
-    pub fn width(&self) -> usize {
-        self.width
+    /// ユーザーデータ
+    pub fn user_data(&self) -> &T {
+        &self.user_data
     }
 
-    /// フレーム高さ
-    pub fn height(&self) -> usize {
-        self.height
+    /// ユーザーデータの所有権を取得する
+    pub fn into_user_data(self) -> T {
+        self.user_data
     }
 }
 
@@ -89,10 +88,10 @@ impl<T: Send + 'static> Decoder<T> {
     /// デコーダーを作成する
     ///
     /// `callback` はデコード完了時にワーカースレッドから呼び出される。
-    /// 第 1 引数はデコード済みフレーム、第 2 引数は `decode()` に渡された `T` の値。
+    /// 引数は `decode()` に渡されたユーザーデータを含むデコード済みフレーム。
     pub fn new(
         config: DecoderConfig,
-        callback: impl FnMut(DecodedFrame, T) + Send + 'static,
+        callback: impl FnMut(DecodedFrame<T>) + Send + 'static,
     ) -> Result<Self, Error> {
         let lib = AmfLibrary::instance();
         let context = lib.create_context()?;
@@ -132,30 +131,20 @@ impl<T: Send + 'static> Decoder<T> {
         })
     }
 
+    /// デコード用のバッファを確保する
+    ///
+    /// 確保されたバッファは呼び出し元がビットストリームデータを書き込んでから
+    /// [`decode()`] に渡す。
+    pub fn alloc_buffer(&self, size: usize) -> Result<Buffer, Error> {
+        self.context
+            .alloc_buffer(AMF_MEMORY_TYPE::AMF_MEMORY_HOST, size)
+    }
+
     /// ビットストリームをデコードする
     ///
     /// `user_data` はデコード完了時にコールバックへ渡される。
-    pub fn decode(&mut self, data: &[u8], user_data: T) -> Result<(), Error> {
-        if data.is_empty() {
-            return Ok(());
-        }
-
-        log::debug!("Decoder::decode: data size={}", data.len());
-
-        let buffer = self
-            .context
-            .alloc_buffer(AMF_MEMORY_TYPE::AMF_MEMORY_HOST, data.len())?;
-
-        let buf_native = buffer.get_native() as *mut u8;
-        if buf_native.is_null() {
-            return Err(Error::new_custom(
-                "Decoder::decode",
-                "buffer native pointer is null",
-            ));
-        }
-        unsafe {
-            ptr::copy_nonoverlapping(data.as_ptr(), buf_native, data.len());
-        }
+    pub fn decode(&mut self, buffer: Buffer, user_data: T) -> Result<(), Error> {
+        log::debug!("Decoder::decode");
 
         let max_retries = 100;
         let mut submitted = false;
@@ -249,10 +238,10 @@ impl<T: Send + 'static> Drop for Decoder<T> {
 fn worker<T, F>(component: Component, mut callback: F, cmd_rx: mpsc::Receiver<WorkerCommand<T>>)
 where
     T: Send + 'static,
-    F: FnMut(DecodedFrame, T) + Send + 'static,
+    F: FnMut(DecodedFrame<T>) + Send + 'static,
 {
     let mut pending: VecDeque<T> = VecDeque::new();
-    let mut output_buffer: VecDeque<DecodedFrame> = VecDeque::new();
+    let mut output_buffer: VecDeque<Surface> = VecDeque::new();
     let mut finish: Option<mpsc::SyncSender<()>> = None;
 
     loop {
@@ -297,14 +286,14 @@ where
 
 /// QueryOutput からの出力をバッファに格納し、pending とマッチングしてコールバックを呼び出す
 fn drain_output<T, F>(
-    output_buffer: &mut VecDeque<DecodedFrame>,
+    output_buffer: &mut VecDeque<Surface>,
     pending: &mut VecDeque<T>,
     callback: &mut F,
     component: &Component,
 ) -> Result<(), Error>
 where
     T: Send + 'static,
-    F: FnMut(DecodedFrame, T),
+    F: FnMut(DecodedFrame<T>),
 {
     loop {
         let mut data: *mut AMFData = ptr::null_mut();
@@ -313,7 +302,7 @@ where
         if result == AMF_RESULT::AMF_REPEAT {
             if !data.is_null() {
                 match extract_frame(data as *mut AMFSurface) {
-                    Ok(frame) => output_buffer.push_back(frame),
+                    Ok(surface) => output_buffer.push_back(surface),
                     Err(e) => log::error!("Failed to extract frame: {e}"),
                 }
                 continue;
@@ -327,15 +316,15 @@ where
             break;
         }
         match extract_frame(data as *mut AMFSurface) {
-            Ok(frame) => output_buffer.push_back(frame),
+            Ok(surface) => output_buffer.push_back(surface),
             Err(e) => log::error!("Failed to extract frame: {e}"),
         }
     }
 
     while !output_buffer.is_empty() && !pending.is_empty() {
-        let frame = output_buffer.pop_front().unwrap();
-        let t = pending.pop_front().unwrap();
-        callback(frame, t);
+        let surface = output_buffer.pop_front().unwrap();
+        let user_data = pending.pop_front().unwrap();
+        callback(DecodedFrame { surface, user_data });
     }
 
     Ok(())
@@ -345,11 +334,10 @@ where
 // フレーム抽出 (standalone)
 // ---------------------------------------------------------------------------
 
-/// AMFSurface から DecodedFrame を抽出する
+/// AMFSurface を抽出して convert する
 ///
-/// null ポインタやサイズ不整合によるメモリアクセス違反を防ぐため、
-/// 各段階で検証を行う。エラー時は `Err` を返す。
-fn extract_frame(surface: *mut AMFSurface) -> Result<DecodedFrame, Error> {
+/// null ポインタや convert 失敗の場合は `Err` を返す。
+fn extract_frame(surface: *mut AMFSurface) -> Result<Surface, Error> {
     if surface.is_null() {
         return Err(Error::new_custom("extract_frame", "surface is null"));
     }
@@ -364,64 +352,5 @@ fn extract_frame(surface: *mut AMFSurface) -> Result<DecodedFrame, Error> {
         ));
     }
 
-    let y_plane = surface.get_plane(AMF_PLANE_TYPE::AMF_PLANE_Y)?;
-
-    let width_raw = y_plane.get_width();
-    let height_raw = y_plane.get_height();
-    let width = positive_i32_to_usize(width_raw, "extract_frame", "width")?;
-    let height = positive_i32_to_usize(height_raw, "extract_frame", "height")?;
-    let y_hpitch_raw = y_plane.get_hpitch();
-    let y_hpitch = positive_i32_to_usize(y_hpitch_raw, "extract_frame", "y_hpitch")?;
-    if y_hpitch < width {
-        return Err(Error::new_custom("extract_frame", "y_hpitch < width"));
-    }
-    let y_native = y_plane.get_native() as *const u8;
-    if y_native.is_null() {
-        return Err(Error::new_custom("extract_frame", "Y native is null"));
-    }
-
-    let y_size = width
-        .checked_mul(height)
-        .ok_or_else(|| Error::new_custom("extract_frame", "Y plane size overflow"))?;
-    let nv12_size = y_size
-        .checked_mul(3)
-        .and_then(|v| v.checked_div(2))
-        .ok_or_else(|| Error::new_custom("extract_frame", "NV12 size overflow"))?;
-    let mut frame_data = vec![0u8; nv12_size];
-
-    for row in 0..height {
-        unsafe {
-            ptr::copy_nonoverlapping(
-                y_native.add(row * y_hpitch),
-                frame_data.as_mut_ptr().add(row * width),
-                width,
-            );
-        }
-    }
-
-    let uv_plane = surface.get_plane(AMF_PLANE_TYPE::AMF_PLANE_UV)?;
-    let uv_hpitch_raw = uv_plane.get_hpitch();
-    let uv_hpitch = uv_hpitch_raw.max(0) as usize;
-    let uv_height_raw = uv_plane.get_height();
-    let uv_height = uv_height_raw.max(0) as usize;
-    let uv_native = uv_plane.get_native() as *const u8;
-    if !uv_native.is_null() && uv_hpitch >= width && uv_height > 0 {
-        let max_uv_rows = (nv12_size - y_size) / width;
-        let copy_rows = uv_height.min(max_uv_rows);
-        for row in 0..copy_rows {
-            unsafe {
-                ptr::copy_nonoverlapping(
-                    uv_native.add(row * uv_hpitch),
-                    frame_data.as_mut_ptr().add(y_size + row * width),
-                    width,
-                );
-            }
-        }
-    }
-
-    Ok(DecodedFrame {
-        width,
-        height,
-        data: frame_data,
-    })
+    Ok(surface)
 }

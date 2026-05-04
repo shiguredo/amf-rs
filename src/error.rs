@@ -241,22 +241,6 @@ pub(crate) fn require_vtbl_fn<F>(f: Option<F>, name: &str) -> Result<F, Error> {
 }
 
 /// AMF が返す `amf_int32` を `usize` に安全に変換する
-///
-/// 負値や 0 は不正値としてエラーを返す。
-pub(crate) fn positive_i32_to_usize(
-    value: i32,
-    context: &'static str,
-    name: &str,
-) -> Result<usize, Error> {
-    if value <= 0 {
-        return Err(Error::new_custom(
-            context,
-            &format!("{name} has invalid value: {value}"),
-        ));
-    }
-    Ok(value as usize)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
