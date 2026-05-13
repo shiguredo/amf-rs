@@ -316,8 +316,6 @@ pub struct Encoder {
     framerate_num: u64,
     framerate_den: u64,
     codec_config: CodecConfig,
-    // ライブラリハンドルを保持して Drop 順序で dlclose が最後に呼ばれることを保証する
-    _lib: AmfLibrary,
 }
 
 // 安全性:
@@ -371,11 +369,11 @@ impl Encoder {
             ));
         }
 
-        let lib = AmfLibrary::load()?;
+        let lib = AmfLibrary::instance();
         let context = lib.create_context()?;
 
         // Linux では Vulkan/OpenCL でコンテキストを初期化する
-        AmfLibrary::init_vulkan(context)?;
+        lib.init_vulkan(context)?;
 
         // コーデック固有のコンポーネント ID を選択する
         let component_id = match &config.codec {
@@ -383,27 +381,9 @@ impl Encoder {
             CodecConfig::Hevc(_) => sys::str::AMFVideoEncoder_HEVC,
             CodecConfig::Av1(_) => sys::str::AMFVideoEncoder_AV1,
         };
-        let component_id_w = sys::to_wstring(component_id);
 
         // コンポーネントを作成する
-        let mut component: *mut AMFComponent = ptr::null_mut();
-        let result = unsafe {
-            let vtbl = &*(*lib.factory()).pVtbl;
-            require_vtbl_fn(vtbl.CreateComponent, "CreateComponent")?(
-                lib.factory(),
-                context,
-                component_id_w.as_ptr(),
-                &mut component,
-            )
-        };
-        Error::check(result, "AMFFactory::CreateComponent")?;
-
-        if component.is_null() {
-            return Err(Error::new_custom(
-                "Encoder::new",
-                "CreateComponent returned null",
-            ));
-        }
+        let component = lib.create_component(context, component_id)?;
 
         let surface_format = config.frame_format.to_amf();
 
@@ -423,7 +403,6 @@ impl Encoder {
         Error::check(result, "AMFComponent::Init")?;
 
         Ok(Self {
-            _lib: lib,
             context,
             component,
             surface_format,

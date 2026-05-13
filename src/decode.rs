@@ -66,8 +66,6 @@ impl DecodedFrame {
 
 /// AMF ハードウェアデコーダー
 pub struct Decoder {
-    // ライブラリハンドルを保持して Drop 順序で dlclose が最後に呼ばれることを保証する
-    _lib: AmfLibrary,
     context: *mut AMFContext,
     component: *mut AMFComponent,
     decoded_frames: VecDeque<DecodedFrame>,
@@ -86,36 +84,18 @@ unsafe impl Send for Decoder {}
 impl Decoder {
     /// デコーダーを作成する
     pub fn new(config: DecoderConfig) -> Result<Self, Error> {
-        let lib = AmfLibrary::load()?;
+        let lib = AmfLibrary::instance();
         let context = lib.create_context()?;
 
-        AmfLibrary::init_vulkan(context)?;
+        lib.init_vulkan(context)?;
 
         let component_id = match config.codec {
             DecoderCodec::H264 => sys::str::AMFVideoDecoderUVD_H264_AVC,
             DecoderCodec::Hevc => sys::str::AMFVideoDecoderHW_H265_HEVC,
             DecoderCodec::Av1 => sys::str::AMFVideoDecoderHW_AV1,
         };
-        let component_id_w = sys::to_wstring(component_id);
 
-        let mut component: *mut AMFComponent = ptr::null_mut();
-        let result = unsafe {
-            let vtbl = &*(*lib.factory()).pVtbl;
-            require_vtbl_fn(vtbl.CreateComponent, "CreateComponent")?(
-                lib.factory(),
-                context,
-                component_id_w.as_ptr(),
-                &mut component,
-            )
-        };
-        Error::check(result, "AMFFactory::CreateComponent")?;
-
-        if component.is_null() {
-            return Err(Error::new_custom(
-                "Decoder::new",
-                "CreateComponent returned null",
-            ));
-        }
+        let component = lib.create_component(context, component_id)?;
 
         // デコーダーを初期化する (解像度は 0,0 でストリームから自動検出)
         let result = unsafe {
@@ -130,7 +110,6 @@ impl Decoder {
         Error::check(result, "AMFComponent::Init")?;
 
         Ok(Self {
-            _lib: lib,
             context,
             component,
             decoded_frames: VecDeque::new(),

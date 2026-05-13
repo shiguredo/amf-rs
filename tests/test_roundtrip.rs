@@ -1,13 +1,8 @@
-use std::sync::Mutex;
-
 use shiguredo_amf::{
     Av1EncoderConfig, Av1Profile, CodecConfig, Decoder, DecoderCodec, DecoderConfig, EncodeOptions,
     EncodedFrame, Encoder, EncoderConfig, FrameFormat, H264EncoderConfig, H264Profile,
     HevcEncoderConfig, HevcProfile, PictureType, RateControlMode, ReconfigureParams, frame_type,
 };
-
-/// AMF はスレッドセーフではないためテストを直列化する
-static AMF_LOCK: Mutex<()> = Mutex::new(());
 
 /// ダミー NV12 フレームを生成する
 ///
@@ -387,7 +382,6 @@ fn roundtrip_colorbar(
 /// H.264 CBR カラーバーのラウンドトリップ（PSNR 検証）
 #[test]
 fn test_roundtrip_h264_cbr() {
-    let _lock = AMF_LOCK.lock().unwrap();
     let mut config = EncoderConfig::new(
         CodecConfig::H264(H264EncoderConfig {
             profile: Some(H264Profile::High),
@@ -408,7 +402,6 @@ fn test_roundtrip_h264_cbr() {
 /// H.264 CQP カラーバーのラウンドトリップ（PSNR 検証）
 #[test]
 fn test_roundtrip_h264_cqp() {
-    let _lock = AMF_LOCK.lock().unwrap();
     let mut config = EncoderConfig::new(
         CodecConfig::H264(H264EncoderConfig {
             profile: Some(H264Profile::Main),
@@ -431,7 +424,6 @@ fn test_roundtrip_h264_cqp() {
 /// H.264 で IDR フレームを強制してラウンドトリップする
 #[test]
 fn test_roundtrip_h264_force_idr() {
-    let _lock = AMF_LOCK.lock().unwrap();
     let mut config = EncoderConfig::new(
         CodecConfig::H264(H264EncoderConfig {
             profile: Some(H264Profile::High),
@@ -489,7 +481,6 @@ fn test_roundtrip_h264_force_idr() {
 /// H.264 で force_picture_type 指定時に IDR と SPS / PPS が出力されることを確認する
 #[test]
 fn test_force_picture_type_h264_outputs_idr_and_sps_pps() {
-    let _lock = AMF_LOCK.lock().unwrap();
     let mut config = EncoderConfig::new(
         CodecConfig::H264(H264EncoderConfig {
             profile: Some(H264Profile::High),
@@ -520,7 +511,6 @@ fn test_force_picture_type_h264_outputs_idr_and_sps_pps() {
 /// H.265 CBR カラーバーのラウンドトリップ（PSNR 検証）
 #[test]
 fn test_roundtrip_hevc_cbr() {
-    let _lock = AMF_LOCK.lock().unwrap();
     let mut config = EncoderConfig::new(
         CodecConfig::Hevc(HevcEncoderConfig {
             profile: Some(HevcProfile::Main),
@@ -541,7 +531,6 @@ fn test_roundtrip_hevc_cbr() {
 /// H.265 CQP カラーバーのラウンドトリップ（PSNR 検証）
 #[test]
 fn test_roundtrip_hevc_cqp() {
-    let _lock = AMF_LOCK.lock().unwrap();
     let mut config = EncoderConfig::new(
         CodecConfig::Hevc(HevcEncoderConfig {
             profile: Some(HevcProfile::Main),
@@ -564,7 +553,6 @@ fn test_roundtrip_hevc_cqp() {
 /// HEVC で force_picture_type 指定時に IDR と VPS / SPS / PPS が出力されることを確認する
 #[test]
 fn test_force_picture_type_hevc_outputs_idr_and_vps_sps_pps() {
-    let _lock = AMF_LOCK.lock().unwrap();
     let mut config = EncoderConfig::new(
         CodecConfig::Hevc(HevcEncoderConfig {
             profile: Some(HevcProfile::Main),
@@ -595,7 +583,6 @@ fn test_force_picture_type_hevc_outputs_idr_and_vps_sps_pps() {
 /// AV1 CBR カラーバーのラウンドトリップ（PSNR 検証）
 #[test]
 fn test_roundtrip_av1_cbr() {
-    let _lock = AMF_LOCK.lock().unwrap();
     let mut config = EncoderConfig::new(
         CodecConfig::Av1(Av1EncoderConfig {
             profile: Some(Av1Profile::Main),
@@ -616,7 +603,6 @@ fn test_roundtrip_av1_cbr() {
 /// AV1 CQP カラーバーのラウンドトリップ（PSNR 検証）
 #[test]
 fn test_roundtrip_av1_cqp() {
-    let _lock = AMF_LOCK.lock().unwrap();
     let mut config = EncoderConfig::new(
         CodecConfig::Av1(Av1EncoderConfig {
             profile: Some(Av1Profile::Main),
@@ -639,7 +625,6 @@ fn test_roundtrip_av1_cqp() {
 /// AV1 で force_picture_type 指定時にキーフレームと Sequence Header が出力されることを確認する
 #[test]
 fn test_force_picture_type_av1_outputs_keyframe_and_sequence_header() {
-    let _lock = AMF_LOCK.lock().unwrap();
     let mut config = EncoderConfig::new(
         CodecConfig::Av1(Av1EncoderConfig {
             profile: Some(Av1Profile::Main),
@@ -668,7 +653,6 @@ fn test_force_picture_type_av1_outputs_keyframe_and_sequence_header() {
 /// reconfigure で 0 を含むフレームレートを指定するとエラーになることを確認する
 #[test]
 fn test_reconfigure_invalid_framerate_zero() {
-    let _lock = AMF_LOCK.lock().unwrap();
     let config = EncoderConfig::new(
         CodecConfig::H264(H264EncoderConfig {
             profile: Some(H264Profile::High),
@@ -698,7 +682,6 @@ fn test_reconfigure_invalid_framerate_zero() {
 /// H.264 でエンコード途中にビットレートとフレームレートを再設定できることを確認する
 #[test]
 fn test_reconfigure_h264_runtime_change() {
-    let _lock = AMF_LOCK.lock().unwrap();
     let mut config = EncoderConfig::new(
         CodecConfig::H264(H264EncoderConfig {
             profile: Some(H264Profile::High),
@@ -749,7 +732,6 @@ fn test_reconfigure_h264_runtime_change() {
 /// HEVC で非対応項目 qpb/gop_pic_size を指定しても失敗せず継続できることを確認する
 #[test]
 fn test_reconfigure_hevc_ignores_qpb_and_gop() {
-    let _lock = AMF_LOCK.lock().unwrap();
     let mut config = EncoderConfig::new(
         CodecConfig::Hevc(HevcEncoderConfig {
             profile: Some(HevcProfile::Main),
@@ -804,7 +786,6 @@ fn test_reconfigure_hevc_ignores_qpb_and_gop() {
 /// AV1 で qpb と gop_pic_size の再設定を適用して継続できることを確認する
 #[test]
 fn test_reconfigure_av1_qpb_and_gop() {
-    let _lock = AMF_LOCK.lock().unwrap();
     let mut config = EncoderConfig::new(
         CodecConfig::Av1(Av1EncoderConfig {
             profile: Some(Av1Profile::Main),
@@ -1054,7 +1035,6 @@ fn roundtrip_format(
 /// I420 入力の H.264 ラウンドトリップ
 #[test]
 fn test_roundtrip_h264_i420() {
-    let _lock = AMF_LOCK.lock().unwrap();
     roundtrip_format(
         CodecConfig::H264(H264EncoderConfig {
             profile: Some(H264Profile::High),
@@ -1068,7 +1048,6 @@ fn test_roundtrip_h264_i420() {
 /// YV12 入力の H.264 ラウンドトリップ
 #[test]
 fn test_roundtrip_h264_yv12() {
-    let _lock = AMF_LOCK.lock().unwrap();
     roundtrip_format(
         CodecConfig::H264(H264EncoderConfig {
             profile: Some(H264Profile::High),
@@ -1082,7 +1061,6 @@ fn test_roundtrip_h264_yv12() {
 /// BGRA 入力の H.264 ラウンドトリップ
 #[test]
 fn test_roundtrip_h264_bgra() {
-    let _lock = AMF_LOCK.lock().unwrap();
     roundtrip_format(
         CodecConfig::H264(H264EncoderConfig {
             profile: Some(H264Profile::High),
@@ -1096,7 +1074,6 @@ fn test_roundtrip_h264_bgra() {
 /// ARGB 入力の H.264 ラウンドトリップ
 #[test]
 fn test_roundtrip_h264_argb() {
-    let _lock = AMF_LOCK.lock().unwrap();
     roundtrip_format(
         CodecConfig::H264(H264EncoderConfig {
             profile: Some(H264Profile::High),
@@ -1110,7 +1087,6 @@ fn test_roundtrip_h264_argb() {
 /// RGBA 入力の H.264 ラウンドトリップ
 #[test]
 fn test_roundtrip_h264_rgba() {
-    let _lock = AMF_LOCK.lock().unwrap();
     roundtrip_format(
         CodecConfig::H264(H264EncoderConfig {
             profile: Some(H264Profile::High),
@@ -1124,7 +1100,6 @@ fn test_roundtrip_h264_rgba() {
 /// YUY2 入力の H.264 ラウンドトリップ
 #[test]
 fn test_roundtrip_h264_yuy2() {
-    let _lock = AMF_LOCK.lock().unwrap();
     roundtrip_format(
         CodecConfig::H264(H264EncoderConfig {
             profile: Some(H264Profile::High),
@@ -1142,7 +1117,6 @@ fn test_roundtrip_h264_yuy2() {
 /// 4K H.264 CBR 20Mbps のラウンドトリップ
 #[test]
 fn test_roundtrip_h264_4k_high_bitrate() {
-    let _lock = AMF_LOCK.lock().unwrap();
     let width: u32 = 3840;
     let height: u32 = 2160;
     let num_frames = 5;
@@ -1175,7 +1149,6 @@ fn test_roundtrip_h264_4k_high_bitrate() {
 /// 4K H.265 CBR 20Mbps のラウンドトリップ
 #[test]
 fn test_roundtrip_hevc_4k_high_bitrate() {
-    let _lock = AMF_LOCK.lock().unwrap();
     let width: u32 = 3840;
     let height: u32 = 2160;
     let num_frames = 5;
@@ -1208,7 +1181,6 @@ fn test_roundtrip_hevc_4k_high_bitrate() {
 /// 4K AV1 CBR 20Mbps のラウンドトリップ
 #[test]
 fn test_roundtrip_av1_4k_high_bitrate() {
-    let _lock = AMF_LOCK.lock().unwrap();
     let width: u32 = 3840;
     let height: u32 = 2160;
     let num_frames = 5;
