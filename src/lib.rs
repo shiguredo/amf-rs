@@ -83,14 +83,14 @@ impl AmfLibrary {
         if inner.is_none() {
             let lib = dl::DynLib::open(Path::new(AMF_DLL_NAME)).map_err(|e| {
                 Error::new_custom(
-                    "AmfLibrary::instance",
+                    "AmfLibrary::ensure_inner",
                     &format!("failed to load {AMF_DLL_NAME}: {e}"),
                 )
             })?;
 
             let amf_init: AMFInit_Fn = unsafe { lib.get(b"AMFInit") }.map_err(|e| {
                 Error::new_custom(
-                    "AmfLibrary::instance",
+                    "AmfLibrary::ensure_inner",
                     &format!("failed to find AMFInit: {e}"),
                 )
             })?;
@@ -101,7 +101,7 @@ impl AmfLibrary {
 
             if factory.is_null() {
                 return Err(Error::new_custom(
-                    "AmfLibrary::instance",
+                    "AmfLibrary::ensure_inner",
                     "AMFInit returned null factory",
                 ));
             }
