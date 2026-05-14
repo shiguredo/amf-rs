@@ -57,6 +57,48 @@ impl<T> DecodedFrame<T> {
 }
 
 // ---------------------------------------------------------------------------
+// ハンドラートレイト
+// ---------------------------------------------------------------------------
+
+/// デコード結果を通知するためのハンドラー
+///
+/// デコード処理が完了するたびに [`DecodeHandler::on_decoded`] が呼ばれる。
+pub trait DecodeHandler: Send + 'static {
+    /// ユーザーデータ型
+    type UserData: Send + 'static;
+    /// エラー型
+    type Error: From<crate::Error> + Send + 'static;
+    /// デコード完了時に呼ばれる
+    fn on_decoded(&mut self, result: Result<DecodedFrame<Self::UserData>, Self::Error>);
+}
+
+/// `FnMut` クロージャを [`DecodeHandler`] にするラッパー
+pub struct FnDecodeHandler<T, E = crate::Error> {
+    f: Box<dyn FnMut(Result<DecodedFrame<T>, E>) + Send + 'static>,
+}
+
+impl<T, E> FnDecodeHandler<T, E> {
+    pub fn new<F>(f: F) -> Self
+    where
+        F: FnMut(Result<DecodedFrame<T>, E>) + Send + 'static,
+    {
+        Self { f: Box::new(f) }
+    }
+}
+
+impl<T, E> DecodeHandler for FnDecodeHandler<T, E>
+where
+    T: Send + 'static,
+    E: From<crate::Error> + Send + 'static,
+{
+    type UserData = T;
+    type Error = E;
+    fn on_decoded(&mut self, result: Result<DecodedFrame<T>, E>) {
+        (self.f)(result);
+    }
+}
+
+// ---------------------------------------------------------------------------
 // ワーカースレッド用コマンド
 // ---------------------------------------------------------------------------
 
@@ -70,22 +112,18 @@ enum WorkerCommand<T> {
 // ---------------------------------------------------------------------------
 
 /// AMF ハードウェアデコーダー
-pub struct Decoder<T: Send + 'static> {
+pub struct Decoder<H: DecodeHandler> {
     component: Component,
     context: Context,
-    cmd_tx: Option<mpsc::Sender<WorkerCommand<T>>>,
+    cmd_tx: Option<mpsc::Sender<WorkerCommand<H::UserData>>>,
     poll_thread: Option<JoinHandle<()>>,
 }
 
-impl<T: Send + 'static> Decoder<T> {
+impl<H: DecodeHandler> Decoder<H> {
     /// デコーダーを作成する
     ///
-    /// `callback` はデコード完了時にワーカースレッドから呼び出される。
-    /// 引数は `decode()` に渡されたユーザーデータを含むデコード済みフレーム。
-    pub fn new(
-        config: DecoderConfig,
-        callback: impl FnMut(DecodedFrame<T>) + Send + 'static,
-    ) -> Result<Self, Error> {
+    /// `handler` はデコード完了時にワーカースレッドから呼び出される。
+    pub fn new(config: DecoderConfig, handler: H) -> Result<Self, Error> {
         let lib = AmfLibrary::instance();
         let context = lib.create_context()?;
 
@@ -102,12 +140,12 @@ impl<T: Send + 'static> Decoder<T> {
         let result = component.init(AMF_SURFACE_FORMAT::AMF_SURFACE_NV12, 0, 0);
         Error::check(result, "AMFComponent::Init")?;
 
-        let (cmd_tx, cmd_rx) = mpsc::channel::<WorkerCommand<T>>();
+        let (cmd_tx, cmd_rx) = mpsc::channel::<WorkerCommand<H::UserData>>();
         let worker_component = component.clone();
         let poll_thread = std::thread::Builder::new()
             .name("amf-decoder-worker".into())
             .spawn(move || {
-                worker(worker_component, callback, cmd_rx);
+                worker(worker_component, handler, cmd_rx);
             })
             .map_err(|e| {
                 Error::new_custom(
@@ -135,8 +173,8 @@ impl<T: Send + 'static> Decoder<T> {
 
     /// ビットストリームをデコードする
     ///
-    /// `user_data` はデコード完了時にコールバックへ渡される。
-    pub fn decode(&mut self, buffer: Buffer, user_data: T) -> Result<(), Error> {
+    /// `user_data` はデコード完了時にハンドラーへ渡される。
+    pub fn decode(&mut self, buffer: Buffer, user_data: H::UserData) -> Result<(), Error> {
         log::debug!("Decoder::decode");
 
         let max_retries = 100;
@@ -207,7 +245,7 @@ impl<T: Send + 'static> Decoder<T> {
 // 安全性:
 // Drop 内でのみ component/context を解放する。
 // ワーカースレッドは Drop より先に停止させる。
-impl<T: Send + 'static> Drop for Decoder<T> {
+impl<H: DecodeHandler> Drop for Decoder<H> {
     fn drop(&mut self) {
         self.cmd_tx = None;
 
@@ -227,14 +265,14 @@ impl<T: Send + 'static> Drop for Decoder<T> {
 /// ワーカースレッドのエントリポイント
 ///
 /// メインスレッドから `Submit(T)` コマンドを受け取り、AMFComponent::QueryOutput を
-/// ポーリングしてデコード済みフレームを取得し、コールバックを呼び出す。
-fn worker<T, F>(component: Component, mut callback: F, cmd_rx: mpsc::Receiver<WorkerCommand<T>>)
-where
-    T: Send + 'static,
-    F: FnMut(DecodedFrame<T>) + Send + 'static,
-{
-    let mut pending: VecDeque<T> = VecDeque::new();
-    let mut output_buffer: VecDeque<Surface> = VecDeque::new();
+/// ポーリングしてデコード済みフレームを取得し、ハンドラーを呼び出す。
+fn worker<H: DecodeHandler>(
+    component: Component,
+    mut handler: H,
+    cmd_rx: mpsc::Receiver<WorkerCommand<H::UserData>>,
+) {
+    let mut pending: VecDeque<H::UserData> = VecDeque::new();
+    let mut output_buffer: VecDeque<Result<Surface, crate::Error>> = VecDeque::new();
     let mut finish: Option<mpsc::SyncSender<()>> = None;
 
     loop {
@@ -251,11 +289,7 @@ where
             match cmd_rx.recv_timeout(Duration::from_millis(1)) {
                 Ok(cmd) => cmd,
                 Err(mpsc::RecvTimeoutError::Timeout) => {
-                    if let Err(e) =
-                        drain_output(&mut output_buffer, &mut pending, &mut callback, &component)
-                    {
-                        log::error!("worker: drain_output failed: {e}");
-                    }
+                    drain_output(&mut output_buffer, &mut pending, &mut handler, &component);
                     continue;
                 }
                 Err(mpsc::RecvTimeoutError::Disconnected) => break,
@@ -277,27 +311,20 @@ where
     }
 }
 
-/// QueryOutput からの出力をバッファに格納し、pending とマッチングしてコールバックを呼び出す
-fn drain_output<T, F>(
-    output_buffer: &mut VecDeque<Surface>,
-    pending: &mut VecDeque<T>,
-    callback: &mut F,
+/// QueryOutput からの出力をバッファに格納し、pending とマッチングしてハンドラーを呼び出す
+fn drain_output<H: DecodeHandler>(
+    output_buffer: &mut VecDeque<Result<Surface, crate::Error>>,
+    pending: &mut VecDeque<H::UserData>,
+    handler: &mut H,
     component: &Component,
-) -> Result<(), Error>
-where
-    T: Send + 'static,
-    F: FnMut(DecodedFrame<T>),
-{
+) {
     loop {
         let mut data: *mut AMFData = ptr::null_mut();
         let result = unsafe { component.query_output(&mut data) };
         log::debug!("worker: QueryOutput result={result:?}");
         if result == AMF_RESULT::AMF_REPEAT {
             if !data.is_null() {
-                match extract_frame(data as *mut AMFSurface) {
-                    Ok(surface) => output_buffer.push_back(surface),
-                    Err(e) => log::error!("Failed to extract frame: {e}"),
-                }
+                output_buffer.push_back(extract_frame(data as *mut AMFSurface));
                 continue;
             }
             break;
@@ -308,19 +335,18 @@ where
         if result != AMF_RESULT::AMF_OK || data.is_null() {
             break;
         }
-        match extract_frame(data as *mut AMFSurface) {
-            Ok(surface) => output_buffer.push_back(surface),
-            Err(e) => log::error!("Failed to extract frame: {e}"),
-        }
+        output_buffer.push_back(extract_frame(data as *mut AMFSurface));
     }
 
     while !output_buffer.is_empty() && !pending.is_empty() {
-        let surface = output_buffer.pop_front().unwrap();
+        let output = output_buffer.pop_front().unwrap();
         let user_data = pending.pop_front().unwrap();
-        callback(DecodedFrame { surface, user_data });
+        handler.on_decoded(
+            output
+                .map(|surface| DecodedFrame { surface, user_data })
+                .map_err(Into::into),
+        );
     }
-
-    Ok(())
 }
 
 // ---------------------------------------------------------------------------

@@ -13,9 +13,9 @@
 
 - [ADD] amf::* に AMF オブジェクトの Rust ラッパーを追加する
   - @melpon
-- [CHANGE] Encoder の出力取得を next_frame() ポーリングから非同期コールバック方式に変更する
+- [CHANGE] Encoder の出力取得を next_frame() ポーリングから非同期のトレイトベースのハンドラー方式に変更する
   - @melpon
-- [CHANGE] Decoder の出力取得を next_frame() ポーリングから非同期コールバック方式に変更する
+- [CHANGE] Decoder の出力取得を next_frame() ポーリングから非同期のトレイトベースのハンドラー方式に変更する
   - @melpon
 - [CHANGE] encode/decode の入出力を Surface/Buffer に変更し、EncodedFrame/DecodedFrame に T 型パラメータを追加する
   - @melpon
