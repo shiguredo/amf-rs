@@ -99,6 +99,7 @@ impl<T: Send + 'static> Decoder<T> {
 
         let component = lib.create_component(&context, component_id)?;
 
+        // デコーダーを初期化する (解像度は 0,0 でストリームから自動検出)
         let result = component.init(AMF_SURFACE_FORMAT::AMF_SURFACE_NV12, 0, 0);
         Error::check(result, "AMFComponent::Init")?;
 
