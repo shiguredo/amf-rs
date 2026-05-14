@@ -120,6 +120,7 @@ impl<T: Send + 'static> Decoder<T> {
 
         let component = lib.create_component(context, component_id)?;
 
+        // デコーダーを初期化する (解像度は 0,0 でストリームから自動検出)
         let result = unsafe {
             let vtbl = &*(*component).pVtbl;
             require_vtbl_fn(vtbl.Init, "Init")?(
