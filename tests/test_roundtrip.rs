@@ -1,3 +1,5 @@
+use std::sync::{Arc, Mutex};
+
 use shiguredo_amf::{
     Av1EncoderConfig, Av1Profile, CodecConfig, Decoder, DecoderCodec, DecoderConfig, EncodeOptions,
     EncodedFrame, Encoder, EncoderConfig, FrameFormat, H264EncoderConfig, H264Profile,
@@ -92,33 +94,30 @@ fn psnr_y(original: &[u8], decoded: &[u8], width: usize, height: usize) -> f64 {
 
 /// エンコードしてフレーム一覧を返すヘルパー
 ///
-/// 各 EncodedFrame のデータはフレーム単位で保持される。
+/// 各 EncodedFrame のデータはコールバックで蓄積される。
 fn encode(config: EncoderConfig, frames: &[Vec<u8>]) -> Vec<EncodedFrame> {
-    let mut encoder = Encoder::new(config).expect("failed to create encoder");
+    let result = Arc::new(Mutex::new(Vec::new()));
+    let r = result.clone();
+    let mut encoder = Encoder::new(config, move |frame, _: ()| {
+        r.lock().unwrap().push(frame);
+    })
+    .expect("failed to create encoder");
     let options = EncodeOptions {
         frame_type: frame_type::UNKNOWN,
     };
-    let mut encoded_frames = Vec::new();
 
     for frame in frames.iter() {
-        encoder.encode(frame, &options).expect("failed to encode");
-        while let Some(encoded) = encoder.next_frame() {
-            encoded_frames.push(encoded);
-        }
+        encoder
+            .encode(frame, &options, ())
+            .expect("failed to encode");
     }
     encoder.finish().expect("failed to finish");
-    while let Some(encoded) = encoder.next_frame() {
-        encoded_frames.push(encoded);
-    }
+    drop(encoder);
 
-    encoded_frames
-}
-
-/// Encoder のキューに溜まっている出力フレームをすべて回収する
-fn collect_encoded_frames(encoder: &mut Encoder, out: &mut Vec<EncodedFrame>) {
-    while let Some(encoded) = encoder.next_frame() {
-        out.push(encoded);
-    }
+    Arc::try_unwrap(result)
+        .expect("Arc still referenced")
+        .into_inner()
+        .unwrap()
 }
 
 /// 強制キーフレームを含むシーケンスをエンコードする
@@ -129,8 +128,12 @@ fn encode_with_forced_keyframe(
 ) -> Vec<EncodedFrame> {
     let width = config.width as usize;
     let height = config.height as usize;
-    let mut encoder = Encoder::new(config).expect("failed to create encoder");
-    let mut encoded_frames = Vec::new();
+    let result = Arc::new(Mutex::new(Vec::new()));
+    let r = result.clone();
+    let mut encoder = Encoder::new(config, move |frame, _: ()| {
+        r.lock().unwrap().push(frame);
+    })
+    .expect("failed to create encoder");
 
     for i in 0..num_frames {
         let frame = generate_dummy_nv12(width, height, i);
@@ -143,13 +146,17 @@ fn encode_with_forced_keyframe(
                 frame_type: frame_type::UNKNOWN,
             }
         };
-        encoder.encode(&frame, &options).expect("failed to encode");
-        collect_encoded_frames(&mut encoder, &mut encoded_frames);
+        encoder
+            .encode(&frame, &options, ())
+            .expect("failed to encode");
     }
     encoder.finish().expect("failed to finish");
-    collect_encoded_frames(&mut encoder, &mut encoded_frames);
+    drop(encoder);
 
-    encoded_frames
+    Arc::try_unwrap(result)
+        .expect("Arc still referenced")
+        .into_inner()
+        .unwrap()
 }
 
 /// n 回目の IDR フレームのインデックスを返す（n は 1 始まり）
@@ -296,21 +303,27 @@ fn decode(
     let config = DecoderConfig {
         codec: decoder_codec,
     };
-    let mut decoder = Decoder::new(config).expect("failed to create decoder");
+    let result = Arc::new(Mutex::new(Vec::new()));
+    let r = result.clone();
+    let mut decoder = Decoder::new(config, move |frame, _: ()| {
+        r.lock().unwrap().push(frame);
+    })
+    .expect("failed to create decoder");
 
     // フレーム単位でデコーダーに送信する
     for encoded in encoded_frames {
-        decoder.decode(encoded.data()).expect("failed to decode");
+        decoder
+            .decode(encoded.data(), ())
+            .expect("failed to decode");
     }
 
     decoder.finish().expect("failed to finish");
+    drop(decoder);
 
-    let mut decoded_frames = Vec::new();
-    while let Some(frame) = decoder.next_frame() {
-        decoded_frames.push(frame);
-    }
-
-    decoded_frames
+    Arc::try_unwrap(result)
+        .expect("Arc still referenced")
+        .into_inner()
+        .unwrap()
 }
 
 /// エンコード→デコードのラウンドトリップを検証するヘルパー
@@ -440,8 +453,12 @@ fn test_roundtrip_h264_force_idr() {
 
     let width = config.width as usize;
     let height = config.height as usize;
-    let mut encoder = Encoder::new(config).expect("failed to create encoder");
-    let mut encoded_frames = Vec::new();
+    let result = Arc::new(Mutex::new(Vec::new()));
+    let r = result.clone();
+    let mut encoder = Encoder::new(config, move |frame, _: ()| {
+        r.lock().unwrap().push(frame);
+    })
+    .expect("failed to create encoder");
 
     for i in 0..15 {
         let frame = generate_dummy_nv12(width, height, i);
@@ -454,15 +471,18 @@ fn test_roundtrip_h264_force_idr() {
                 frame_type: frame_type::UNKNOWN,
             }
         };
-        encoder.encode(&frame, &options).expect("failed to encode");
-        while let Some(encoded) = encoder.next_frame() {
-            encoded_frames.push(encoded);
-        }
+        encoder
+            .encode(&frame, &options, ())
+            .expect("failed to encode");
     }
     encoder.finish().expect("failed to finish");
-    while let Some(encoded) = encoder.next_frame() {
-        encoded_frames.push(encoded);
-    }
+
+    // コールバックで蓄積されたフレームを取り出す
+    drop(encoder);
+    let encoded_frames = Arc::try_unwrap(result)
+        .expect("Arc still referenced")
+        .into_inner()
+        .unwrap();
 
     let idr_count = encoded_frames
         .iter()
@@ -664,7 +684,7 @@ fn test_reconfigure_invalid_framerate_zero() {
         1,
         RateControlMode::Cbr,
     );
-    let mut encoder = Encoder::new(config).expect("failed to create encoder");
+    let mut encoder = Encoder::new(config, |_, _: ()| {}).expect("failed to create encoder");
 
     let err = encoder
         .reconfigure(ReconfigureParams {
@@ -694,16 +714,21 @@ fn test_reconfigure_h264_runtime_change() {
         RateControlMode::Cbr,
     );
     config.target_kbps = Some(1000);
-    let mut encoder = Encoder::new(config).expect("failed to create encoder");
+    let result = Arc::new(Mutex::new(Vec::new()));
+    let r = result.clone();
+    let mut encoder = Encoder::new(config, move |frame, _: ()| {
+        r.lock().unwrap().push(frame);
+    })
+    .expect("failed to create encoder");
     let options = EncodeOptions {
         frame_type: frame_type::UNKNOWN,
     };
-    let mut encoded_frames = Vec::new();
 
     for i in 0..5 {
         let frame = generate_dummy_nv12(320, 240, i);
-        encoder.encode(&frame, &options).expect("failed to encode");
-        collect_encoded_frames(&mut encoder, &mut encoded_frames);
+        encoder
+            .encode(&frame, &options, ())
+            .expect("failed to encode");
     }
 
     encoder
@@ -717,12 +742,17 @@ fn test_reconfigure_h264_runtime_change() {
 
     for i in 5..10 {
         let frame = generate_dummy_nv12(320, 240, i);
-        encoder.encode(&frame, &options).expect("failed to encode");
-        collect_encoded_frames(&mut encoder, &mut encoded_frames);
+        encoder
+            .encode(&frame, &options, ())
+            .expect("failed to encode");
     }
 
     encoder.finish().expect("failed to finish");
-    collect_encoded_frames(&mut encoder, &mut encoded_frames);
+    drop(encoder);
+    let encoded_frames = Arc::try_unwrap(result)
+        .expect("Arc still referenced")
+        .into_inner()
+        .unwrap();
     assert!(!encoded_frames.is_empty(), "no encoded frames produced");
 
     let decoded = decode(DecoderCodec::H264, &encoded_frames);
@@ -744,16 +774,21 @@ fn test_reconfigure_hevc_ignores_qpb_and_gop() {
         RateControlMode::Cbr,
     );
     config.target_kbps = Some(1000);
-    let mut encoder = Encoder::new(config).expect("failed to create encoder");
+    let result = Arc::new(Mutex::new(Vec::new()));
+    let r = result.clone();
+    let mut encoder = Encoder::new(config, move |frame, _: ()| {
+        r.lock().unwrap().push(frame);
+    })
+    .expect("failed to create encoder");
     let options = EncodeOptions {
         frame_type: frame_type::UNKNOWN,
     };
-    let mut encoded_frames = Vec::new();
 
     for i in 0..4 {
         let frame = generate_dummy_nv12(320, 240, i);
-        encoder.encode(&frame, &options).expect("failed to encode");
-        collect_encoded_frames(&mut encoder, &mut encoded_frames);
+        encoder
+            .encode(&frame, &options, ())
+            .expect("failed to encode");
     }
 
     encoder
@@ -771,12 +806,17 @@ fn test_reconfigure_hevc_ignores_qpb_and_gop() {
 
     for i in 4..8 {
         let frame = generate_dummy_nv12(320, 240, i);
-        encoder.encode(&frame, &options).expect("failed to encode");
-        collect_encoded_frames(&mut encoder, &mut encoded_frames);
+        encoder
+            .encode(&frame, &options, ())
+            .expect("failed to encode");
     }
 
     encoder.finish().expect("failed to finish");
-    collect_encoded_frames(&mut encoder, &mut encoded_frames);
+    drop(encoder);
+    let encoded_frames = Arc::try_unwrap(result)
+        .expect("Arc still referenced")
+        .into_inner()
+        .unwrap();
     assert!(!encoded_frames.is_empty(), "no encoded frames produced");
 
     let decoded = decode(DecoderCodec::Hevc, &encoded_frames);
@@ -798,16 +838,21 @@ fn test_reconfigure_av1_qpb_and_gop() {
         RateControlMode::Cbr,
     );
     config.target_kbps = Some(1000);
-    let mut encoder = Encoder::new(config).expect("failed to create encoder");
+    let result = Arc::new(Mutex::new(Vec::new()));
+    let r = result.clone();
+    let mut encoder = Encoder::new(config, move |frame, _: ()| {
+        r.lock().unwrap().push(frame);
+    })
+    .expect("failed to create encoder");
     let options = EncodeOptions {
         frame_type: frame_type::UNKNOWN,
     };
-    let mut encoded_frames = Vec::new();
 
     for i in 0..4 {
         let frame = generate_dummy_nv12(320, 240, i);
-        encoder.encode(&frame, &options).expect("failed to encode");
-        collect_encoded_frames(&mut encoder, &mut encoded_frames);
+        encoder
+            .encode(&frame, &options, ())
+            .expect("failed to encode");
     }
 
     encoder
@@ -825,12 +870,17 @@ fn test_reconfigure_av1_qpb_and_gop() {
 
     for i in 4..8 {
         let frame = generate_dummy_nv12(320, 240, i);
-        encoder.encode(&frame, &options).expect("failed to encode");
-        collect_encoded_frames(&mut encoder, &mut encoded_frames);
+        encoder
+            .encode(&frame, &options, ())
+            .expect("failed to encode");
     }
 
     encoder.finish().expect("failed to finish");
-    collect_encoded_frames(&mut encoder, &mut encoded_frames);
+    drop(encoder);
+    let encoded_frames = Arc::try_unwrap(result)
+        .expect("Arc still referenced")
+        .into_inner()
+        .unwrap();
     assert!(!encoded_frames.is_empty(), "no encoded frames produced");
 
     let decoded = decode(DecoderCodec::Av1, &encoded_frames);
@@ -1208,4 +1258,55 @@ fn test_roundtrip_av1_4k_high_bitrate() {
         let psnr = psnr_y(&colorbar, decoded.data(), width as usize, height as usize);
         assert!(psnr >= 25.0, "frame {i}: PSNR {psnr:.1} dB < 25.0 dB");
     }
+}
+
+// ---------------------------------------------------------------------------
+// コールバックに渡した T が正しい順序で届くことのテスト
+// ---------------------------------------------------------------------------
+
+/// encode() に渡した T がコールバックに正しい順序で届くことを確認する
+#[test]
+fn test_user_data_delivered_in_submit_order() {
+    let mut config = EncoderConfig::new(
+        CodecConfig::H264(H264EncoderConfig {
+            profile: Some(H264Profile::High),
+        }),
+        320,
+        240,
+        FrameFormat::Nv12,
+        30,
+        1,
+        RateControlMode::Cbr,
+    );
+    config.target_kbps = Some(1000);
+    config.gop_pic_size = Some(30);
+
+    let received = Arc::new(Mutex::new(Vec::new()));
+    let r = received.clone();
+
+    let mut encoder = Encoder::new(config, move |_frame, tag: usize| {
+        r.lock().unwrap().push(tag);
+    })
+    .expect("failed to create encoder");
+
+    let width: usize = 320;
+    let height: usize = 240;
+    let num_frames: usize = 10;
+    let options = EncodeOptions::default();
+
+    for i in 0..num_frames {
+        let data = generate_dummy_nv12(width, height, i);
+        encoder
+            .encode(&data, &options, i)
+            .expect("failed to encode");
+    }
+    encoder.finish().expect("failed to finish");
+    drop(encoder);
+
+    let tags = Arc::try_unwrap(received)
+        .expect("Arc still referenced")
+        .into_inner()
+        .unwrap();
+    assert_eq!(tags.len(), num_frames);
+    assert_eq!(tags, (0..num_frames).collect::<Vec<_>>());
 }

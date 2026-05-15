@@ -64,6 +64,8 @@ DOCS_RS=1 cargo doc --no-deps
 ### エンコード
 
 ```rust
+use std::sync::{Arc, Mutex};
+
 use shiguredo_amf::{
     CodecConfig, EncodeOptions, Encoder, EncoderConfig, FrameFormat,
     H264EncoderConfig, H264Profile, RateControlMode, ReconfigureParams, frame_type,
@@ -82,7 +84,11 @@ let mut config = EncoderConfig::new(
 );
 config.target_kbps = Some(5_000);
 
-let mut encoder = Encoder::new(config)?;
+let encoded = Arc::new(Mutex::new(Vec::new()));
+let e = encoded.clone();
+let mut encoder = Encoder::new(config, move |frame, _: ()| {
+    e.lock().unwrap().push(frame);
+})?;
 
 // エンコード中に動的プロパティを再設定
 encoder.reconfigure(ReconfigureParams {
@@ -94,24 +100,21 @@ encoder.reconfigure(ReconfigureParams {
 
 // フレームデータをエンコード
 let options = EncodeOptions { frame_type: frame_type::UNKNOWN };
-encoder.encode(&frame_data, &options)?;
+encoder.encode(&frame_data, &options, ())?;
 
 // IDR フレームを強制してエンコード
 encoder.encode(&frame_data, &EncodeOptions {
     frame_type: frame_type::IDR | frame_type::I | frame_type::REF,
-})?;
-
-// エンコード済みフレームを取得
-while let Some(encoded) = encoder.next_frame() {
-    println!("encoded bytes: {}", encoded.data().len());
-    println!("pts: {}", encoded.pts());
-    println!("picture type: {:?}", encoded.picture_type());
-}
+}, ())?;
 
 // 残りのフレームをすべて取得する
 encoder.finish()?;
-while let Some(encoded) = encoder.next_frame() {
-    println!("flushed: {} bytes", encoded.data().len());
+
+// エンコード済みフレームを確認
+for encoded in encoded.lock().unwrap().iter() {
+    println!("encoded bytes: {}", encoded.data().len());
+    println!("pts: {}", encoded.pts());
+    println!("picture type: {:?}", encoded.picture_type());
 }
 ```
 
@@ -126,25 +129,29 @@ while let Some(encoded) = encoder.next_frame() {
 ### デコード
 
 ```rust
+use std::sync::{Arc, Mutex};
+
 use shiguredo_amf::{Decoder, DecoderCodec, DecoderConfig};
 
 let config = DecoderConfig {
     codec: DecoderCodec::H264,
 };
-let mut decoder = Decoder::new(config)?;
+let decoded = Arc::new(Mutex::new(Vec::new()));
+let d = decoded.clone();
+let mut decoder = Decoder::new(config, move |frame, _: ()| {
+    d.lock().unwrap().push(frame);
+})?;
 
 // ビットストリームデータをデコード
-decoder.decode(&bitstream_data)?;
-
-// デコード済みフレームを取得 (NV12 フォーマット)
-while let Some(frame) = decoder.next_frame() {
-    println!("decoded: {}x{}, {} bytes", frame.width(), frame.height(), frame.data().len());
-}
+decoder.decode(&bitstream_data, ())?;
 
 // 残りのフレームをすべて取得する
 decoder.finish()?;
-while let Some(frame) = decoder.next_frame() {
-    println!("flushed: {}x{}", frame.width(), frame.height());
+drop(decoder);
+
+// デコード済みフレームを確認 (NV12 フォーマット)
+for frame in decoded.lock().unwrap().iter() {
+    println!("decoded: {}x{}, {} bytes", frame.width(), frame.height(), frame.data().len());
 }
 ```
 
