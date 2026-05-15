@@ -147,7 +147,7 @@ impl Drop for PropertyStorage {
 // Surface
 // ---------------------------------------------------------------------------
 
-#[derive(Clone, Copy)]
+#[derive(Debug, Clone, Copy)]
 struct SurfaceFuncs {
     acquire: unsafe extern "C" fn(*mut sys::AMFSurface) -> sys::amf_long,
     release: unsafe extern "C" fn(*mut sys::AMFSurface) -> sys::amf_long,
@@ -160,6 +160,7 @@ struct SurfaceFuncs {
 }
 
 /// `AMFSurface` の RAII ラッパー
+#[derive(Debug)]
 pub struct Surface {
     ptr: *mut sys::AMFSurface,
     f: SurfaceFuncs,
@@ -281,7 +282,7 @@ impl Drop for Surface {
 // Buffer
 // ---------------------------------------------------------------------------
 
-#[derive(Clone, Copy)]
+#[derive(Debug, Clone, Copy)]
 struct BufferFuncs {
     acquire: unsafe extern "C" fn(*mut sys::AMFBuffer) -> sys::amf_long,
     release: unsafe extern "C" fn(*mut sys::AMFBuffer) -> sys::amf_long,
@@ -297,6 +298,7 @@ struct BufferFuncs {
 }
 
 /// `AMFBuffer` の RAII ラッパー
+#[derive(Debug)]
 pub struct Buffer {
     ptr: *mut sys::AMFBuffer,
     f: BufferFuncs,
