@@ -21,12 +21,12 @@ fn test_supported_codecs_hw_accel_consistency() {
     for info in &codecs {
         assert_eq!(
             info.decoding.supported, info.decoding.hardware_accelerated,
-            "{:?}: decoding supported != hardware_accelerated",
+            "{:?}: decoding の supported と hardware_accelerated が一致しない",
             info.codec
         );
         assert_eq!(
             info.encoding.supported, info.encoding.hardware_accelerated,
-            "{:?}: encoding supported != hardware_accelerated",
+            "{:?}: encoding の supported と hardware_accelerated が一致しない",
             info.codec
         );
     }
