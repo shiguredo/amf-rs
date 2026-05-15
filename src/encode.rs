@@ -304,6 +304,48 @@ pub mod frame_type {
 }
 
 // ---------------------------------------------------------------------------
+// ハンドラートレイト
+// ---------------------------------------------------------------------------
+
+/// エンコード結果を通知するためのハンドラー
+///
+/// エンコード処理が完了するたびに [`EncodeHandler::on_encoded`] が呼ばれる。
+pub trait EncodeHandler: Send + 'static {
+    /// ユーザーデータ型
+    type UserData: Send + 'static;
+    /// エラー型
+    type Error: From<crate::Error> + Send + 'static;
+    /// エンコード完了時に呼ばれる
+    fn on_encoded(&mut self, result: Result<EncodedFrame<Self::UserData>, Self::Error>);
+}
+
+/// `FnMut` クロージャを [`EncodeHandler`] にするラッパー
+pub struct FnEncodeHandler<T, E = crate::Error> {
+    f: Box<dyn FnMut(Result<EncodedFrame<T>, E>) + Send + 'static>,
+}
+
+impl<T, E> FnEncodeHandler<T, E> {
+    pub fn new<F>(f: F) -> Self
+    where
+        F: FnMut(Result<EncodedFrame<T>, E>) + Send + 'static,
+    {
+        Self { f: Box::new(f) }
+    }
+}
+
+impl<T, E> EncodeHandler for FnEncodeHandler<T, E>
+where
+    T: Send + 'static,
+    E: From<crate::Error> + Send + 'static,
+{
+    type UserData = T;
+    type Error = E;
+    fn on_encoded(&mut self, result: Result<EncodedFrame<T>, E>) {
+        (self.f)(result);
+    }
+}
+
+// ---------------------------------------------------------------------------
 // ワーカースレッド用コマンド
 // ---------------------------------------------------------------------------
 
@@ -317,7 +359,7 @@ enum WorkerCommand<T> {
 // ---------------------------------------------------------------------------
 
 /// AMF ハードウェアエンコーダー
-pub struct Encoder<T: Send + 'static> {
+pub struct Encoder<H: EncodeHandler> {
     component: Component,
     context: Context,
     surface_format: AMF_SURFACE_FORMAT,
@@ -327,19 +369,15 @@ pub struct Encoder<T: Send + 'static> {
     framerate_num: u64,
     framerate_den: u64,
     codec_config: CodecConfig,
-    cmd_tx: Option<mpsc::Sender<WorkerCommand<T>>>,
+    cmd_tx: Option<mpsc::Sender<WorkerCommand<H::UserData>>>,
     poll_thread: Option<JoinHandle<()>>,
 }
 
-impl<T: Send + 'static> Encoder<T> {
+impl<H: EncodeHandler> Encoder<H> {
     /// エンコーダーを作成して初期化する
     ///
-    /// `callback` はエンコード完了時にワーカースレッドから呼び出される。
-    /// 引数は `encode()` に渡されたユーザーデータを含むエンコード済みフレーム。
-    pub fn new(
-        config: EncoderConfig,
-        callback: impl FnMut(EncodedFrame<T>) + Send + 'static,
-    ) -> Result<Self, Error> {
+    /// `handler` はエンコード完了時にワーカースレッドから呼び出される。
+    pub fn new(config: EncoderConfig, handler: H) -> Result<Self, Error> {
         // 入力パラメータのバリデーション
         if config.width == 0 || config.height == 0 {
             return Err(Error::new_custom(
@@ -411,13 +449,13 @@ impl<T: Send + 'static> Encoder<T> {
         let codec_config = config.codec;
 
         // ワーカースレッドを起動する
-        let (cmd_tx, cmd_rx) = mpsc::channel::<WorkerCommand<T>>();
+        let (cmd_tx, cmd_rx) = mpsc::channel::<WorkerCommand<H::UserData>>();
         let worker_component = component.clone();
         let worker_codec_config = codec_config.clone();
         let poll_thread = std::thread::Builder::new()
             .name("amf-encoder-worker".into())
             .spawn(move || {
-                worker(worker_component, callback, cmd_rx, worker_codec_config);
+                worker(worker_component, handler, cmd_rx, worker_codec_config);
             })
             .map_err(|e| {
                 Error::new_custom(
@@ -790,12 +828,12 @@ impl<T: Send + 'static> Encoder<T> {
 
     /// フレームをエンコードする
     ///
-    /// `user_data` はエンコード完了時にコールバックへ渡される。
+    /// `user_data` はエンコード完了時にハンドラーへ渡される。
     pub fn encode(
         &mut self,
         surface: Surface,
         options: &EncodeOptions,
-        user_data: T,
+        user_data: H::UserData,
     ) -> Result<(), Error> {
         // PTS を設定する
         let pts = (self.frame_count * self.framerate_den * AMF_SECOND as u64 / self.framerate_num)
@@ -912,7 +950,7 @@ impl<T: Send + 'static> Encoder<T> {
 // 安全性:
 // Drop 内でのみ component/context を解放する。
 // ワーカースレッドは Drop より先に停止させる。
-impl<T: Send + 'static> Drop for Encoder<T> {
+impl<H: EncodeHandler> Drop for Encoder<H> {
     fn drop(&mut self) {
         // ワーカースレッドを停止する (cmd_tx を drop → チャネル切断 → ワーカー終了)
         self.cmd_tx = None;
@@ -933,18 +971,15 @@ impl<T: Send + 'static> Drop for Encoder<T> {
 /// ワーカースレッドのエントリポイント
 ///
 /// メインスレッドから `Submit(T)` コマンドを受け取り、AMFComponent::QueryOutput を
-/// ポーリングしてエンコード済みフレームを取得し、コールバックを呼び出す。
-fn worker<T, F>(
+/// ポーリングしてエンコード済みフレームを取得し、ハンドラーを呼び出す。
+fn worker<H: EncodeHandler>(
     component: Component,
-    mut callback: F,
-    cmd_rx: mpsc::Receiver<WorkerCommand<T>>,
+    mut handler: H,
+    cmd_rx: mpsc::Receiver<WorkerCommand<H::UserData>>,
     codec_config: CodecConfig,
-) where
-    T: Send + 'static,
-    F: FnMut(EncodedFrame<T>) + Send + 'static,
-{
-    let mut pending: VecDeque<T> = VecDeque::new();
-    let mut output_buffer: VecDeque<(Buffer, PictureType)> = VecDeque::new();
+) {
+    let mut pending: VecDeque<H::UserData> = VecDeque::new();
+    let mut output_buffer: VecDeque<Result<(Buffer, PictureType), crate::Error>> = VecDeque::new();
     let mut finish: Option<mpsc::SyncSender<()>> = None;
 
     loop {
@@ -962,15 +997,13 @@ fn worker<T, F>(
             match cmd_rx.recv_timeout(Duration::from_millis(1)) {
                 Ok(cmd) => cmd,
                 Err(mpsc::RecvTimeoutError::Timeout) => {
-                    if let Err(e) = drain_output(
+                    drain_output(
                         &mut output_buffer,
                         &mut pending,
-                        &mut callback,
+                        &mut handler,
                         &component,
                         &codec_config,
-                    ) {
-                        log::error!("worker: drain_output failed: {e}");
-                    }
+                    );
                     continue;
                 }
                 Err(mpsc::RecvTimeoutError::Disconnected) => break,
@@ -992,18 +1025,14 @@ fn worker<T, F>(
     }
 }
 
-/// QueryOutput からの出力をバッファに格納し、pending とマッチングしてコールバックを呼び出す
-fn drain_output<T, F>(
-    output_buffer: &mut VecDeque<(Buffer, PictureType)>,
-    pending: &mut VecDeque<T>,
-    callback: &mut F,
+/// QueryOutput からの出力をバッファに格納し、pending とマッチングしてハンドラーを呼び出す
+fn drain_output<H: EncodeHandler>(
+    output_buffer: &mut VecDeque<Result<(Buffer, PictureType), crate::Error>>,
+    pending: &mut VecDeque<H::UserData>,
+    handler: &mut H,
     component: &Component,
     codec_config: &CodecConfig,
-) -> Result<(), Error>
-where
-    T: Send + 'static,
-    F: FnMut(EncodedFrame<T>),
-{
+) {
     // 出力をバッファに格納する
     loop {
         let mut data: *mut AMFData = ptr::null_mut();
@@ -1015,24 +1044,23 @@ where
         if result != AMF_RESULT::AMF_OK || data.is_null() {
             break;
         }
-        match extract_encoded_output(data, codec_config) {
-            Ok(tuple) => output_buffer.push_back(tuple),
-            Err(e) => log::error!("Failed to extract encoded output: {e}"),
-        }
+        output_buffer.push_back(extract_encoded_output(data, codec_config));
     }
 
     // バッファされた出力と pending をマッチングする
     while !output_buffer.is_empty() && !pending.is_empty() {
-        let (buffer, picture_type) = output_buffer.pop_front().unwrap();
+        let output = output_buffer.pop_front().unwrap();
         let user_data = pending.pop_front().unwrap();
-        callback(EncodedFrame {
-            buffer,
-            picture_type,
-            user_data,
-        });
+        handler.on_encoded(
+            output
+                .map(|(buffer, picture_type)| EncodedFrame {
+                    buffer,
+                    picture_type,
+                    user_data,
+                })
+                .map_err(Into::into),
+        );
     }
-
-    Ok(())
 }
 
 /// AMFData から Buffer とピクチャタイプを抽出する

@@ -5,8 +5,9 @@ use shiguredo_amf::amf::Surface;
 use shiguredo_amf::ffi::AMF_PLANE_TYPE;
 use shiguredo_amf::{
     Av1EncoderConfig, Av1Profile, CodecConfig, Decoder, DecoderCodec, DecoderConfig, EncodeOptions,
-    EncodedFrame, Encoder, EncoderConfig, FrameFormat, H264EncoderConfig, H264Profile,
-    HevcEncoderConfig, HevcProfile, PictureType, RateControlMode, ReconfigureParams, frame_type,
+    EncodedFrame, Encoder, EncoderConfig, FnDecodeHandler, FnEncodeHandler, FrameFormat,
+    H264EncoderConfig, H264Profile, HevcEncoderConfig, HevcProfile, PictureType, RateControlMode,
+    ReconfigureParams, frame_type,
 };
 
 /// NV12 データを Surface にコピーする
@@ -280,9 +281,12 @@ fn encode(config: EncoderConfig, frames: &[Vec<u8>]) -> Vec<EncodedFrame<()>> {
 
     let result = Arc::new(Mutex::new(Vec::new()));
     let r = result.clone();
-    let mut encoder = Encoder::new(config, move |frame: EncodedFrame<()>| {
-        r.lock().unwrap().push(frame);
-    })
+    let mut encoder = Encoder::new(
+        config,
+        FnEncodeHandler::<()>::new(move |result| {
+            r.lock().unwrap().push(result.unwrap());
+        }),
+    )
     .expect("failed to create encoder");
     let options = EncodeOptions {
         frame_type: frame_type::UNKNOWN,
@@ -316,9 +320,12 @@ fn encode_with_forced_keyframe(
 
     let result = Arc::new(Mutex::new(Vec::new()));
     let r = result.clone();
-    let mut encoder = Encoder::new(config, move |frame: EncodedFrame<()>| {
-        r.lock().unwrap().push(frame);
-    })
+    let mut encoder = Encoder::new(
+        config,
+        FnEncodeHandler::<()>::new(move |result| {
+            r.lock().unwrap().push(result.unwrap());
+        }),
+    )
     .expect("failed to create encoder");
 
     for i in 0..num_frames {
@@ -494,9 +501,12 @@ fn decode(
     };
     let result = Arc::new(Mutex::new(Vec::new()));
     let r = result.clone();
-    let mut decoder = Decoder::new(config, move |frame: shiguredo_amf::DecodedFrame<()>| {
-        r.lock().unwrap().push(frame);
-    })
+    let mut decoder = Decoder::new(
+        config,
+        FnDecodeHandler::<()>::new(move |result| {
+            r.lock().unwrap().push(result.unwrap());
+        }),
+    )
     .expect("failed to create decoder");
 
     // フレーム単位でデコーダーに送信する
@@ -663,9 +673,12 @@ fn test_roundtrip_h264_force_idr() {
 
     let result = Arc::new(Mutex::new(Vec::new()));
     let r = result.clone();
-    let mut encoder = Encoder::new(config, move |frame: EncodedFrame<()>| {
-        r.lock().unwrap().push(frame);
-    })
+    let mut encoder = Encoder::new(
+        config,
+        FnEncodeHandler::<()>::new(move |result| {
+            r.lock().unwrap().push(result.unwrap());
+        }),
+    )
     .expect("failed to create encoder");
 
     for i in 0..15 {
@@ -896,7 +909,7 @@ fn test_reconfigure_invalid_framerate_zero() {
         RateControlMode::Cbr,
     );
     let mut encoder =
-        Encoder::new(config, |_: EncodedFrame<()>| {}).expect("failed to create encoder");
+        Encoder::new(config, FnEncodeHandler::<()>::new(|_| {})).expect("failed to create encoder");
 
     let err = encoder
         .reconfigure(ReconfigureParams {
@@ -930,9 +943,12 @@ fn test_reconfigure_h264_runtime_change() {
 
     let result = Arc::new(Mutex::new(Vec::new()));
     let r = result.clone();
-    let mut encoder = Encoder::new(config, move |frame: EncodedFrame<()>| {
-        r.lock().unwrap().push(frame);
-    })
+    let mut encoder = Encoder::new(
+        config,
+        FnEncodeHandler::<()>::new(move |result| {
+            r.lock().unwrap().push(result.unwrap());
+        }),
+    )
     .expect("failed to create encoder");
     let options = EncodeOptions {
         frame_type: frame_type::UNKNOWN,
@@ -996,9 +1012,12 @@ fn test_reconfigure_hevc_ignores_qpb_and_gop() {
 
     let result = Arc::new(Mutex::new(Vec::new()));
     let r = result.clone();
-    let mut encoder = Encoder::new(config, move |frame: EncodedFrame<()>| {
-        r.lock().unwrap().push(frame);
-    })
+    let mut encoder = Encoder::new(
+        config,
+        FnEncodeHandler::<()>::new(move |result| {
+            r.lock().unwrap().push(result.unwrap());
+        }),
+    )
     .expect("failed to create encoder");
     let options = EncodeOptions {
         frame_type: frame_type::UNKNOWN,
@@ -1066,9 +1085,12 @@ fn test_reconfigure_av1_qpb_and_gop() {
 
     let result = Arc::new(Mutex::new(Vec::new()));
     let r = result.clone();
-    let mut encoder = Encoder::new(config, move |frame: EncodedFrame<()>| {
-        r.lock().unwrap().push(frame);
-    })
+    let mut encoder = Encoder::new(
+        config,
+        FnEncodeHandler::<()>::new(move |result| {
+            r.lock().unwrap().push(result.unwrap());
+        }),
+    )
     .expect("failed to create encoder");
     let options = EncodeOptions {
         frame_type: frame_type::UNKNOWN,
@@ -1529,9 +1551,12 @@ fn test_user_data_delivered_in_submit_order() {
     let received = Arc::new(Mutex::new(Vec::new()));
     let r = received.clone();
 
-    let mut encoder = Encoder::new(config, move |frame: EncodedFrame<usize>| {
-        r.lock().unwrap().push(frame.into_parts().1);
-    })
+    let mut encoder = Encoder::new(
+        config,
+        FnEncodeHandler::<usize>::new(move |result| {
+            r.lock().unwrap().push(result.unwrap().into_parts().1);
+        }),
+    )
     .expect("failed to create encoder");
 
     let width: usize = 320;

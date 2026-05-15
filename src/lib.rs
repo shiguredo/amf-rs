@@ -24,11 +24,13 @@ pub use codec_info::{
     Av1EncodingProfile, CodecInfo, DecodingInfo, EncodingInfo, EncodingProfiles,
     H264EncodingProfile, HevcEncodingProfile, VideoCodecType, supported_codecs,
 };
-pub use decode::{DecodedFrame, Decoder, DecoderCodec, DecoderConfig};
+pub use decode::{
+    DecodeHandler, DecodedFrame, Decoder, DecoderCodec, DecoderConfig, FnDecodeHandler,
+};
 pub use encode::{
-    Av1EncoderConfig, Av1Profile, CodecConfig, EncodeOptions, EncodedFrame, Encoder, EncoderConfig,
-    FrameFormat, H264EncoderConfig, H264Profile, HevcEncoderConfig, HevcProfile, PictureType,
-    RateControlMode, ReconfigureParams, frame_type,
+    Av1EncoderConfig, Av1Profile, CodecConfig, EncodeHandler, EncodeOptions, EncodedFrame, Encoder,
+    EncoderConfig, FnEncodeHandler, FrameFormat, H264EncoderConfig, H264Profile, HevcEncoderConfig,
+    HevcProfile, PictureType, RateControlMode, ReconfigureParams, frame_type,
 };
 pub use error::Error;
 
