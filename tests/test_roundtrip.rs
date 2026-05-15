@@ -14,7 +14,7 @@ use shiguredo_amf::{
 fn copy_nv12_to_surface(surface: &Surface, data: &[u8], width: usize, height: usize) {
     let y_plane = surface
         .get_plane(AMF_PLANE_TYPE::AMF_PLANE_Y)
-        .expect("get Y plane");
+        .expect("Y プレーンの取得に失敗");
     let y_native = y_plane.get_native() as *mut u8;
     let y_hpitch = y_plane.get_hpitch() as usize;
     for row in 0..height {
@@ -29,7 +29,7 @@ fn copy_nv12_to_surface(surface: &Surface, data: &[u8], width: usize, height: us
 
     let uv_plane = surface
         .get_plane(AMF_PLANE_TYPE::AMF_PLANE_UV)
-        .expect("get UV plane");
+        .expect("UV プレーンの取得に失敗");
     let uv_native = uv_plane.get_native() as *mut u8;
     let uv_hpitch = uv_plane.get_hpitch() as usize;
     let y_size = width * height;
@@ -53,7 +53,7 @@ fn copy_i420_to_surface(surface: &Surface, data: &[u8], width: usize, height: us
     // Y プレーン
     let y_plane = surface
         .get_plane(AMF_PLANE_TYPE::AMF_PLANE_Y)
-        .expect("get Y plane");
+        .expect("Y プレーンの取得に失敗");
     let y_native = y_plane.get_native() as *mut u8;
     let y_hpitch = y_plane.get_hpitch() as usize;
     for row in 0..height {
@@ -69,7 +69,7 @@ fn copy_i420_to_surface(surface: &Surface, data: &[u8], width: usize, height: us
     // U プレーン
     let u_plane = surface
         .get_plane(AMF_PLANE_TYPE::AMF_PLANE_U)
-        .expect("get U plane");
+        .expect("U プレーンの取得に失敗");
     let u_native = u_plane.get_native() as *mut u8;
     let u_hpitch = u_plane.get_hpitch() as usize;
     let uv_width = width / 2;
@@ -87,7 +87,7 @@ fn copy_i420_to_surface(surface: &Surface, data: &[u8], width: usize, height: us
     // V プレーン
     let v_plane = surface
         .get_plane(AMF_PLANE_TYPE::AMF_PLANE_V)
-        .expect("get V plane");
+        .expect("V プレーンの取得に失敗");
     let v_native = v_plane.get_native() as *mut u8;
     let v_hpitch = v_plane.get_hpitch() as usize;
     for row in 0..uv_height {
@@ -103,7 +103,9 @@ fn copy_i420_to_surface(surface: &Surface, data: &[u8], width: usize, height: us
 
 /// Packed データを Surface にコピーする
 fn copy_packed_to_surface(surface: &Surface, data: &[u8], width: usize, height: usize, bpp: usize) {
-    let plane = surface.get_plane_at(0).expect("get plane at 0");
+    let plane = surface
+        .get_plane_at(0)
+        .expect("インデックス 0 のプレーンの取得に失敗");
     let native = plane.get_native() as *mut u8;
     let hpitch = plane.get_hpitch() as usize;
     let row_bytes = width * bpp;
@@ -139,7 +141,7 @@ fn copy_frame_to_surface(
         FrameFormat::Yuy2 | FrameFormat::Uyvy => {
             copy_packed_to_surface(surface, data, width, height, 2)
         }
-        _ => unimplemented!("{format:?} copy is not implemented"),
+        _ => unimplemented!("{format:?} のコピーは未実装"),
     }
 }
 
@@ -147,7 +149,7 @@ fn copy_frame_to_surface(
 fn read_y_plane_from_surface(surface: &Surface, width: usize, height: usize) -> Vec<u8> {
     let y_plane = surface
         .get_plane(AMF_PLANE_TYPE::AMF_PLANE_Y)
-        .expect("get Y plane");
+        .expect("Y プレーンの取得に失敗");
     let y_native = y_plane.get_native() as *const u8;
     let y_hpitch = y_plane.get_hpitch() as usize;
     let y_size = width * height;
@@ -287,23 +289,23 @@ fn encode(config: EncoderConfig, frames: &[Vec<u8>]) -> Vec<EncodedFrame<()>> {
             r.lock().unwrap().push(result.unwrap());
         }),
     )
-    .expect("failed to create encoder");
+    .expect("エンコーダーの作成に失敗");
     let options = EncodeOptions {
         frame_type: frame_type::UNKNOWN,
     };
 
     for frame in frames.iter() {
-        let surface = encoder.alloc_surface().expect("failed to alloc surface");
+        let surface = encoder.alloc_surface().expect("Surface の確保に失敗");
         copy_frame_to_surface(&surface, frame, format, width, height);
         encoder
             .encode(surface, &options, ())
-            .expect("failed to encode");
+            .expect("エンコードに失敗");
     }
-    encoder.finish().expect("failed to finish");
+    encoder.finish().expect("finish に失敗");
     drop(encoder);
 
     Arc::try_unwrap(result)
-        .expect("Arc still referenced")
+        .expect("Arc の参照が残っている")
         .into_inner()
         .unwrap()
 }
@@ -326,11 +328,11 @@ fn encode_with_forced_keyframe(
             r.lock().unwrap().push(result.unwrap());
         }),
     )
-    .expect("failed to create encoder");
+    .expect("エンコーダーの作成に失敗");
 
     for i in 0..num_frames {
         let frame = generate_dummy_nv12(width, height, i);
-        let surface = encoder.alloc_surface().expect("failed to alloc surface");
+        let surface = encoder.alloc_surface().expect("Surface の確保に失敗");
         copy_frame_to_surface(&surface, &frame, format, width, height);
 
         let options = if i == force_at {
@@ -344,13 +346,13 @@ fn encode_with_forced_keyframe(
         };
         encoder
             .encode(surface, &options, ())
-            .expect("failed to encode");
+            .expect("エンコードに失敗");
     }
-    encoder.finish().expect("failed to finish");
+    encoder.finish().expect("finish に失敗");
     drop(encoder);
 
     Arc::try_unwrap(result)
-        .expect("Arc still referenced")
+        .expect("Arc の参照が残っている")
         .into_inner()
         .unwrap()
 }
@@ -366,7 +368,7 @@ fn nth_idr_frame_index(encoded_frames: &[EncodedFrame<()>], nth: usize) -> usize
             }
         }
     }
-    panic!("expected at least {nth} IDR frames, got {count}");
+    panic!("少なくとも {nth} 個の IDR フレームが必要だが {count} 個しかない");
 }
 
 /// Annex-B のスタートコードを検索する
@@ -507,20 +509,20 @@ fn decode(
             r.lock().unwrap().push(result.unwrap());
         }),
     )
-    .expect("failed to create decoder");
+    .expect("デコーダーの作成に失敗");
 
     // フレーム単位でデコーダーに送信する
     for encoded in encoded_frames {
         decoder
             .decode(encoded.into_parts().0, ())
-            .expect("failed to decode");
+            .expect("デコードに失敗");
     }
 
-    decoder.finish().expect("failed to finish");
+    decoder.finish().expect("finish に失敗");
     drop(decoder);
 
     Arc::try_unwrap(result)
-        .expect("Arc still referenced")
+        .expect("Arc の参照が残っている")
         .into_inner()
         .unwrap()
 }
@@ -539,12 +541,12 @@ fn roundtrip(
 
     assert!(
         !encoded_frames.is_empty(),
-        "no encoded frames were produced"
+        "エンコード済みフレームが生成されなかった"
     );
     for (i, frame) in encoded_frames.iter().enumerate() {
         assert!(
             frame.buffer().get_size() > 0,
-            "encoded frame {i} has empty buffer"
+            "エンコード済みフレーム {i} のバッファが空"
         );
     }
 
@@ -553,26 +555,26 @@ fn roundtrip(
     assert_eq!(
         decoded_frames.len(),
         num_frames,
-        "decoded {} frames, expected {num_frames}",
+        "デコードされたフレーム数 {} が期待値 {num_frames} と一致しない",
         decoded_frames.len()
     );
     for (i, frame) in decoded_frames.iter().enumerate() {
         assert_eq!(
             surface_width(frame.surface()),
             width,
-            "decoded frame {i} width mismatch"
+            "デコード済みフレーム {i} の幅が一致しない"
         );
         assert_eq!(
             surface_height(frame.surface()),
             height,
-            "decoded frame {i} height mismatch"
+            "デコード済みフレーム {i} の高さが一致しない"
         );
         assert!(
             frame
                 .surface()
                 .get_plane(AMF_PLANE_TYPE::AMF_PLANE_Y)
                 .is_ok(),
-            "decoded frame {i} has invalid surface"
+            "デコード済みフレーム {i} の surface が無効"
         );
     }
 
@@ -601,7 +603,7 @@ fn roundtrip_colorbar(
         let psnr = psnr_y(&colorbar, decoded.surface(), width, height);
         assert!(
             psnr >= min_psnr_db,
-            "frame {i}: PSNR {psnr:.1} dB < {min_psnr_db} dB"
+            "フレーム {i}: PSNR {psnr:.1} dB が下限 {min_psnr_db} dB 未満"
         );
     }
 }
@@ -679,11 +681,11 @@ fn test_roundtrip_h264_force_idr() {
             r.lock().unwrap().push(result.unwrap());
         }),
     )
-    .expect("failed to create encoder");
+    .expect("エンコーダーの作成に失敗");
 
     for i in 0..15 {
         let frame = generate_dummy_nv12(width, height, i);
-        let surface = encoder.alloc_surface().expect("failed to alloc surface");
+        let surface = encoder.alloc_surface().expect("Surface の確保に失敗");
         copy_frame_to_surface(&surface, &frame, format, width, height);
 
         let options = if i == 10 {
@@ -697,14 +699,14 @@ fn test_roundtrip_h264_force_idr() {
         };
         encoder
             .encode(surface, &options, ())
-            .expect("failed to encode");
+            .expect("エンコードに失敗");
     }
-    encoder.finish().expect("failed to finish");
+    encoder.finish().expect("finish に失敗");
 
     // コールバックで蓄積されたフレームを取り出す
     drop(encoder);
     let encoded_frames = Arc::try_unwrap(result)
-        .expect("Arc still referenced")
+        .expect("Arc の参照が残っている")
         .into_inner()
         .unwrap();
 
@@ -714,7 +716,7 @@ fn test_roundtrip_h264_force_idr() {
         .count();
     assert!(
         idr_count >= 2,
-        "expected at least 2 IDR frames, got {idr_count}"
+        "少なくとも 2 個の IDR フレームが必要だが {idr_count} 個しかない"
     );
 
     // フレーム単位でデコードして復号できることを確認する
@@ -746,7 +748,7 @@ fn test_force_picture_type_h264_outputs_idr_and_sps_pps() {
     assert_eq!(forced_idr.picture_type(), PictureType::Idr);
     assert!(
         h264_contains_sps_pps(buffer_to_slice(forced_idr.buffer())),
-        "forced H.264 IDR frame must include SPS and PPS"
+        "強制 H.264 IDR フレームに SPS と PPS が含まれていること"
     );
 }
 
@@ -818,7 +820,7 @@ fn test_force_picture_type_hevc_outputs_idr_and_vps_sps_pps() {
     assert_eq!(forced_idr.picture_type(), PictureType::Idr);
     assert!(
         hevc_contains_vps_sps_pps(buffer_to_slice(forced_idr.buffer())),
-        "forced HEVC IDR frame must include VPS, SPS and PPS"
+        "強制 HEVC IDR フレームに VPS, SPS, PPS が含まれていること"
     );
 }
 
@@ -890,7 +892,7 @@ fn test_force_picture_type_av1_outputs_keyframe_and_sequence_header() {
     assert_eq!(forced_key.picture_type(), PictureType::Idr);
     assert!(
         av1_contains_sequence_header_obu(buffer_to_slice(forced_key.buffer())),
-        "forced AV1 key frame must include sequence header OBU"
+        "強制 AV1 キーフレームにシーケンスヘッダー OBU が含まれていること"
     );
 }
 
@@ -909,7 +911,7 @@ fn test_reconfigure_invalid_framerate_zero() {
         RateControlMode::Cbr,
     );
     let mut encoder =
-        Encoder::new(config, FnEncodeHandler::<()>::new(|_| {})).expect("failed to create encoder");
+        Encoder::new(config, FnEncodeHandler::<()>::new(|_| {})).expect("エンコーダーの作成に失敗");
 
     let err = encoder
         .reconfigure(ReconfigureParams {
@@ -917,10 +919,10 @@ fn test_reconfigure_invalid_framerate_zero() {
             framerate_den: Some(1),
             ..ReconfigureParams::default()
         })
-        .expect_err("reconfigure should fail for zero framerate");
+        .expect_err("reconfigure はゼロフレームレートでエラーになること");
     assert!(
         err.to_string().contains("invalid framerate"),
-        "unexpected error: {err}"
+        "想定外のエラー: {err}"
     );
 }
 
@@ -949,18 +951,18 @@ fn test_reconfigure_h264_runtime_change() {
             r.lock().unwrap().push(result.unwrap());
         }),
     )
-    .expect("failed to create encoder");
+    .expect("エンコーダーの作成に失敗");
     let options = EncodeOptions {
         frame_type: frame_type::UNKNOWN,
     };
 
     for i in 0..5 {
         let frame = generate_dummy_nv12(320, 240, i);
-        let surface = encoder.alloc_surface().expect("failed to alloc surface");
+        let surface = encoder.alloc_surface().expect("Surface の確保に失敗");
         copy_frame_to_surface(&surface, &frame, format, 320, 240);
         encoder
             .encode(surface, &options, ())
-            .expect("failed to encode");
+            .expect("エンコードに失敗");
     }
 
     encoder
@@ -970,24 +972,27 @@ fn test_reconfigure_h264_runtime_change() {
             target_kbps: Some(1500),
             ..ReconfigureParams::default()
         })
-        .expect("failed to reconfigure");
+        .expect("reconfigure に失敗");
 
     for i in 5..10 {
         let frame = generate_dummy_nv12(320, 240, i);
-        let surface = encoder.alloc_surface().expect("failed to alloc surface");
+        let surface = encoder.alloc_surface().expect("Surface の確保に失敗");
         copy_frame_to_surface(&surface, &frame, format, 320, 240);
         encoder
             .encode(surface, &options, ())
-            .expect("failed to encode");
+            .expect("エンコードに失敗");
     }
 
-    encoder.finish().expect("failed to finish");
+    encoder.finish().expect("finish に失敗");
     drop(encoder);
     let encoded_frames = Arc::try_unwrap(result)
-        .expect("Arc still referenced")
+        .expect("Arc の参照が残っている")
         .into_inner()
         .unwrap();
-    assert!(!encoded_frames.is_empty(), "no encoded frames produced");
+    assert!(
+        !encoded_frames.is_empty(),
+        "エンコード済みフレームが生成されなかった"
+    );
 
     let decoded = decode(DecoderCodec::H264, encoded_frames);
     assert_eq!(decoded.len(), 10);
@@ -1018,18 +1023,18 @@ fn test_reconfigure_hevc_ignores_qpb_and_gop() {
             r.lock().unwrap().push(result.unwrap());
         }),
     )
-    .expect("failed to create encoder");
+    .expect("エンコーダーの作成に失敗");
     let options = EncodeOptions {
         frame_type: frame_type::UNKNOWN,
     };
 
     for i in 0..4 {
         let frame = generate_dummy_nv12(320, 240, i);
-        let surface = encoder.alloc_surface().expect("failed to alloc surface");
+        let surface = encoder.alloc_surface().expect("Surface の確保に失敗");
         copy_frame_to_surface(&surface, &frame, format, 320, 240);
         encoder
             .encode(surface, &options, ())
-            .expect("failed to encode");
+            .expect("エンコードに失敗");
     }
 
     encoder
@@ -1043,24 +1048,27 @@ fn test_reconfigure_hevc_ignores_qpb_and_gop() {
             gop_pic_size: Some(20),
             ..ReconfigureParams::default()
         })
-        .expect("failed to reconfigure");
+        .expect("reconfigure に失敗");
 
     for i in 4..8 {
         let frame = generate_dummy_nv12(320, 240, i);
-        let surface = encoder.alloc_surface().expect("failed to alloc surface");
+        let surface = encoder.alloc_surface().expect("Surface の確保に失敗");
         copy_frame_to_surface(&surface, &frame, format, 320, 240);
         encoder
             .encode(surface, &options, ())
-            .expect("failed to encode");
+            .expect("エンコードに失敗");
     }
 
-    encoder.finish().expect("failed to finish");
+    encoder.finish().expect("finish に失敗");
     drop(encoder);
     let encoded_frames = Arc::try_unwrap(result)
-        .expect("Arc still referenced")
+        .expect("Arc の参照が残っている")
         .into_inner()
         .unwrap();
-    assert!(!encoded_frames.is_empty(), "no encoded frames produced");
+    assert!(
+        !encoded_frames.is_empty(),
+        "エンコード済みフレームが生成されなかった"
+    );
 
     let decoded = decode(DecoderCodec::Hevc, encoded_frames);
     assert_eq!(decoded.len(), 8);
@@ -1091,18 +1099,18 @@ fn test_reconfigure_av1_qpb_and_gop() {
             r.lock().unwrap().push(result.unwrap());
         }),
     )
-    .expect("failed to create encoder");
+    .expect("エンコーダーの作成に失敗");
     let options = EncodeOptions {
         frame_type: frame_type::UNKNOWN,
     };
 
     for i in 0..4 {
         let frame = generate_dummy_nv12(320, 240, i);
-        let surface = encoder.alloc_surface().expect("failed to alloc surface");
+        let surface = encoder.alloc_surface().expect("Surface の確保に失敗");
         copy_frame_to_surface(&surface, &frame, format, 320, 240);
         encoder
             .encode(surface, &options, ())
-            .expect("failed to encode");
+            .expect("エンコードに失敗");
     }
 
     encoder
@@ -1116,24 +1124,27 @@ fn test_reconfigure_av1_qpb_and_gop() {
             gop_pic_size: Some(16),
             ..ReconfigureParams::default()
         })
-        .expect("failed to reconfigure");
+        .expect("reconfigure に失敗");
 
     for i in 4..8 {
         let frame = generate_dummy_nv12(320, 240, i);
-        let surface = encoder.alloc_surface().expect("failed to alloc surface");
+        let surface = encoder.alloc_surface().expect("Surface の確保に失敗");
         copy_frame_to_surface(&surface, &frame, format, 320, 240);
         encoder
             .encode(surface, &options, ())
-            .expect("failed to encode");
+            .expect("エンコードに失敗");
     }
 
-    encoder.finish().expect("failed to finish");
+    encoder.finish().expect("finish に失敗");
     drop(encoder);
     let encoded_frames = Arc::try_unwrap(result)
-        .expect("Arc still referenced")
+        .expect("Arc の参照が残っている")
         .into_inner()
         .unwrap();
-    assert!(!encoded_frames.is_empty(), "no encoded frames produced");
+    assert!(
+        !encoded_frames.is_empty(),
+        "エンコード済みフレームが生成されなかった"
+    );
 
     let decoded = decode(DecoderCodec::Av1, encoded_frames);
     assert_eq!(decoded.len(), 8);
@@ -1310,13 +1321,13 @@ fn roundtrip_format(
     // フレームサイズが FrameFormat::frame_size() と一致することを確認する
     let expected_size = format
         .frame_size(width as usize, height as usize)
-        .expect("frame size overflow");
+        .expect("フレームサイズがオーバーフロー");
     for (i, frame) in input_frames.iter().enumerate() {
         assert_eq!(
             frame.len(),
             expected_size,
-            "frame {i}: size {} != expected {expected_size} for {format:?}",
-            frame.len()
+            "フレーム {i}: サイズ {len} != 期待値 {expected_size} ({format:?})",
+            len = frame.len()
         );
     }
 
@@ -1325,8 +1336,8 @@ fn roundtrip_format(
     assert_eq!(
         decoded_frames.len(),
         num_frames,
-        "{format:?}: decoded {} frames, expected {num_frames}",
-        decoded_frames.len()
+        "{format:?}: デコードされたフレーム数 {len} が期待値 {num_frames} と一致しない",
+        len = decoded_frames.len()
     );
 }
 
@@ -1449,7 +1460,10 @@ fn test_roundtrip_h264_4k_high_bitrate() {
             width as usize,
             height as usize,
         );
-        assert!(psnr >= 25.0, "frame {i}: PSNR {psnr:.1} dB < 25.0 dB");
+        assert!(
+            psnr >= 25.0,
+            "フレーム {i}: PSNR {psnr:.1} dB が下限 25.0 dB 未満"
+        );
     }
 }
 
@@ -1486,7 +1500,10 @@ fn test_roundtrip_hevc_4k_high_bitrate() {
             width as usize,
             height as usize,
         );
-        assert!(psnr >= 25.0, "frame {i}: PSNR {psnr:.1} dB < 25.0 dB");
+        assert!(
+            psnr >= 25.0,
+            "フレーム {i}: PSNR {psnr:.1} dB が下限 25.0 dB 未満"
+        );
     }
 }
 
@@ -1523,7 +1540,10 @@ fn test_roundtrip_av1_4k_high_bitrate() {
             width as usize,
             height as usize,
         );
-        assert!(psnr >= 25.0, "frame {i}: PSNR {psnr:.1} dB < 25.0 dB");
+        assert!(
+            psnr >= 25.0,
+            "フレーム {i}: PSNR {psnr:.1} dB が下限 25.0 dB 未満"
+        );
     }
 }
 
@@ -1557,7 +1577,7 @@ fn test_user_data_delivered_in_submit_order() {
             r.lock().unwrap().push(result.unwrap().into_parts().1);
         }),
     )
-    .expect("failed to create encoder");
+    .expect("エンコーダーの作成に失敗");
 
     let width: usize = 320;
     let height: usize = 240;
@@ -1566,17 +1586,17 @@ fn test_user_data_delivered_in_submit_order() {
 
     for i in 0..num_frames {
         let data = generate_dummy_nv12(width, height, i);
-        let surface = encoder.alloc_surface().expect("failed to alloc surface");
+        let surface = encoder.alloc_surface().expect("Surface の確保に失敗");
         copy_nv12_to_surface(&surface, &data, width, height);
         encoder
             .encode(surface, &options, i)
-            .expect("failed to encode");
+            .expect("エンコードに失敗");
     }
-    encoder.finish().expect("failed to finish");
+    encoder.finish().expect("finish に失敗");
     drop(encoder);
 
     let tags = Arc::try_unwrap(received)
-        .expect("Arc still referenced")
+        .expect("Arc の参照が残っている")
         .into_inner()
         .unwrap();
     assert_eq!(tags.len(), num_frames);

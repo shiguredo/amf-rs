@@ -236,7 +236,7 @@ impl EncoderConfig {
 }
 
 /// エンコードオプション（フレームごと）
-#[derive(Default)]
+#[derive(Debug, Clone, Copy, Default)]
 pub struct EncodeOptions {
     /// 強制するフレームタイプ (0 = 自動)
     pub frame_type: u16,
@@ -1090,14 +1090,15 @@ fn extract_encoded_output(
             "buffer native is null",
         ));
     }
-    let _ = buf_native;
-
-    let picture_type = get_output_picture_type(&buffer, codec_config);
+    let picture_type = get_output_picture_type(&buffer, codec_config)?;
     Ok((buffer, picture_type))
 }
 
 /// 出力バッファからピクチャタイプを取得する
-fn get_output_picture_type(buffer: &Buffer, codec_config: &CodecConfig) -> PictureType {
+fn get_output_picture_type(
+    buffer: &Buffer,
+    codec_config: &CodecConfig,
+) -> Result<PictureType, Error> {
     let prop_name = match codec_config {
         CodecConfig::H264(_) => sys::str::AMF_VIDEO_ENCODER_OUTPUT_DATA_TYPE,
         CodecConfig::Hevc(_) => sys::str::AMF_VIDEO_ENCODER_HEVC_OUTPUT_DATA_TYPE,
@@ -1107,11 +1108,14 @@ fn get_output_picture_type(buffer: &Buffer, codec_config: &CodecConfig) -> Pictu
     let mut var = AMFVariantStruct::empty();
     let result = unsafe { buffer.get_property(name_w.as_ptr(), &mut var) };
     if result != AMF_RESULT::AMF_OK {
-        return PictureType::Unknown;
+        return Err(Error::new_custom(
+            "get_output_picture_type",
+            &format!("GetProperty failed: {result:?}"),
+        ));
     }
 
     let type_val = unsafe { var.__bindgen_anon_1.int64Value };
-    match codec_config {
+    let picture_type = match codec_config {
         CodecConfig::H264(_) => match type_val {
             0 => PictureType::Idr,
             1 => PictureType::I,
@@ -1129,5 +1133,6 @@ fn get_output_picture_type(buffer: &Buffer, codec_config: &CodecConfig) -> Pictu
             0 => PictureType::Idr, // KEY
             _ => PictureType::P,
         },
-    }
+    };
+    Ok(picture_type)
 }

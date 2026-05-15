@@ -323,6 +323,10 @@ fn drain_output<H: DecodeHandler>(
         let mut data: *mut AMFData = ptr::null_mut();
         let result = unsafe { component.query_output(&mut data) };
         log::debug!("worker: QueryOutput result={result:?}");
+        // AMF デコーダーは AMF_REPEAT でも有効なデータを返す場合があるため、
+        // data が非 null であればフレームとして抽出する。
+        // エンコーダー側の drain_output では AMF_REPEAT で常に break するが、
+        // デコーダーとエンコーダーで AMF ランタイムの挙動が異なるため非対称になっている。
         if result == AMF_RESULT::AMF_REPEAT {
             if !data.is_null() {
                 output_buffer.push_back(extract_frame(data as *mut AMFSurface));

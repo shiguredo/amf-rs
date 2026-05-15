@@ -240,7 +240,6 @@ pub(crate) fn require_vtbl_fn<F>(f: Option<F>, name: &str) -> Result<F, Error> {
     f.ok_or_else(|| Error::new_custom("vtable", &format!("missing vtable entry: {name}")))
 }
 
-/// AMF が返す `amf_int32` を `usize` に安全に変換する
 #[cfg(test)]
 mod tests {
     use super::*;
