@@ -166,6 +166,8 @@ pub type amf_handle = *mut std::ffi::c_void;
 pub type amf_pts = amf_int64;
 pub type amf_flags = amf_uint32;
 
+pub type wchar_t = std::os::raw::c_int;
+
 pub const AMF_VERSION_MAJOR: u32 = 1;
 pub const AMF_VERSION_MINOR: u32 = 5;
 pub const AMF_VERSION_RELEASE: u32 = 0;

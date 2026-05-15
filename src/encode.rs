@@ -10,11 +10,11 @@ use std::thread::JoinHandle;
 use std::time::Duration;
 
 use crate::AmfLibrary;
-use crate::error::{Error, positive_i32_to_usize, require_vtbl_fn};
+use crate::amf::{Buffer, Component, Context, PropertyStorage, Surface};
+use crate::error::{Error, positive_i32_to_usize};
 use crate::sys::{
     self, AMF_MEMORY_TYPE, AMF_PLANE_TYPE, AMF_RESULT, AMF_SECOND, AMF_SURFACE_FORMAT, AMFBuffer,
-    AMFComponent, AMFContext, AMFData, AMFPropertyStorage, AMFSurface, AMFVariantStruct, amf_int32,
-    amf_int64, amf_pts,
+    AMFData, AMFVariantStruct, amf_int32, amf_int64, amf_pts,
 };
 
 // ---------------------------------------------------------------------------
@@ -316,17 +316,10 @@ enum WorkerCommand<T> {
 // エンコーダー実装
 // ---------------------------------------------------------------------------
 
-/// スレッド間で AMFComponent ポインタを安全に送信するためのラッパー
-///
-/// AMFComponent の関数はスレッドセーフであるとドキュメントに記載されているため、
-/// raw ポインタの Send 実装を明示的に許可する。
-struct SendableComponent(*mut AMFComponent);
-unsafe impl Send for SendableComponent {}
-
 /// AMF ハードウェアエンコーダー
 pub struct Encoder<T: Send + 'static> {
-    context: *mut AMFContext,
-    component: *mut AMFComponent,
+    component: Component,
+    context: Context,
     surface_format: AMF_SURFACE_FORMAT,
     frame_format: FrameFormat,
     width: i32,
@@ -338,12 +331,6 @@ pub struct Encoder<T: Send + 'static> {
     cmd_tx: Option<mpsc::Sender<WorkerCommand<T>>>,
     poll_thread: Option<JoinHandle<()>>,
 }
-
-// 安全性:
-// AMFComponent の関数はスレッドセーフであるため、SubmitInput (メインスレッド) と
-// QueryOutput (ワーカースレッド) の同時呼び出しは安全。
-// Encoder は raw pointer を保持するため Send は手動実装が必要。
-unsafe impl<T: Send + 'static> Send for Encoder<T> {}
 
 impl<T: Send + 'static> Encoder<T> {
     /// エンコーダーを作成して初期化する
@@ -396,7 +383,7 @@ impl<T: Send + 'static> Encoder<T> {
         let context = lib.create_context()?;
 
         // Linux では Vulkan/OpenCL でコンテキストを初期化する
-        lib.init_vulkan(context)?;
+        unsafe { context.init_vulkan(ptr::null_mut()) }?;
 
         // コーデック固有のコンポーネント ID を選択する
         let component_id = match &config.codec {
@@ -406,30 +393,27 @@ impl<T: Send + 'static> Encoder<T> {
         };
 
         // コンポーネントを作成する
-        let component = lib.create_component(context, component_id)?;
+        let component = lib.create_component(&context, component_id)?;
 
         let surface_format = config.frame_format.to_amf();
 
         // プロパティを設定する
-        Self::set_properties(component as *mut AMFPropertyStorage, &config)?;
+        let prop = component.property_storage()?;
+        Self::set_properties(&prop, &config)?;
 
         // エンコーダーを初期化する
-        let result = unsafe {
-            let vtbl = &*(*component).pVtbl;
-            require_vtbl_fn(vtbl.Init, "Init")?(
-                component,
-                surface_format,
-                config.width as amf_int32,
-                config.height as amf_int32,
-            )
-        };
+        let result = component.init(
+            surface_format,
+            config.width as amf_int32,
+            config.height as amf_int32,
+        );
         Error::check(result, "AMFComponent::Init")?;
 
         let codec_config = config.codec;
 
         // ワーカースレッドを起動する
         let (cmd_tx, cmd_rx) = mpsc::channel::<WorkerCommand<T>>();
-        let worker_component = SendableComponent(component);
+        let worker_component = component.clone();
         let worker_codec_config = codec_config.clone();
         let poll_thread = std::thread::Builder::new()
             .name("amf-encoder-worker".into())
@@ -444,8 +428,8 @@ impl<T: Send + 'static> Encoder<T> {
             })?;
 
         Ok(Self {
-            context,
             component,
+            context,
             surface_format,
             frame_format: config.frame_format,
             width: config.width as i32,
@@ -460,7 +444,7 @@ impl<T: Send + 'static> Encoder<T> {
     }
 
     /// エンコーダーにプロパティを設定する
-    fn set_properties(prop: *mut AMFPropertyStorage, config: &EncoderConfig) -> Result<(), Error> {
+    fn set_properties(prop: &PropertyStorage, config: &EncoderConfig) -> Result<(), Error> {
         match &config.codec {
             CodecConfig::H264(h264) => {
                 Self::set_h264_properties(prop, config, h264)?;
@@ -480,17 +464,17 @@ impl<T: Send + 'static> Encoder<T> {
     /// 変更は次回 `SubmitInput` 前に AMF エンコーダーへ反映される。
     pub fn reconfigure(&mut self, params: ReconfigureParams) -> Result<(), Error> {
         let framerate = Self::resolve_reconfigure_framerate(&params)?;
-        let prop = self.component as *mut AMFPropertyStorage;
+        let prop = self.component.property_storage()?;
 
         match &self.codec_config {
             CodecConfig::H264(_) => {
-                Self::set_h264_dynamic_properties(prop, &params, framerate)?;
+                Self::set_h264_dynamic_properties(&prop, &params, framerate)?;
             }
             CodecConfig::Hevc(_) => {
-                Self::set_hevc_dynamic_properties(prop, &params, framerate)?;
+                Self::set_hevc_dynamic_properties(&prop, &params, framerate)?;
             }
             CodecConfig::Av1(_) => {
-                Self::set_av1_dynamic_properties(prop, &params, framerate)?;
+                Self::set_av1_dynamic_properties(&prop, &params, framerate)?;
             }
         }
 
@@ -529,7 +513,7 @@ impl<T: Send + 'static> Encoder<T> {
 
     /// H.264 の動的プロパティを設定する
     fn set_h264_dynamic_properties(
-        prop: *mut AMFPropertyStorage,
+        prop: &PropertyStorage,
         params: &ReconfigureParams,
         framerate: Option<(u32, u32)>,
     ) -> Result<(), Error> {
@@ -549,7 +533,7 @@ impl<T: Send + 'static> Encoder<T> {
 
     /// HEVC の動的プロパティを設定する
     fn set_hevc_dynamic_properties(
-        prop: *mut AMFPropertyStorage,
+        prop: &PropertyStorage,
         params: &ReconfigureParams,
         framerate: Option<(u32, u32)>,
     ) -> Result<(), Error> {
@@ -571,7 +555,7 @@ impl<T: Send + 'static> Encoder<T> {
 
     /// AV1 の動的プロパティを設定する
     fn set_av1_dynamic_properties(
-        prop: *mut AMFPropertyStorage,
+        prop: &PropertyStorage,
         params: &ReconfigureParams,
         framerate: Option<(u32, u32)>,
     ) -> Result<(), Error> {
@@ -592,7 +576,7 @@ impl<T: Send + 'static> Encoder<T> {
     /// codec 共通の動的プロパティを設定する
     #[allow(clippy::too_many_arguments)]
     fn set_codec_dynamic_properties(
-        prop: *mut AMFPropertyStorage,
+        prop: &PropertyStorage,
         params: &ReconfigureParams,
         framerate: Option<(u32, u32)>,
         framerate_name: &'static str,
@@ -604,37 +588,37 @@ impl<T: Send + 'static> Encoder<T> {
         gop_pic_size_name: Option<&'static str>,
     ) -> Result<(), Error> {
         if let Some((num, den)) = framerate {
-            set_property_rate(prop, framerate_name, num, den)?;
+            prop.set_property_rate(framerate_name, num, den)?;
         }
         if let Some(target_kbps) = params.target_kbps {
-            set_property_int64(prop, target_bitrate_name, target_kbps as amf_int64 * 1000)?;
+            prop.set_property_int64(target_bitrate_name, target_kbps as amf_int64 * 1000)?;
         }
         if let Some(max_kbps) = params.max_kbps {
-            set_property_int64(prop, peak_bitrate_name, max_kbps as amf_int64 * 1000)?;
+            prop.set_property_int64(peak_bitrate_name, max_kbps as amf_int64 * 1000)?;
         }
         if let Some(qpi) = params.qpi {
-            set_property_int64(prop, qp_i_name, qpi as amf_int64)?;
+            prop.set_property_int64(qp_i_name, qpi as amf_int64)?;
         }
         if let Some(qpp) = params.qpp {
-            set_property_int64(prop, qp_p_name, qpp as amf_int64)?;
+            prop.set_property_int64(qp_p_name, qpp as amf_int64)?;
         }
         if let (Some(qpb_name), Some(qpb)) = (qp_b_name, params.qpb) {
-            set_property_int64(prop, qpb_name, qpb as amf_int64)?;
+            prop.set_property_int64(qpb_name, qpb as amf_int64)?;
         }
         if let (Some(gop_name), Some(gop)) = (gop_pic_size_name, params.gop_pic_size) {
-            set_property_int64(prop, gop_name, gop as amf_int64)?;
+            prop.set_property_int64(gop_name, gop as amf_int64)?;
         }
         Ok(())
     }
 
     /// H.264 固有のプロパティを設定する
     fn set_h264_properties(
-        prop: *mut AMFPropertyStorage,
+        prop: &PropertyStorage,
         config: &EncoderConfig,
         h264: &H264EncoderConfig,
     ) -> Result<(), Error> {
         // Usage: トランスコーディング
-        set_property_int64(prop, sys::str::AMF_VIDEO_ENCODER_USAGE, 0)?;
+        prop.set_property_int64(sys::str::AMF_VIDEO_ENCODER_USAGE, 0)?;
 
         // Profile
         if let Some(profile) = h264.profile {
@@ -645,12 +629,11 @@ impl<T: Send + 'static> Encoder<T> {
                 H264Profile::ConstrainedBaseline => 256,
                 H264Profile::ConstrainedHigh => 257,
             };
-            set_property_int64(prop, sys::str::AMF_VIDEO_ENCODER_PROFILE, profile_val)?;
+            prop.set_property_int64(sys::str::AMF_VIDEO_ENCODER_PROFILE, profile_val)?;
         }
 
         // Frame size
-        set_property_size(
-            prop,
+        prop.set_property_size(
             sys::str::AMF_VIDEO_ENCODER_FRAMESIZE,
             config.width as amf_int32,
             config.height as amf_int32,
@@ -667,11 +650,7 @@ impl<T: Send + 'static> Encoder<T> {
             RateControlMode::HighQualityVbr => 5, // AMF_VIDEO_ENCODER_RATE_CONTROL_METHOD_HIGH_QUALITY_VBR
             RateControlMode::HighQualityCbr => 6, // AMF_VIDEO_ENCODER_RATE_CONTROL_METHOD_HIGH_QUALITY_CBR
         };
-        set_property_int64(
-            prop,
-            sys::str::AMF_VIDEO_ENCODER_RATE_CONTROL_METHOD,
-            rc_method,
-        )?;
+        prop.set_property_int64(sys::str::AMF_VIDEO_ENCODER_RATE_CONTROL_METHOD, rc_method)?;
 
         let params = ReconfigureParams {
             target_kbps: config.target_kbps,
@@ -693,22 +672,21 @@ impl<T: Send + 'static> Encoder<T> {
 
     /// HEVC 固有のプロパティを設定する
     fn set_hevc_properties(
-        prop: *mut AMFPropertyStorage,
+        prop: &PropertyStorage,
         config: &EncoderConfig,
         hevc: &HevcEncoderConfig,
     ) -> Result<(), Error> {
-        set_property_int64(prop, sys::str::AMF_VIDEO_ENCODER_HEVC_USAGE, 0)?;
+        prop.set_property_int64(sys::str::AMF_VIDEO_ENCODER_HEVC_USAGE, 0)?;
 
         if let Some(profile) = hevc.profile {
             let profile_val: amf_int64 = match profile {
                 HevcProfile::Main => 1,
                 HevcProfile::Main10 => 2,
             };
-            set_property_int64(prop, sys::str::AMF_VIDEO_ENCODER_HEVC_PROFILE, profile_val)?;
+            prop.set_property_int64(sys::str::AMF_VIDEO_ENCODER_HEVC_PROFILE, profile_val)?;
         }
 
-        set_property_size(
-            prop,
+        prop.set_property_size(
             sys::str::AMF_VIDEO_ENCODER_HEVC_FRAMESIZE,
             config.width as amf_int32,
             config.height as amf_int32,
@@ -725,8 +703,7 @@ impl<T: Send + 'static> Encoder<T> {
             RateControlMode::HighQualityVbr => 5, // AMF_VIDEO_ENCODER_HEVC_RATE_CONTROL_METHOD_HIGH_QUALITY_VBR
             RateControlMode::HighQualityCbr => 6, // AMF_VIDEO_ENCODER_HEVC_RATE_CONTROL_METHOD_HIGH_QUALITY_CBR
         };
-        set_property_int64(
-            prop,
+        prop.set_property_int64(
             sys::str::AMF_VIDEO_ENCODER_HEVC_RATE_CONTROL_METHOD,
             rc_method,
         )?;
@@ -745,11 +722,7 @@ impl<T: Send + 'static> Encoder<T> {
         )?;
 
         if let Some(gop) = config.gop_pic_size {
-            set_property_int64(
-                prop,
-                sys::str::AMF_VIDEO_ENCODER_HEVC_GOP_SIZE,
-                gop as amf_int64,
-            )?;
+            prop.set_property_int64(sys::str::AMF_VIDEO_ENCODER_HEVC_GOP_SIZE, gop as amf_int64)?;
         }
 
         Ok(())
@@ -757,14 +730,13 @@ impl<T: Send + 'static> Encoder<T> {
 
     /// AV1 固有のプロパティを設定する
     fn set_av1_properties(
-        prop: *mut AMFPropertyStorage,
+        prop: &PropertyStorage,
         config: &EncoderConfig,
         _av1: &Av1EncoderConfig,
     ) -> Result<(), Error> {
-        set_property_int64(prop, sys::str::AMF_VIDEO_ENCODER_AV1_USAGE, 0)?;
+        prop.set_property_int64(sys::str::AMF_VIDEO_ENCODER_AV1_USAGE, 0)?;
 
-        set_property_size(
-            prop,
+        prop.set_property_size(
             sys::str::AMF_VIDEO_ENCODER_AV1_FRAMESIZE,
             config.width as amf_int32,
             config.height as amf_int32,
@@ -781,8 +753,7 @@ impl<T: Send + 'static> Encoder<T> {
             RateControlMode::HighQualityVbr => 5, // AMF_VIDEO_ENCODER_AV1_RATE_CONTROL_METHOD_HIGH_QUALITY_VBR
             RateControlMode::HighQualityCbr => 6, // AMF_VIDEO_ENCODER_AV1_RATE_CONTROL_METHOD_HIGH_QUALITY_CBR
         };
-        set_property_int64(
-            prop,
+        prop.set_property_int64(
             sys::str::AMF_VIDEO_ENCODER_AV1_RATE_CONTROL_METHOD,
             rc_method,
         )?;
@@ -833,41 +804,24 @@ impl<T: Send + 'static> Encoder<T> {
 
         log::debug!("Encoder::encode: AllocSurface");
         // Surface を確保する
-        let mut surface: *mut AMFSurface = ptr::null_mut();
-        let result = unsafe {
-            let vtbl = &*(*self.context).pVtbl;
-            require_vtbl_fn(vtbl.AllocSurface, "AllocSurface")?(
-                self.context,
-                AMF_MEMORY_TYPE::AMF_MEMORY_HOST,
-                self.surface_format,
-                self.width,
-                self.height,
-                &mut surface,
-            )
-        };
-        Error::check(result, "AMFContext::AllocSurface")?;
-
-        if surface.is_null() {
-            return Err(Error::new_custom(
-                "Encoder::encode",
-                "AllocSurface returned null",
-            ));
-        }
+        let surface = self.context.alloc_surface(
+            AMF_MEMORY_TYPE::AMF_MEMORY_HOST,
+            self.surface_format,
+            self.width,
+            self.height,
+        )?;
 
         // フレームデータを Surface にコピーする
-        self.copy_frame_to_surface(surface, frame_data)?;
+        self.copy_frame_to_surface(&surface, frame_data)?;
 
         // PTS を設定する
         let pts = (self.frame_count * self.framerate_den * AMF_SECOND as u64 / self.framerate_num)
             as amf_pts;
-        unsafe {
-            let vtbl = &*(*surface).pVtbl;
-            require_vtbl_fn(vtbl.SetPts, "SetPts")?(surface, pts);
-        }
+        surface.set_pts(pts);
 
         // フレームタイプの強制
         if options.frame_type & frame_type::IDR != 0 {
-            self.force_picture_type(surface)?;
+            self.force_picture_type(&surface)?;
         }
 
         log::debug!("Encoder::encode: SubmitInput");
@@ -876,11 +830,8 @@ impl<T: Send + 'static> Encoder<T> {
         let mut submitted = false;
         for retry in 0..max_retries {
             let result = unsafe {
-                let vtbl = &*(*self.component).pVtbl;
-                require_vtbl_fn(vtbl.SubmitInput, "SubmitInput")?(
-                    self.component,
-                    surface as *mut AMFData,
-                )
+                self.component
+                    .submit_input(surface.as_ptr() as *mut AMFData)
             };
 
             if result == AMF_RESULT::AMF_OK {
@@ -895,21 +846,9 @@ impl<T: Send + 'static> Encoder<T> {
                 continue;
             }
             // その他のエラー: Surface を解放してエラーを返す
-            unsafe {
-                let vtbl = &*(*surface).pVtbl;
-                if let Some(release) = vtbl.Release {
-                    release(surface);
-                }
-            }
             return Error::check(result, "AMFComponent::SubmitInput");
         }
         if !submitted {
-            unsafe {
-                let vtbl = &*(*surface).pVtbl;
-                if let Some(release) = vtbl.Release {
-                    release(surface);
-                }
-            }
             return Err(Error::new_custom(
                 "Encoder::encode",
                 "SubmitInput retry limit exceeded",
@@ -929,11 +868,7 @@ impl<T: Send + 'static> Encoder<T> {
     }
 
     /// フレームデータを AMFSurface にコピーする
-    fn copy_frame_to_surface(
-        &self,
-        surface: *mut AMFSurface,
-        frame_data: &[u8],
-    ) -> Result<(), Error> {
+    fn copy_frame_to_surface(&self, surface: &Surface, frame_data: &[u8]) -> Result<(), Error> {
         match self.frame_format {
             FrameFormat::Nv12 | FrameFormat::P010 | FrameFormat::P012 | FrameFormat::P016 => {
                 // Semi-Planar YUV 4:2:0: Y プレーン + UV インターリーブプレーン
@@ -948,23 +883,8 @@ impl<T: Send + 'static> Encoder<T> {
                 })?;
 
                 // Y プレーン
-                let y_plane = unsafe {
-                    let vtbl = &*(*surface).pVtbl;
-                    require_vtbl_fn(vtbl.GetPlane, "GetPlane")?(
-                        surface,
-                        AMF_PLANE_TYPE::AMF_PLANE_Y,
-                    )
-                };
-                if y_plane.is_null() {
-                    return Err(Error::new_custom(
-                        "copy_frame_to_surface",
-                        "failed to get Y plane",
-                    ));
-                }
-                let y_native = unsafe {
-                    let vtbl = &*(*y_plane).pVtbl;
-                    require_vtbl_fn(vtbl.GetNative, "GetNative")?(y_plane) as *mut u8
-                };
+                let y_plane = surface.get_plane(AMF_PLANE_TYPE::AMF_PLANE_Y)?;
+                let y_native = y_plane.get_native() as *mut u8;
                 if y_native.is_null() {
                     return Err(Error::new_custom(
                         "copy_frame_to_surface",
@@ -972,10 +892,7 @@ impl<T: Send + 'static> Encoder<T> {
                     ));
                 }
                 let y_hpitch = positive_i32_to_usize(
-                    unsafe {
-                        let vtbl = &*(*y_plane).pVtbl;
-                        require_vtbl_fn(vtbl.GetHPitch, "GetHPitch")?(y_plane)
-                    },
+                    y_plane.get_hpitch(),
                     "copy_frame_to_surface",
                     "y_hpitch",
                 )?;
@@ -1009,23 +926,8 @@ impl<T: Send + 'static> Encoder<T> {
                 }
 
                 // UV プレーン
-                let uv_plane = unsafe {
-                    let vtbl = &*(*surface).pVtbl;
-                    require_vtbl_fn(vtbl.GetPlane, "GetPlane")?(
-                        surface,
-                        AMF_PLANE_TYPE::AMF_PLANE_UV,
-                    )
-                };
-                if uv_plane.is_null() {
-                    return Err(Error::new_custom(
-                        "copy_frame_to_surface",
-                        "failed to get UV plane",
-                    ));
-                }
-                let uv_native = unsafe {
-                    let vtbl = &*(*uv_plane).pVtbl;
-                    require_vtbl_fn(vtbl.GetNative, "GetNative")?(uv_plane) as *mut u8
-                };
+                let uv_plane = surface.get_plane(AMF_PLANE_TYPE::AMF_PLANE_UV)?;
+                let uv_native = uv_plane.get_native() as *mut u8;
                 if uv_native.is_null() {
                     return Err(Error::new_custom(
                         "copy_frame_to_surface",
@@ -1033,10 +935,7 @@ impl<T: Send + 'static> Encoder<T> {
                     ));
                 }
                 let uv_hpitch = positive_i32_to_usize(
-                    unsafe {
-                        let vtbl = &*(*uv_plane).pVtbl;
-                        require_vtbl_fn(vtbl.GetHPitch, "GetHPitch")?(uv_plane)
-                    },
+                    uv_plane.get_hpitch(),
                     "copy_frame_to_surface",
                     "uv_hpitch",
                 )?;
@@ -1085,23 +984,8 @@ impl<T: Send + 'static> Encoder<T> {
                 })?;
 
                 // Y プレーン
-                let y_plane = unsafe {
-                    let vtbl = &*(*surface).pVtbl;
-                    require_vtbl_fn(vtbl.GetPlane, "GetPlane")?(
-                        surface,
-                        AMF_PLANE_TYPE::AMF_PLANE_Y,
-                    )
-                };
-                if y_plane.is_null() {
-                    return Err(Error::new_custom(
-                        "copy_frame_to_surface",
-                        "failed to get Y plane",
-                    ));
-                }
-                let y_native = unsafe {
-                    let vtbl = &*(*y_plane).pVtbl;
-                    require_vtbl_fn(vtbl.GetNative, "GetNative")?(y_plane) as *mut u8
-                };
+                let y_plane = surface.get_plane(AMF_PLANE_TYPE::AMF_PLANE_Y)?;
+                let y_native = y_plane.get_native() as *mut u8;
                 if y_native.is_null() {
                     return Err(Error::new_custom(
                         "copy_frame_to_surface",
@@ -1109,10 +993,7 @@ impl<T: Send + 'static> Encoder<T> {
                     ));
                 }
                 let y_hpitch = positive_i32_to_usize(
-                    unsafe {
-                        let vtbl = &*(*y_plane).pVtbl;
-                        require_vtbl_fn(vtbl.GetHPitch, "GetHPitch")?(y_plane)
-                    },
+                    y_plane.get_hpitch(),
                     "copy_frame_to_surface",
                     "y_hpitch",
                 )?;
@@ -1147,23 +1028,8 @@ impl<T: Send + 'static> Encoder<T> {
                 }
 
                 // U プレーン
-                let u_plane = unsafe {
-                    let vtbl = &*(*surface).pVtbl;
-                    require_vtbl_fn(vtbl.GetPlane, "GetPlane")?(
-                        surface,
-                        AMF_PLANE_TYPE::AMF_PLANE_U,
-                    )
-                };
-                if u_plane.is_null() {
-                    return Err(Error::new_custom(
-                        "copy_frame_to_surface",
-                        "failed to get U plane",
-                    ));
-                }
-                let u_native = unsafe {
-                    let vtbl = &*(*u_plane).pVtbl;
-                    require_vtbl_fn(vtbl.GetNative, "GetNative")?(u_plane) as *mut u8
-                };
+                let u_plane = surface.get_plane(AMF_PLANE_TYPE::AMF_PLANE_U)?;
+                let u_native = u_plane.get_native() as *mut u8;
                 if u_native.is_null() {
                     return Err(Error::new_custom(
                         "copy_frame_to_surface",
@@ -1171,10 +1037,7 @@ impl<T: Send + 'static> Encoder<T> {
                     ));
                 }
                 let u_hpitch = positive_i32_to_usize(
-                    unsafe {
-                        let vtbl = &*(*u_plane).pVtbl;
-                        require_vtbl_fn(vtbl.GetHPitch, "GetHPitch")?(u_plane)
-                    },
+                    u_plane.get_hpitch(),
                     "copy_frame_to_surface",
                     "u_hpitch",
                 )?;
@@ -1204,23 +1067,8 @@ impl<T: Send + 'static> Encoder<T> {
                 }
 
                 // V プレーン
-                let v_plane = unsafe {
-                    let vtbl = &*(*surface).pVtbl;
-                    require_vtbl_fn(vtbl.GetPlane, "GetPlane")?(
-                        surface,
-                        AMF_PLANE_TYPE::AMF_PLANE_V,
-                    )
-                };
-                if v_plane.is_null() {
-                    return Err(Error::new_custom(
-                        "copy_frame_to_surface",
-                        "failed to get V plane",
-                    ));
-                }
-                let v_native = unsafe {
-                    let vtbl = &*(*v_plane).pVtbl;
-                    require_vtbl_fn(vtbl.GetNative, "GetNative")?(v_plane) as *mut u8
-                };
+                let v_plane = surface.get_plane(AMF_PLANE_TYPE::AMF_PLANE_V)?;
+                let v_native = v_plane.get_native() as *mut u8;
                 if v_native.is_null() {
                     return Err(Error::new_custom(
                         "copy_frame_to_surface",
@@ -1228,10 +1076,7 @@ impl<T: Send + 'static> Encoder<T> {
                     ));
                 }
                 let v_hpitch = positive_i32_to_usize(
-                    unsafe {
-                        let vtbl = &*(*v_plane).pVtbl;
-                        require_vtbl_fn(vtbl.GetHPitch, "GetHPitch")?(v_plane)
-                    },
+                    v_plane.get_hpitch(),
                     "copy_frame_to_surface",
                     "v_hpitch",
                 )?;
@@ -1254,34 +1099,16 @@ impl<T: Send + 'static> Encoder<T> {
             }
             _ => {
                 // Packed フォーマット: 単一プレーンにコピーする
-                let plane = unsafe {
-                    let vtbl = &*(*surface).pVtbl;
-                    require_vtbl_fn(vtbl.GetPlaneAt, "GetPlaneAt")?(surface, 0)
-                };
-                if plane.is_null() {
-                    return Err(Error::new_custom(
-                        "copy_frame_to_surface",
-                        "failed to get plane",
-                    ));
-                }
-                let native = unsafe {
-                    let vtbl = &*(*plane).pVtbl;
-                    require_vtbl_fn(vtbl.GetNative, "GetNative")?(plane) as *mut u8
-                };
+                let plane = surface.get_plane_at(0)?;
+                let native = plane.get_native() as *mut u8;
                 if native.is_null() {
                     return Err(Error::new_custom(
                         "copy_frame_to_surface",
                         "plane native pointer is null",
                     ));
                 }
-                let hpitch = positive_i32_to_usize(
-                    unsafe {
-                        let vtbl = &*(*plane).pVtbl;
-                        require_vtbl_fn(vtbl.GetHPitch, "GetHPitch")?(plane)
-                    },
-                    "copy_frame_to_surface",
-                    "hpitch",
-                )?;
+                let hpitch =
+                    positive_i32_to_usize(plane.get_hpitch(), "copy_frame_to_surface", "hpitch")?;
                 let bpp: usize = match self.frame_format {
                     // Packed 32bit 系
                     FrameFormat::Bgra
@@ -1330,35 +1157,31 @@ impl<T: Send + 'static> Encoder<T> {
     }
 
     /// IDR フレームを強制する
-    fn force_picture_type(&self, surface: *mut AMFSurface) -> Result<(), Error> {
-        let prop = surface as *mut AMFPropertyStorage;
+    fn force_picture_type(&self, surface: &Surface) -> Result<(), Error> {
+        let prop = surface.property_storage()?;
         match &self.codec_config {
             CodecConfig::H264(_) => {
-                set_property_int64(
-                    prop,
+                prop.set_property_int64(
                     sys::str::AMF_VIDEO_ENCODER_FORCE_PICTURE_TYPE,
                     sys::AMF_VIDEO_ENCODER_PICTURE_TYPE_ENUM_AMF_VIDEO_ENCODER_PICTURE_TYPE_IDR
                         .into(),
                 )?;
-                set_property_int64(prop, sys::str::AMF_VIDEO_ENCODER_INSERT_SPS, 1)?;
-                set_property_int64(prop, sys::str::AMF_VIDEO_ENCODER_INSERT_PPS, 1)?;
+                prop.set_property_int64(sys::str::AMF_VIDEO_ENCODER_INSERT_SPS, 1)?;
+                prop.set_property_int64(sys::str::AMF_VIDEO_ENCODER_INSERT_PPS, 1)?;
             }
             CodecConfig::Hevc(_) => {
-                set_property_int64(
-                    prop,
+                prop.set_property_int64(
                     sys::str::AMF_VIDEO_ENCODER_HEVC_FORCE_PICTURE_TYPE,
                     sys::AMF_VIDEO_ENCODER_HEVC_PICTURE_TYPE_ENUM_AMF_VIDEO_ENCODER_HEVC_PICTURE_TYPE_IDR.into(),
                 )?;
-                set_property_int64(prop, sys::str::AMF_VIDEO_ENCODER_HEVC_INSERT_HEADER, 1)?;
+                prop.set_property_int64(sys::str::AMF_VIDEO_ENCODER_HEVC_INSERT_HEADER, 1)?;
             }
             CodecConfig::Av1(_) => {
-                set_property_int64(
-                    prop,
+                prop.set_property_int64(
                     sys::str::AMF_VIDEO_ENCODER_AV1_FORCE_FRAME_TYPE,
                     sys::AMF_VIDEO_ENCODER_AV1_FORCE_FRAME_TYPE_ENUM_AMF_VIDEO_ENCODER_AV1_FORCE_FRAME_TYPE_KEY.into(),
                 )?;
-                set_property_int64(
-                    prop,
+                prop.set_property_int64(
                     sys::str::AMF_VIDEO_ENCODER_AV1_FORCE_INSERT_SEQUENCE_HEADER,
                     1,
                 )?;
@@ -1370,10 +1193,7 @@ impl<T: Send + 'static> Encoder<T> {
     /// エンコーダーをフラッシュして残りのフレームを処理する
     pub fn finish(&mut self) -> Result<(), Error> {
         // Drain を呼び出して残りのフレームを出力させる
-        let result = unsafe {
-            let vtbl = &*(*self.component).pVtbl;
-            require_vtbl_fn(vtbl.Drain, "Drain")?(self.component)
-        };
+        let result = self.component.drain();
         // AMF_INPUT_FULL は Drain 中に返ることがあるが無視する
         if result != AMF_RESULT::AMF_OK && result != AMF_RESULT::AMF_INPUT_FULL {
             Error::check(result, "AMFComponent::Drain")?;
@@ -1407,25 +1227,8 @@ impl<T: Send + 'static> Drop for Encoder<T> {
             let _ = handle.join();
         }
 
-        // Drop 内の panic は二重 panic で abort になるため、
-        // vtable の関数ポインタが欠けている場合は握りつぶす
-        unsafe {
-            let vtbl = &*(*self.component).pVtbl;
-            if let Some(terminate) = vtbl.Terminate {
-                let _ = terminate(self.component);
-            }
-            if let Some(release) = vtbl.Release {
-                release(self.component);
-            }
-
-            let vtbl = &*(*self.context).pVtbl;
-            if let Some(terminate) = vtbl.Terminate {
-                let _ = terminate(self.context);
-            }
-            if let Some(release) = vtbl.Release {
-                release(self.context);
-            }
-        }
+        let _ = self.component.terminate();
+        let _ = self.context.terminate();
     }
 }
 
@@ -1438,7 +1241,7 @@ impl<T: Send + 'static> Drop for Encoder<T> {
 /// メインスレッドから `Submit(T)` コマンドを受け取り、AMFComponent::QueryOutput を
 /// ポーリングしてエンコード済みフレームを取得し、コールバックを呼び出す。
 fn worker<T, F>(
-    component_wrapper: SendableComponent,
+    component: Component,
     mut callback: F,
     cmd_rx: mpsc::Receiver<WorkerCommand<T>>,
     codec_config: CodecConfig,
@@ -1446,7 +1249,6 @@ fn worker<T, F>(
     T: Send + 'static,
     F: FnMut(EncodedFrame, T) + Send + 'static,
 {
-    let component = component_wrapper.0;
     let mut pending: VecDeque<T> = VecDeque::new();
     let mut output_buffer: VecDeque<EncodedFrame> = VecDeque::new();
     let mut finish: Option<mpsc::SyncSender<()>> = None;
@@ -1466,13 +1268,15 @@ fn worker<T, F>(
             match cmd_rx.recv_timeout(Duration::from_millis(1)) {
                 Ok(cmd) => cmd,
                 Err(mpsc::RecvTimeoutError::Timeout) => {
-                    drain_output(
+                    if let Err(e) = drain_output(
                         &mut output_buffer,
                         &mut pending,
                         &mut callback,
-                        component,
+                        &component,
                         &codec_config,
-                    );
+                    ) {
+                        log::error!("worker: drain_output failed: {e}");
+                    }
                     continue;
                 }
                 Err(mpsc::RecvTimeoutError::Disconnected) => break,
@@ -1499,25 +1303,17 @@ fn drain_output<T, F>(
     output_buffer: &mut VecDeque<EncodedFrame>,
     pending: &mut VecDeque<T>,
     callback: &mut F,
-    component: *mut AMFComponent,
+    component: &Component,
     codec_config: &CodecConfig,
-) where
+) -> Result<(), Error>
+where
     T: Send + 'static,
     F: FnMut(EncodedFrame, T),
 {
     // 出力をバッファに格納する
     loop {
         let mut data: *mut AMFData = ptr::null_mut();
-        let result = unsafe {
-            let vtbl = &*(*component).pVtbl;
-            match vtbl.QueryOutput {
-                Some(f) => f(component, &mut data),
-                None => {
-                    log::error!("worker: QueryOutput vtable entry missing");
-                    break;
-                }
-            }
-        };
+        let result = unsafe { component.query_output(&mut data) };
         log::debug!("worker: QueryOutput result={result:?}");
         if result == AMF_RESULT::AMF_REPEAT || result == AMF_RESULT::AMF_EOF {
             break;
@@ -1525,8 +1321,9 @@ fn drain_output<T, F>(
         if result != AMF_RESULT::AMF_OK || data.is_null() {
             break;
         }
-        if let Some(frame) = extract_encoded_output(data, codec_config) {
-            output_buffer.push_back(frame);
+        match extract_encoded_output(data, codec_config) {
+            Ok(frame) => output_buffer.push_back(frame),
+            Err(e) => log::error!("Failed to extract encoded output: {e}"),
         }
     }
 
@@ -1536,77 +1333,54 @@ fn drain_output<T, F>(
         let t = pending.pop_front().unwrap();
         callback(frame, t);
     }
+
+    Ok(())
 }
 // ---------------------------------------------------------------------------
 // 出力抽出 (standalone)
 // ---------------------------------------------------------------------------
 
 /// AMFData から EncodedFrame を抽出する
-fn extract_encoded_output(data: *mut AMFData, codec_config: &CodecConfig) -> Option<EncodedFrame> {
+fn extract_encoded_output(
+    data: *mut AMFData,
+    codec_config: &CodecConfig,
+) -> Result<EncodedFrame, Error> {
     let buffer = data as *mut AMFBuffer;
-    let buf_size = unsafe {
-        let vtbl = &*(*buffer).pVtbl;
-        match vtbl.GetSize {
-            Some(f) => f(buffer),
-            None => {
-                release_buffer(buffer);
-                return None;
-            }
-        }
-    };
+    if buffer.is_null() {
+        return Err(Error::new_custom(
+            "extract_encoded_output",
+            "buffer is null",
+        ));
+    }
+    let buffer = unsafe { Buffer::from_raw(buffer) }?;
+    let buf_size = buffer.get_size();
     if buf_size == 0 {
-        release_buffer(buffer);
-        return None;
+        return Err(Error::new_custom(
+            "extract_encoded_output",
+            "buffer size is 0",
+        ));
     }
-    let buf_native = unsafe {
-        let vtbl = &*(*buffer).pVtbl;
-        match vtbl.GetNative {
-            Some(f) => f(buffer) as *const u8,
-            None => {
-                release_buffer(buffer);
-                return None;
-            }
-        }
-    };
+    let buf_native = buffer.get_native() as *const u8;
     if buf_native.is_null() {
-        release_buffer(buffer);
-        return None;
+        return Err(Error::new_custom(
+            "extract_encoded_output",
+            "buffer native is null",
+        ));
     }
-    let pts = unsafe {
-        let vtbl = &*(*buffer).pVtbl;
-        match vtbl.GetPts {
-            Some(f) => f(buffer),
-            None => {
-                release_buffer(buffer);
-                return None;
-            }
-        }
-    };
+    let pts = buffer.get_pts();
 
     let frame_data = unsafe { std::slice::from_raw_parts(buf_native, buf_size) }.to_vec();
-    let picture_type = get_output_picture_type(buffer, codec_config);
+    let picture_type = get_output_picture_type(&buffer, codec_config);
 
-    release_buffer(buffer);
-
-    Some(EncodedFrame {
+    Ok(EncodedFrame {
         data: frame_data,
         pts,
         picture_type,
     })
 }
 
-/// バッファの参照を解放する
-fn release_buffer(buffer: *mut AMFBuffer) {
-    unsafe {
-        let vtbl = &*(*buffer).pVtbl;
-        if let Some(release) = vtbl.Release {
-            release(buffer);
-        }
-    }
-}
-
 /// 出力バッファからピクチャタイプを取得する
-fn get_output_picture_type(buffer: *mut AMFBuffer, codec_config: &CodecConfig) -> PictureType {
+fn get_output_picture_type(buffer: &Buffer, codec_config: &CodecConfig) -> PictureType {
     let prop_name = match codec_config {
         CodecConfig::H264(_) => sys::str::AMF_VIDEO_ENCODER_OUTPUT_DATA_TYPE,
         CodecConfig::Hevc(_) => sys::str::AMF_VIDEO_ENCODER_HEVC_OUTPUT_DATA_TYPE,
@@ -1614,13 +1388,7 @@ fn get_output_picture_type(buffer: *mut AMFBuffer, codec_config: &CodecConfig) -
     };
     let name_w = sys::to_wstring(prop_name);
     let mut var = AMFVariantStruct::empty();
-    let result = unsafe {
-        let vtbl = &*(*buffer).pVtbl;
-        match vtbl.GetProperty {
-            Some(f) => f(buffer, name_w.as_ptr(), &mut var),
-            None => return PictureType::Unknown,
-        }
-    };
+    let result = unsafe { buffer.get_property(name_w.as_ptr(), &mut var) };
     if result != AMF_RESULT::AMF_OK {
         return PictureType::Unknown;
     }
@@ -1645,55 +1413,4 @@ fn get_output_picture_type(buffer: *mut AMFBuffer, codec_config: &CodecConfig) -
             _ => PictureType::P,
         },
     }
-}
-
-// ---------------------------------------------------------------------------
-// ヘルパー関数
-// ---------------------------------------------------------------------------
-
-/// AMFPropertyStorage に Int64 プロパティを設定する
-fn set_property_int64(
-    component: *mut AMFPropertyStorage,
-    name: &str,
-    value: amf_int64,
-) -> Result<(), Error> {
-    let name_w = sys::to_wstring(name);
-    let var = AMFVariantStruct::from_int64(value);
-    let result = unsafe {
-        let vtbl = &*(*component).pVtbl;
-        require_vtbl_fn(vtbl.SetProperty, "SetProperty")?(component, name_w.as_ptr(), var)
-    };
-    Error::check(result, format!("SetProperty({name})"))
-}
-
-/// AMFPropertyStorage に Size プロパティを設定する
-fn set_property_size(
-    component: *mut AMFPropertyStorage,
-    name: &str,
-    width: amf_int32,
-    height: amf_int32,
-) -> Result<(), Error> {
-    let name_w = sys::to_wstring(name);
-    let var = AMFVariantStruct::from_size(width, height);
-    let result = unsafe {
-        let vtbl = &*(*component).pVtbl;
-        require_vtbl_fn(vtbl.SetProperty, "SetProperty")?(component, name_w.as_ptr(), var)
-    };
-    Error::check(result, format!("SetProperty({name})"))
-}
-
-/// AMFPropertyStorage に Rate プロパティを設定する
-fn set_property_rate(
-    component: *mut AMFPropertyStorage,
-    name: &str,
-    num: u32,
-    den: u32,
-) -> Result<(), Error> {
-    let name_w = sys::to_wstring(name);
-    let var = AMFVariantStruct::from_rate(num, den);
-    let result = unsafe {
-        let vtbl = &*(*component).pVtbl;
-        require_vtbl_fn(vtbl.SetProperty, "SetProperty")?(component, name_w.as_ptr(), var)
-    };
-    Error::check(result, format!("SetProperty({name})"))
 }
