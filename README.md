@@ -64,8 +64,10 @@ DOCS_RS=1 cargo doc --no-deps
 ### エンコード
 
 ```rust
+use std::sync::{Arc, Mutex};
+
 use shiguredo_amf::{
-    CodecConfig, EncodeOptions, Encoder, EncoderConfig, FrameFormat,
+    CodecConfig, EncodeOptions, EncodedFrame, Encoder, EncoderConfig, FrameFormat,
     H264EncoderConfig, H264Profile, RateControlMode, ReconfigureParams, frame_type,
 };
 
@@ -82,7 +84,11 @@ let mut config = EncoderConfig::new(
 );
 config.target_kbps = Some(5_000);
 
-let mut encoder = Encoder::new(config)?;
+let encoded = Arc::new(Mutex::new(Vec::new()));
+let e = encoded.clone();
+let mut encoder = Encoder::new(config, move |frame: EncodedFrame<()>| {
+    e.lock().unwrap().push(frame);
+})?;
 
 // エンコード中に動的プロパティを再設定
 encoder.reconfigure(ReconfigureParams {
@@ -92,26 +98,28 @@ encoder.reconfigure(ReconfigureParams {
     ..ReconfigureParams::default()
 })?;
 
-// フレームデータをエンコード
+// Surface を確保してフレームデータをコピーし、エンコードする
+let surface = encoder.alloc_surface()?;
+// フレームデータを surface の Y/UV プレーンにコピーする
+// ...
 let options = EncodeOptions { frame_type: frame_type::UNKNOWN };
-encoder.encode(&frame_data, &options)?;
+encoder.encode(surface, &options, ())?;
 
 // IDR フレームを強制してエンコード
-encoder.encode(&frame_data, &EncodeOptions {
+let surface = encoder.alloc_surface()?;
+// ...
+encoder.encode(surface, &EncodeOptions {
     frame_type: frame_type::IDR | frame_type::I | frame_type::REF,
-})?;
-
-// エンコード済みフレームを取得
-while let Some(encoded) = encoder.next_frame() {
-    println!("encoded bytes: {}", encoded.data().len());
-    println!("pts: {}", encoded.pts());
-    println!("picture type: {:?}", encoded.picture_type());
-}
+}, ())?;
 
 // 残りのフレームをすべて取得する
 encoder.finish()?;
-while let Some(encoded) = encoder.next_frame() {
-    println!("flushed: {} bytes", encoded.data().len());
+
+// エンコード済みフレームを確認
+for encoded in encoded.lock().unwrap().iter() {
+    println!("encoded bytes: {}", encoded.buffer().get_size());
+    println!("pts: {}", encoded.buffer().get_pts());
+    println!("picture type: {:?}", encoded.picture_type());
 }
 ```
 
@@ -126,25 +134,33 @@ while let Some(encoded) = encoder.next_frame() {
 ### デコード
 
 ```rust
-use shiguredo_amf::{Decoder, DecoderCodec, DecoderConfig};
+use std::sync::{Arc, Mutex};
+
+use shiguredo_amf::{DecodedFrame, Decoder, DecoderCodec, DecoderConfig};
 
 let config = DecoderConfig {
     codec: DecoderCodec::H264,
 };
-let mut decoder = Decoder::new(config)?;
+let decoded = Arc::new(Mutex::new(Vec::new()));
+let d = decoded.clone();
+let mut decoder = Decoder::new(config, move |frame: DecodedFrame<()>| {
+    d.lock().unwrap().push(frame);
+})?;
 
-// ビットストリームデータをデコード
-decoder.decode(&bitstream_data)?;
-
-// デコード済みフレームを取得 (NV12 フォーマット)
-while let Some(frame) = decoder.next_frame() {
-    println!("decoded: {}x{}, {} bytes", frame.width(), frame.height(), frame.data().len());
-}
+// Buffer を確保してビットストリームデータをコピーし、デコードする
+let buffer = decoder.alloc_buffer(bitstream_data.len())?;
+// bitstream データを buffer にコピーする
+// ...
+decoder.decode(buffer, ())?;
 
 // 残りのフレームをすべて取得する
 decoder.finish()?;
-while let Some(frame) = decoder.next_frame() {
-    println!("flushed: {}x{}", frame.width(), frame.height());
+drop(decoder);
+
+// デコード済みフレームを確認
+for frame in decoded.lock().unwrap().iter() {
+    let y_plane = frame.surface().get_plane(shiguredo_amf::ffi::AMF_PLANE_TYPE::AMF_PLANE_Y).unwrap();
+    println!("decoded: {}x{}", y_plane.get_width(), y_plane.get_height());
 }
 ```
 

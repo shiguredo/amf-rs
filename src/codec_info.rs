@@ -1,9 +1,8 @@
 //! コーデック情報の照会
 
-use std::ptr;
-
 use crate::AmfLibrary;
-use crate::sys::{self, AMF_RESULT, AMFComponent, AMFContext};
+use crate::amf::Context;
+use crate::sys;
 
 // ---------------------------------------------------------------------------
 // 公開型
@@ -216,8 +215,7 @@ fn encoding_info(codec: VideoCodecType) -> EncodingInfo {
 ///
 /// Drop で AMFContext を安全に解放する。
 struct ProbeContext {
-    lib: AmfLibrary,
-    context: *mut AMFContext,
+    context: Context,
 }
 
 impl ProbeContext {
@@ -225,10 +223,10 @@ impl ProbeContext {
     ///
     /// ロードまたは Vulkan 初期化に失敗した場合は None を返す。
     fn new() -> Option<Self> {
-        let lib = AmfLibrary::load().ok()?;
+        let lib = AmfLibrary::instance();
         let context = lib.create_context().ok()?;
-        AmfLibrary::init_vulkan(context).ok()?;
-        Some(Self { lib, context })
+        unsafe { context.init_vulkan(std::ptr::null_mut()) }.ok()?;
+        Some(Self { context })
     }
 
     /// エンコーダーの CreateComponent を試みて対応状況を返す
@@ -255,56 +253,16 @@ impl ProbeContext {
     ///
     /// 成功した場合はコンポーネントを即座に解放して true を返す。
     fn try_create_component(&self, component_id: &str) -> bool {
-        let component_id_w = sys::to_wstring(component_id);
-        let mut component: *mut AMFComponent = ptr::null_mut();
-
-        let create_fn = unsafe {
-            let vtbl = &*(*self.lib.factory()).pVtbl;
-            vtbl.CreateComponent
-        };
-        let Some(create_fn) = create_fn else {
-            return false;
-        };
-        let result = unsafe {
-            create_fn(
-                self.lib.factory(),
-                self.context,
-                component_id_w.as_ptr(),
-                &mut component,
-            )
-        };
-
-        if result != AMF_RESULT::AMF_OK || component.is_null() {
-            return false;
-        }
-
+        let lib = AmfLibrary::instance();
         // エンコーダーは Init なしでは Terminate できないためスキップする。
         // デコーダーは Init(NV12, 0, 0) で初期化できるが、probe 目的では不要。
         // CreateComponent が成功すればそのコーデックは対応している。
-        unsafe {
-            let vtbl = &*(*component).pVtbl;
-            // Init を呼ばずに作成したコンポーネントでも Release は必要
-            if let Some(release) = vtbl.Release {
-                release(component);
-            }
-        }
-
-        true
+        lib.create_component(&self.context, component_id).is_ok()
     }
 }
 
 impl Drop for ProbeContext {
     fn drop(&mut self) {
-        // Drop 内の panic は二重 panic で abort になるため、
-        // vtable の関数ポインタが欠けている場合は握りつぶす
-        unsafe {
-            let vtbl = &*(*self.context).pVtbl;
-            if let Some(terminate) = vtbl.Terminate {
-                let _ = terminate(self.context);
-            }
-            if let Some(release) = vtbl.Release {
-                release(self.context);
-            }
-        }
+        let _ = self.context.terminate();
     }
 }
