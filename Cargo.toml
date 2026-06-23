@@ -20,7 +20,7 @@ include = ["/build.rs", "/src/**/*", "LICENSE", "README.md"]
 # version は git clone --branch で使用するタグまたはブランチ名
 [package.metadata.external-dependencies.amf]
 url = "https://github.com/GPUOpen-LibrariesAndSDKs/AMF"
-version = "v1.5.0"
+version = "v1.5.2"
 
 [dependencies]
 log = "0.4"

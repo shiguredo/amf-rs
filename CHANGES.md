@@ -19,6 +19,8 @@
   - @melpon
 - [CHANGE] encode/decode の入出力を Surface/Buffer に変更し、EncodedFrame/DecodedFrame に T 型パラメータを追加する
   - @melpon
+- [UPDATE] AMF を v1.5.0 から v1.5.2 に更新する
+  - @voluntas
 - [FIX] 別々のインスタンスから異なるスレッドで操作したときに SIGSEGV が発生する問題を修正する
   - @melpon
 
@@ -32,7 +34,6 @@
   - @melpon
 - [FIX] キーフレーム生成時に SPS/PPS ヘッダーが付与されていなかったのを修正
   - @melpon
-
 
 ## 2026.1.0
 
