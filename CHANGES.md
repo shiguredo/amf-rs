@@ -11,13 +11,13 @@
 
 ## develop
 
-- [ADD] amf::* に AMF オブジェクトの Rust ラッパーを追加する
-  - @melpon
 - [CHANGE] Encoder の出力取得を next_frame() ポーリングから非同期のトレイトベースのハンドラー方式に変更する
   - @melpon
 - [CHANGE] Decoder の出力取得を next_frame() ポーリングから非同期のトレイトベースのハンドラー方式に変更する
   - @melpon
 - [CHANGE] encode/decode の入出力を Surface/Buffer に変更し、EncodedFrame/DecodedFrame に T 型パラメータを追加する
+  - @melpon
+- [ADD] amf::* に AMF オブジェクトの Rust ラッパーを追加する
   - @melpon
 - [UPDATE] AMF を v1.5.0 から v1.5.2 に更新する
   - @voluntas
