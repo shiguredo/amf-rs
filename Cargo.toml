@@ -3,21 +3,13 @@ name = "shiguredo_amf"
 version = "2026.3.0-canary.0"
 edition = "2024"
 rust-version = "1.88"
-authors = ["Shiguredo Inc."]
-license = "Apache-2.0"
 description = "Rust bindings for AMD AMF (Advanced Media Framework)"
+readme = "README.md"
 homepage = "https://github.com/shiguredo/amf-rs"
 repository = "https://github.com/shiguredo/amf-rs"
-readme = "README.md"
+license = "Apache-2.0"
 build = "build.rs"
-include = ["/src/**", "/build.rs", "LICENSE", "README.md"]
-
-[dependencies]
-log = "0.4"
-
-[build-dependencies]
-bindgen = "0.72"
-shiguredo_toml = "2026.1"
+include = ["/build.rs", "/src/**/*", "LICENSE", "README.md"]
 
 # AMD AMF 用の外部ライブラリメタデータ
 # (この内容は build.rs の中からのみ参照される)
@@ -29,3 +21,10 @@ shiguredo_toml = "2026.1"
 [package.metadata.external-dependencies.amf]
 url = "https://github.com/GPUOpen-LibrariesAndSDKs/AMF"
 version = "v1.5.0"
+
+[dependencies]
+log = "0.4"
+
+[build-dependencies]
+bindgen = "0.72"
+shiguredo_toml = "2026.2"
