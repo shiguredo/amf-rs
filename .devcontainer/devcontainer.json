@@ -1,13 +1,8 @@
 {
   "name": "amf-rs",
   "build": {
-    "dockerfile": "Dockerfile"
-  },
-  "features": {
-    "ghcr.io/devcontainers/features/rust:1": {
-      "version": "stable",
-      "targets": "x86_64-unknown-linux-gnu"
-    }
+    "dockerfile": "Dockerfile",
+    "context": ".."
   },
   "customizations": {
     "vscode": {
@@ -15,6 +10,5 @@
         "rust-lang.rust-analyzer"
       ]
     }
-  },
-  "postCreateCommand": "rustup component add rustfmt clippy"
+  }
 }

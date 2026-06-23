@@ -26,6 +26,9 @@
 
 ### misc
 
+- [ADD] macOS の Apple Container 上で Rosetta 2 を使わず x86_64 ターゲットの clippy を実行できるよう `.devcontainer/Dockerfile` を更新し、`make container-build` / `prek` の OS 分岐 `cargo-clippy` フックを追加する
+  - @voluntas
+
 ## 2026.2.0
 
 **リリース日**: 2026-04-15
