@@ -11,6 +11,11 @@
 
 ## develop
 
+### misc
+
+- [UPDATE] `prek.toml` を shiguredo-rust 規約に合わせて整備する (builtin フック拡充、tombi、`cargo test` の pre-push 限定)
+  - @voluntas
+
 ## 2026.3.0
 
 **リリース日**: 2026-06-23
