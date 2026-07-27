@@ -11,6 +11,9 @@
 
 ## develop
 
+- [CHANGE] 最小サポート Rust バージョン (MSRV) を 1.88 から 1.93 に上げる
+  - @voluntas
+
 ### misc
 
 - [UPDATE] `prek.toml` を shiguredo-rust 規約に合わせて整備する (builtin フック拡充、tombi、`cargo test` の pre-push 限定)
