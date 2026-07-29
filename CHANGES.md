@@ -16,6 +16,8 @@
 
 ### misc
 
+- [ADD] AMF ランタイムとコーデック対応状況を確認する `examples/amf-check` を追加する
+  - @voluntas
 - [UPDATE] `prek.toml` を shiguredo-rust 規約に合わせて整備する (builtin フック拡充、tombi、`cargo test` の pre-push 限定)
   - @voluntas
 

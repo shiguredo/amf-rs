@@ -181,6 +181,27 @@ for info in &codecs {
 
 AMF ランタイムがロードできない環境では、全コーデックが非対応として返されます。
 
+CLI で確認する場合は [amf-check](#amf-check) を利用してください。
+
+## サンプル
+
+引数のライブラリには [noargs](https://github.com/sile/noargs) を利用しています。
+
+### amf-check
+
+AMF がこの環境で利用できるかを確認する CLI です。
+AMF ランタイムのロード、バージョン照会、コーデック対応状況の表示、エンコーダー / デコーダーの初期化確認を行います。
+
+```bash
+cargo run -p amf-check
+```
+
+エンコーダー初期化時の解像度を指定する場合:
+
+```bash
+cargo run -p amf-check -- --width 1280 --height 720
+```
+
 ## サポートコーデック
 
 ### エンコード
