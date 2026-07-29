@@ -1,0 +1,11 @@
+[package]
+name = "amf_check"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+# CLI 引数パース
+noargs = "0.4"
+# AMD AMF バインディング
+shiguredo_amf = { path = "../.." }
