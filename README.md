@@ -185,18 +185,18 @@ AMF ランタイムがロードできない環境では、全コーデックが�
 
 引数のライブラリには [noargs](https://github.com/sile/noargs) を利用しています。
 
-### amf_check
+### amf-check
 
 AMF ランタイムのロード、バージョン照会、コーデック対応状況の表示、エンコーダー/デコーダーの初期化確認を行います。
 
 ```bash
-cargo run -p amf_check
+cargo run -p amf-check
 ```
 
 エンコーダー初期化時の解像度は `--width` / `--height` で指定できます。
 
 ```bash
-cargo run -p amf_check -- --width 1280 --height 720
+cargo run -p amf-check -- --width 1280 --height 720
 ```
 
 ## サポートコーデック

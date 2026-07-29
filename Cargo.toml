@@ -23,7 +23,7 @@ url = "https://github.com/GPUOpen-LibrariesAndSDKs/AMF"
 version = "v1.5.2"
 
 [workspace]
-members = ["examples/amf_check"]
+members = ["examples/amf-check"]
 
 [dependencies]
 log = "0.4"

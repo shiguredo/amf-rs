@@ -12,7 +12,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "amf_check"
+name = "amf-check"
 version = "0.0.0"
 dependencies = [
  "noargs",
