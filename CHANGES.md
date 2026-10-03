@@ -22,6 +22,8 @@
   - @voluntas
 - [UPDATE] `prek.toml` を shiguredo-rust 規約に合わせて整備する (builtin フック拡充、tombi、`cargo test` の pre-push 限定)
   - @voluntas
+- [UPDATE] `rust-toolchain.toml` のツールチェインを MSRV の 1.93 に固定し、CI と devcontainer のツールチェインも 1.93 に統一する
+  - @voluntas
 
 ## 2026.3.0
 
