@@ -26,8 +26,11 @@ version = "v1.5.2"
 members = ["examples/amf-check"]
 
 [dependencies]
+# ログ出力
 log = "0.4"
 
 [build-dependencies]
+# AMF SDK のヘッダーから FFI バインディングを生成する
 bindgen = "0.72"
+# Cargo.toml の package.metadata を読み取る
 shiguredo_toml = "2026.2"
