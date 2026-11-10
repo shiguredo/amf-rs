@@ -1602,3 +1602,141 @@ fn test_user_data_delivered_in_submit_order() {
     assert_eq!(tags.len(), num_frames);
     assert_eq!(tags, (0..num_frames).collect::<Vec<_>>());
 }
+
+// ---------------------------------------------------------------------------
+// コンポーネント投入時のハンドル一意性のテスト
+// ---------------------------------------------------------------------------
+
+/// テスト用の H.264 エンコーダー設定を返す
+fn h264_test_encoder_config() -> EncoderConfig {
+    let mut config = EncoderConfig::new(
+        CodecConfig::H264(H264EncoderConfig {
+            profile: Some(H264Profile::High),
+        }),
+        320,
+        240,
+        FrameFormat::Nv12,
+        30,
+        1,
+        RateControlMode::Cbr,
+    );
+    config.target_kbps = Some(1000);
+    config
+}
+
+/// Surface のクローンが残っている場合はエンコードが拒否されることを確認する
+#[test]
+fn test_encode_rejects_surface_with_cloned_handle() {
+    let mut encoder = Encoder::new(
+        h264_test_encoder_config(),
+        FnEncodeHandler::<()>::new(|_| {}),
+    )
+    .expect("エンコーダーの作成に失敗");
+
+    let width = 320;
+    let height = 240;
+    let data = generate_dummy_nv12(width, height, 0);
+    let options = EncodeOptions::default();
+
+    let surface = encoder.alloc_surface().expect("Surface の確保に失敗");
+    copy_nv12_to_surface(&surface, &data, width, height);
+    let cloned = surface.clone();
+
+    let result = encoder.encode(surface, &options, ());
+    assert!(
+        result.is_err(),
+        "クローンが残っている Surface のエンコードは失敗するはず"
+    );
+    drop(cloned);
+
+    // クローンを破棄した後の Surface は投入できる
+    let surface = encoder.alloc_surface().expect("Surface の確保に失敗");
+    copy_nv12_to_surface(&surface, &data, width, height);
+    encoder
+        .encode(surface, &options, ())
+        .expect("クローン破棄後のエンコードに失敗");
+    encoder.finish().expect("finish に失敗");
+}
+
+/// Plane を保持したままの Surface のエンコードが拒否されることを確認する
+#[test]
+fn test_encode_rejects_surface_with_live_plane() {
+    let mut encoder = Encoder::new(
+        h264_test_encoder_config(),
+        FnEncodeHandler::<()>::new(|_| {}),
+    )
+    .expect("エンコーダーの作成に失敗");
+
+    let width = 320;
+    let height = 240;
+    let data = generate_dummy_nv12(width, height, 0);
+    let options = EncodeOptions::default();
+
+    let surface = encoder.alloc_surface().expect("Surface の確保に失敗");
+    copy_nv12_to_surface(&surface, &data, width, height);
+    let plane = surface
+        .get_plane(AMF_PLANE_TYPE::AMF_PLANE_Y)
+        .expect("Y プレーンの取得に失敗");
+
+    let result = encoder.encode(surface, &options, ());
+    assert!(
+        result.is_err(),
+        "Plane が残っている Surface のエンコードは失敗するはず"
+    );
+    drop(plane);
+}
+
+/// PropertyStorage を保持したままの Surface のエンコードが拒否されることを確認する
+#[test]
+fn test_encode_rejects_surface_with_live_property_storage() {
+    let mut encoder = Encoder::new(
+        h264_test_encoder_config(),
+        FnEncodeHandler::<()>::new(|_| {}),
+    )
+    .expect("エンコーダーの作成に失敗");
+
+    let width = 320;
+    let height = 240;
+    let data = generate_dummy_nv12(width, height, 0);
+    let options = EncodeOptions::default();
+
+    let surface = encoder.alloc_surface().expect("Surface の確保に失敗");
+    copy_nv12_to_surface(&surface, &data, width, height);
+    let property_storage = surface
+        .property_storage()
+        .expect("PropertyStorage の取得に失敗");
+
+    let result = encoder.encode(surface, &options, ());
+    assert!(
+        result.is_err(),
+        "PropertyStorage が残っている Surface のエンコードは失敗するはず"
+    );
+    drop(property_storage);
+}
+
+/// Buffer のクローンが残っている場合はデコードが拒否されることを確認する
+#[test]
+fn test_decode_rejects_buffer_with_cloned_handle() {
+    let encoded_frames = encode(
+        h264_test_encoder_config(),
+        &[generate_dummy_nv12(320, 240, 0)],
+    );
+    let mut encoded = encoded_frames.into_iter();
+    let first = encoded.next().expect("エンコード結果が空");
+    let cloned = first.buffer().clone();
+
+    let mut decoder = Decoder::new(
+        DecoderConfig {
+            codec: DecoderCodec::H264,
+        },
+        FnDecodeHandler::<()>::new(|_| {}),
+    )
+    .expect("デコーダーの作成に失敗");
+
+    let result = decoder.decode(first.into_parts().0, ());
+    assert!(
+        result.is_err(),
+        "クローンが残っている Buffer のデコードは失敗するはず"
+    );
+    drop(cloned);
+}

@@ -143,7 +143,10 @@ fn test_surface_clone_concurrent_access() {
     assert_eq!(y_plane.get_width(), WIDTH as i32, "幅が一致しない");
     assert_eq!(y_plane.get_height(), HEIGHT as i32, "高さが一致しない");
 
-    // 並行アクセスした Surface をそのままエンコードできることを確認する
+    // コンポーネントに投入する前に、Surface 以外のハンドルをすべて破棄する
+    drop(y_plane);
+
+    // 並行アクセスが終わった Surface を、他のハンドルを破棄してからエンコードできることを確認する
     encoder
         .encode(
             surface,

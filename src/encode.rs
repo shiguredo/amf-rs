@@ -829,12 +829,22 @@ impl<H: EncodeHandler> Encoder<H> {
     /// フレームをエンコードする
     ///
     /// `user_data` はエンコード完了時にハンドラーへ渡される。
+    /// `surface` が他のハンドルと共有されている場合はエラーを返す。
     pub fn encode(
         &mut self,
         surface: Surface,
         options: &EncodeOptions,
         user_data: H::UserData,
     ) -> Result<(), Error> {
+        // AMF コンポーネントは投入した Surface を解放するまで排他アクセスするため、
+        // 他のハンドルが残っている状態では投入しない。
+        if surface.is_shared() {
+            return Err(Error::new_custom(
+                "Encoder::encode",
+                "surface is shared with other handles; drop clones, planes, and property storages before submitting",
+            ));
+        }
+
         // PTS を設定する
         let pts = (self.frame_count * self.framerate_den * AMF_SECOND as u64 / self.framerate_num)
             as amf_pts;
