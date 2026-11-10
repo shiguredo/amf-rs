@@ -135,7 +135,7 @@ AMD GPU 向けハードウェアアクセラレーションによるビデオエ
 
 全ラッパーは `Clone` 実装で `Acquire` を呼び、`Drop` 実装で `Release` を呼ぶ。`unsafe from_raw(ptr)` (Acquire なし) と `unsafe from_raw_acquired(ptr)` (Acquire 付き) の 2 系統のコンストラクタを持つ。`into_raw()` は所有権を放棄して `Release` を呼ばずに生ポインタを返す。
 
-すべて `unsafe impl Send` 済み (AMF オブジェクトはスレッドセーフであると AMF ドキュメントに記載されているため)。
+`AMFComponent` は AMF ドキュメントにスレッドセーフと明記されているため、`Component` 自身の操作はロックしない。それ以外の AMF オブジェクトはスレッドセーフではないため、ハンドルごとの共有ロックでスレッドセーフでない操作を直列化する。`AMFInterface` の参照カウント操作 (`Acquire` / `Release` / `QueryInterface`) はデフォルト実装でスレッドセーフと明記されているためロックしない。`Clone` したハンドルは同じロックを共有するため、別スレッドへ移動して並行に利用できる。
 
 ## エラー型
 
@@ -395,6 +395,7 @@ H.264 / HEVC / AV1 で AMF SDK 内部の enum 値順序が異なるが、`shigur
 - ワーカーは `pending` キューにマッチするように `QueryOutput` の結果を保持し、対応が取れたところで `on_encoded` / `on_decoded` を呼ぶ。
 - `finish()` は `Drain` を呼んだあと `Finish(sync_channel)` をワーカーに送り、最大 5 秒で完了を待つ。
 - `Drop` 実装は `cmd_tx` を落としてワーカーを停止させ、`Component::terminate()` / `Context::terminate()` を呼んでから AMF オブジェクトを解放する。
+- `amf` モジュールの `Context` / `Surface` / `Buffer` / `Plane` / `PropertyStorage` は共有ロックでスレッドセーフでない操作を直列化し、`Send + Sync` を実装する。`AMFInterface` の参照カウント操作はデフォルト実装でスレッドセーフなためロックしない。`Component` は AMF の仕様でスレッドセーフなため自身の操作はロックせず、`PropertyStorage` に共有ロックを提供する。
 
 ## 公開モジュール
 
