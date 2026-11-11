@@ -1,7 +1,7 @@
-# `AmfLibrary` と `amf::Context` の呼び出しを同じ `AmfObjectState` のロックで直列化し、並列初期化時の SIGSEGV を修正する
+# `AmfLibrary` と `Context` の呼び出しを直列化し、並列初期化時の SIGSEGV を修正する
 
 - Created: 2026-11-10
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-11-11
 - Branch: feature/fix-init-vulkan-serialization
 - Polished: {YYYY-MM-DD}
 - Reporter: @melpon
@@ -96,6 +96,14 @@
 - `cargo test --workspace` を並列実行しても通る。
 - `CHANGES.md` の `## develop` が更新されている。
 - `AmfLibrary` / `Context` のロックと現コードの整合が取れている。
+
+## 解決方法
+
+- `AmfLibrary` に `AmfObjectState` を持たせ、`create_context` で作成する `Context` に同じ状態を共有させた。これにより `AmfLibrary` の factory 操作と `Context` の操作が同じロックで直列化される。
+- `Context` の `init_vulkan` / `alloc_surface` / `alloc_buffer` / `terminate` を共有ロックの対象にした。
+- `Context::init_vulkan` は `Context` のメソッドのまま `pub(crate)` にし、`AmfLibrary::init_vulkan` は設けていない。
+- 64 個の `Context` を並列に `init_vulkan` する回帰テストを追加した。修正前は 5 回中 5 回 SIGSEGV し、修正後は 5 回連続で成功した。
+- GPU CI から `--test-threads=1` を外し、`CHANGES.md` と `skills/shiguredo-amf/SKILL.md` を更新した。
 
 ## 残存リスク
 
