@@ -135,7 +135,7 @@ AMD GPU 向けハードウェアアクセラレーションによるビデオエ
 
 全ラッパーは `Clone` 実装で `Acquire` を呼び、`Drop` 実装で `Release` を呼ぶ。`unsafe from_raw(ptr)` (Acquire なし) と `unsafe from_raw_acquired(ptr)` (Acquire 付き) の 2 系統のコンストラクタを持つ。`into_raw()` は所有権を放棄して `Release` を呼ばずに生ポインタを返す。
 
-すべて `unsafe impl Send` 済み (AMF オブジェクトはスレッドセーフであると AMF ドキュメントに記載されているため)。
+`AMFComponent` は AMF ドキュメントにスレッドセーフと明記されているため、`Component` 自身の操作はロックしない。`Component::property_storage()` が返す `PropertyStorage` のプロパティ操作は、同じ `Component` から取得した他の `PropertyStorage` のプロパティ操作と共有ロックで直列化されるが、`Component` 自身のメソッドとは直列化されない。`AMFPropertyStorage` / `AMFData` / `AMFSurface` はスレッドセーフではなく、`AMFPlane` / `AMFContext` には thread-safety の記述がないため、AMF オブジェクトごとの共有ロックでスレッドセーフでない操作を直列化する。`AMFInterface` の参照カウント操作 (`Acquire` / `Release`) はデフォルト実装でスレッドセーフと明記されているためロックしない。`QueryInterface` 自体も thread-safe だが、`init_vulkan` は `QueryInterface` で取得した `AMFContext1` の `InitVulkan` を Context のロックで直列化する。`Clone` したハンドルは同じロックを共有するため、別スレッドへ移動して並行に利用できる。コンポーネントに投入する `Surface` / `Buffer` は、投入前に他のハンドルを破棄する必要がある。`Encoder::encode` / `Decoder::decode` は投入前に他のハンドルと共有されていないことを確認し、共有されている場合はエラーを返す。
 
 ## エラー型
 
@@ -395,6 +395,7 @@ H.264 / HEVC / AV1 で AMF SDK 内部の enum 値順序が異なるが、`shigur
 - ワーカーは `pending` キューにマッチするように `QueryOutput` の結果を保持し、対応が取れたところで `on_encoded` / `on_decoded` を呼ぶ。
 - `finish()` は `Drain` を呼んだあと `Finish(sync_channel)` をワーカーに送り、最大 5 秒で完了を待つ。
 - `Drop` 実装は `cmd_tx` を落としてワーカーを停止させ、`Component::terminate()` / `Context::terminate()` を呼んでから AMF オブジェクトを解放する。
+- `amf` モジュールの共有ロックの範囲は「AMF オブジェクトのラッパー」節を参照する。
 
 ## 公開モジュール
 

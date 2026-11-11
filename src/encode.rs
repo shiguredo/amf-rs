@@ -799,7 +799,7 @@ impl<H: EncodeHandler> Encoder<H> {
             max_kbps: config.max_kbps,
             qpi: config.qpi,
             qpp: config.qpp,
-            // AV1 の初期設定では従来どおり qpb は設定しない
+            // AV1 の初期設定では qpb は設定しない
             qpb: None,
             gop_pic_size: config.gop_pic_size,
             ..ReconfigureParams::default()
@@ -829,12 +829,22 @@ impl<H: EncodeHandler> Encoder<H> {
     /// フレームをエンコードする
     ///
     /// `user_data` はエンコード完了時にハンドラーへ渡される。
+    /// `surface` が他のハンドルと共有されている場合はエラーを返す。
     pub fn encode(
         &mut self,
         surface: Surface,
         options: &EncodeOptions,
         user_data: H::UserData,
     ) -> Result<(), Error> {
+        // AMF コンポーネントは投入した Surface を解放するまで排他アクセスするため、
+        // 他のハンドルが残っている状態では投入しない。
+        if surface.is_shared() {
+            return Err(Error::new_custom(
+                "Encoder::encode",
+                "surface is shared with other handles; drop clones, planes, and property storages before submitting",
+            ));
+        }
+
         // PTS を設定する
         let pts = (self.frame_count * self.framerate_den * AMF_SECOND as u64 / self.framerate_num)
             as amf_pts;
@@ -947,7 +957,7 @@ impl<H: EncodeHandler> Encoder<H> {
     }
 }
 
-// 安全性:
+// Safety:
 // Drop 内でのみ component/context を解放する。
 // ワーカースレッドは Drop より先に停止させる。
 impl<H: EncodeHandler> Drop for Encoder<H> {

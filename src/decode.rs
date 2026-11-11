@@ -175,7 +175,17 @@ impl<H: DecodeHandler> Decoder<H> {
     /// ビットストリームをデコードする
     ///
     /// `user_data` はデコード完了時にハンドラーへ渡される。
+    /// `buffer` が他のハンドルと共有されている場合はエラーを返す。
     pub fn decode(&mut self, buffer: Buffer, user_data: H::UserData) -> Result<(), Error> {
+        // AMF コンポーネントは投入した Buffer を解放するまで排他アクセスするため、
+        // 他のハンドルが残っている状態では投入しない。
+        if buffer.is_shared() {
+            return Err(Error::new_custom(
+                "Decoder::decode",
+                "buffer is shared with other handles; drop clones before submitting",
+            ));
+        }
+
         log::debug!("Decoder::decode");
 
         let max_retries = 100;
@@ -243,7 +253,7 @@ impl<H: DecodeHandler> Decoder<H> {
     }
 }
 
-// 安全性:
+// Safety:
 // Drop 内でのみ component/context を解放する。
 // ワーカースレッドは Drop より先に停止させる。
 impl<H: DecodeHandler> Drop for Decoder<H> {
