@@ -1,7 +1,7 @@
 # `amf` モジュールの AMF オブジェクトハンドルを共有ロックで保護し、`Send` と `Clone` を健全にする
 
 - Created: 2026-11-10
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-11-11
 - Branch: feature/fix-amf-handle-thread-safety
 - Polished: {YYYY-MM-DD}
 - Reporter: @melpon
@@ -42,3 +42,11 @@ AMF の参照カウント (`Acquire` / `Release`) はオブジェクトの寿命
 - `cargo clippy --workspace --all-targets -- -D warnings` と `cargo test --workspace` が通る。
 - `skills/shiguredo-amf/SKILL.md` の記述が実装と一致する。
 - `CHANGES.md` の `## develop` に変更を追記する。
+
+## 解決方法
+
+- `src/amf.rs` に `AmfObjectState` を追加し、同じ AMF オブジェクトを指すハンドル間で `Mutex` とハンドル数を共有するようにした。`Clone` と子ハンドル (`Plane` / `PropertyStorage`) は状態を共有し、`from_raw` / `from_raw_acquired` で作成したハンドルは独立した状態を持つ。
+- スレッドセーフでない AMF 呼び出しは `AmfObjectState` のロックで直列化した。ハンドラー呼び出しはロックを解放してから行う。
+- `Component` は AMF の仕様で thread-safe なため自身のメソッドはロックせず、`PropertyStorage` のプロパティ操作だけを同じ取得元のハンドル間で直列化した。
+- `Encoder::encode` / `Decoder::decode` で、投入する `Surface` / `Buffer` が他のハンドルと共有されていないことを確認し、共有されている場合はエラーを返すようにした。
+- `src/amf.rs` の単体テストと `tests/test_amf.rs` に共有ロック、ハンドル数、`from_raw_acquired`、並行アクセスのテストを追加し、公開 doc と `skills/shiguredo-amf/SKILL.md` を実装に合わせて更新した。
