@@ -956,9 +956,10 @@ struct ComponentFuncs {
 /// `AMFComponent` の RAII ラッパー
 ///
 /// `AMFComponent` は AMF の仕様で thread-safe であり、自身のメソッドは複数スレッドから
-/// 並行に呼べる。
-/// `property_storage()` が返す `PropertyStorage` のプロパティ操作は、このハンドルの
-/// 操作と直列化される。
+/// 並行に呼べる。`Component` 自身のメソッドはロックしない。
+/// `property_storage()` が返す `PropertyStorage` のプロパティ操作は、同じ `Component`
+/// から取得した他の `PropertyStorage` のプロパティ操作と直列化される。`Component` の
+/// メソッドと `PropertyStorage` の操作は直列化されない。
 pub struct Component {
     ptr: *mut sys::AMFComponent,
     f: ComponentFuncs,
@@ -1146,6 +1147,13 @@ mod tests {
             .expect("Surface の確保に失敗")
     }
 
+    /// テスト用の Buffer を作成する
+    fn create_buffer(context: &Context) -> Buffer {
+        context
+            .alloc_buffer(sys::AMF_MEMORY_TYPE::AMF_MEMORY_HOST, 4096)
+            .expect("Buffer の確保に失敗")
+    }
+
     /// Plane が Surface と同じ状態を共有することを確認する
     #[test]
     fn test_plane_shares_state_with_surface() {
@@ -1193,18 +1201,94 @@ mod tests {
         );
     }
 
-    /// from_raw で作り直したハンドルが状態を共有しないことを確認する
+    /// from_raw_acquired で作成したハンドルが状態を共有しないことを確認する
     #[test]
-    fn test_from_raw_does_not_share_state() {
+    fn test_from_raw_acquired_does_not_share_state() {
         let context = create_context();
         let surface = create_surface(&context);
-        let surface_state = Arc::clone(&surface.state);
-        let ptr = surface.into_raw();
-        let other = unsafe { Surface::from_raw(ptr) }.expect("Surface の再構築に失敗");
+        let clone = surface.clone();
+        let other = unsafe { Surface::from_raw_acquired(surface.as_ptr()) }
+            .expect("Surface の再構築に失敗");
 
         assert!(
-            !Arc::ptr_eq(&surface_state, &other.state),
-            "from_raw が状態を共有している"
+            !Arc::ptr_eq(&surface.state, &other.state),
+            "from_raw_acquired が元のハンドルと状態を共有している"
+        );
+        assert!(
+            !Arc::ptr_eq(&clone.state, &other.state),
+            "from_raw_acquired が Clone と状態を共有している"
+        );
+
+        // 元のハンドルと Clone は引き続き利用できる
+        let plane = surface
+            .get_plane(sys::AMF_PLANE_TYPE::AMF_PLANE_Y)
+            .expect("Y プレーンの取得に失敗");
+        assert_eq!(plane.get_width(), 320, "幅が一致しない");
+        drop(plane);
+        let plane = clone
+            .get_plane(sys::AMF_PLANE_TYPE::AMF_PLANE_Y)
+            .expect("Y プレーンの取得に失敗");
+        assert_eq!(plane.get_width(), 320, "幅が一致しない");
+        drop(plane);
+
+        // 元のハンドルと Clone を drop しても、Acquire 済みの other は利用できる
+        drop(clone);
+        drop(surface);
+        let plane = other
+            .get_plane(sys::AMF_PLANE_TYPE::AMF_PLANE_Y)
+            .expect("Y プレーンの取得に失敗");
+        assert_eq!(plane.get_width(), 320, "幅が一致しない");
+    }
+
+    /// Surface の is_shared がハンドル数に応じて変化することを確認する
+    #[test]
+    fn test_surface_is_shared_tracks_handles() {
+        let context = create_context();
+        let surface = create_surface(&context);
+
+        assert!(
+            !surface.is_shared(),
+            "作成直後の Surface が共有扱いになっている"
+        );
+        let clone = surface.clone();
+        assert!(
+            surface.is_shared(),
+            "Clone 後の Surface が共有扱いになっていない"
+        );
+        assert!(
+            clone.is_shared(),
+            "Clone 側の Surface が共有扱いになっていない"
+        );
+        drop(clone);
+        assert!(
+            !surface.is_shared(),
+            "Clone を drop した後の Surface が共有扱いになっている"
+        );
+    }
+
+    /// Buffer の is_shared がハンドル数に応じて変化することを確認する
+    #[test]
+    fn test_buffer_is_shared_tracks_handles() {
+        let context = create_context();
+        let buffer = create_buffer(&context);
+
+        assert!(
+            !buffer.is_shared(),
+            "作成直後の Buffer が共有扱いになっている"
+        );
+        let clone = buffer.clone();
+        assert!(
+            buffer.is_shared(),
+            "Clone 後の Buffer が共有扱いになっていない"
+        );
+        assert!(
+            clone.is_shared(),
+            "Clone 側の Buffer が共有扱いになっていない"
+        );
+        drop(clone);
+        assert!(
+            !buffer.is_shared(),
+            "Clone を drop した後の Buffer が共有扱いになっている"
         );
     }
 

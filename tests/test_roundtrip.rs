@@ -10,40 +10,9 @@ use shiguredo_amf::{
     ReconfigureParams, frame_type,
 };
 
-/// NV12 データを Surface にコピーする
-fn copy_nv12_to_surface(surface: &Surface, data: &[u8], width: usize, height: usize) {
-    let y_plane = surface
-        .get_plane(AMF_PLANE_TYPE::AMF_PLANE_Y)
-        .expect("Y プレーンの取得に失敗");
-    let y_native = y_plane.get_native() as *mut u8;
-    let y_hpitch = y_plane.get_hpitch() as usize;
-    for row in 0..height {
-        unsafe {
-            ptr::copy_nonoverlapping(
-                data.as_ptr().add(row * width),
-                y_native.add(row * y_hpitch),
-                width,
-            );
-        }
-    }
+pub mod helpers;
 
-    let uv_plane = surface
-        .get_plane(AMF_PLANE_TYPE::AMF_PLANE_UV)
-        .expect("UV プレーンの取得に失敗");
-    let uv_native = uv_plane.get_native() as *mut u8;
-    let uv_hpitch = uv_plane.get_hpitch() as usize;
-    let y_size = width * height;
-    let uv_height = height / 2;
-    for row in 0..uv_height {
-        unsafe {
-            ptr::copy_nonoverlapping(
-                data.as_ptr().add(y_size + row * width),
-                uv_native.add(row * uv_hpitch),
-                width,
-            );
-        }
-    }
-}
+use helpers::{copy_nv12_to_surface, generate_dummy_nv12, h264_cbr_test_encoder_config};
 
 /// I420/YV12 データを Surface にコピーする
 fn copy_i420_to_surface(surface: &Surface, data: &[u8], width: usize, height: usize) {
@@ -188,25 +157,6 @@ fn surface_height(surface: &shiguredo_amf::amf::Surface) -> usize {
         .map(|p| p.get_height() as usize)
         .unwrap_or(0)
 }
-///
-/// Y プレーンはフレーム番号に応じたグラデーション、UV プレーンは 128 固定。
-fn generate_dummy_nv12(width: usize, height: usize, frame_index: usize) -> Vec<u8> {
-    let y_size = width * height;
-    let uv_size = y_size / 2;
-    let mut data = vec![0u8; y_size + uv_size];
-
-    for y in 0..height {
-        for x in 0..width {
-            data[y * width + x] = ((x + y + frame_index * 7) % 256) as u8;
-        }
-    }
-    for i in 0..uv_size {
-        data[y_size + i] = 128;
-    }
-
-    data
-}
-
 /// SMPTE カラーバー風の NV12 フレームを生成する
 ///
 /// 7 色の縦ストライプ（白/黄/シアン/緑/マゼンタ/赤/青）を
@@ -1607,28 +1557,11 @@ fn test_user_data_delivered_in_submit_order() {
 // コンポーネント投入時のハンドル一意性のテスト
 // ---------------------------------------------------------------------------
 
-/// テスト用の H.264 エンコーダー設定を返す
-fn h264_test_encoder_config() -> EncoderConfig {
-    let mut config = EncoderConfig::new(
-        CodecConfig::H264(H264EncoderConfig {
-            profile: Some(H264Profile::High),
-        }),
-        320,
-        240,
-        FrameFormat::Nv12,
-        30,
-        1,
-        RateControlMode::Cbr,
-    );
-    config.target_kbps = Some(1000);
-    config
-}
-
 /// Surface のクローンが残っている場合はエンコードが拒否されることを確認する
 #[test]
 fn test_encode_rejects_surface_with_cloned_handle() {
     let mut encoder = Encoder::new(
-        h264_test_encoder_config(),
+        h264_cbr_test_encoder_config(),
         FnEncodeHandler::<()>::new(|_| {}),
     )
     .expect("エンコーダーの作成に失敗");
@@ -1643,9 +1576,10 @@ fn test_encode_rejects_surface_with_cloned_handle() {
     let cloned = surface.clone();
 
     let result = encoder.encode(surface, &options, ());
+    let err = result.expect_err("クローンが残っている Surface のエンコードは失敗するはず");
     assert!(
-        result.is_err(),
-        "クローンが残っている Surface のエンコードは失敗するはず"
+        err.to_string().contains("shared with other handles"),
+        "共有ハンドル拒否のエラーではない: {err}"
     );
     drop(cloned);
 
@@ -1662,7 +1596,7 @@ fn test_encode_rejects_surface_with_cloned_handle() {
 #[test]
 fn test_encode_rejects_surface_with_live_plane() {
     let mut encoder = Encoder::new(
-        h264_test_encoder_config(),
+        h264_cbr_test_encoder_config(),
         FnEncodeHandler::<()>::new(|_| {}),
     )
     .expect("エンコーダーの作成に失敗");
@@ -1679,9 +1613,10 @@ fn test_encode_rejects_surface_with_live_plane() {
         .expect("Y プレーンの取得に失敗");
 
     let result = encoder.encode(surface, &options, ());
+    let err = result.expect_err("Plane が残っている Surface のエンコードは失敗するはず");
     assert!(
-        result.is_err(),
-        "Plane が残っている Surface のエンコードは失敗するはず"
+        err.to_string().contains("shared with other handles"),
+        "共有ハンドル拒否のエラーではない: {err}"
     );
     drop(plane);
 }
@@ -1690,7 +1625,7 @@ fn test_encode_rejects_surface_with_live_plane() {
 #[test]
 fn test_encode_rejects_surface_with_live_property_storage() {
     let mut encoder = Encoder::new(
-        h264_test_encoder_config(),
+        h264_cbr_test_encoder_config(),
         FnEncodeHandler::<()>::new(|_| {}),
     )
     .expect("エンコーダーの作成に失敗");
@@ -1707,9 +1642,10 @@ fn test_encode_rejects_surface_with_live_property_storage() {
         .expect("PropertyStorage の取得に失敗");
 
     let result = encoder.encode(surface, &options, ());
+    let err = result.expect_err("PropertyStorage が残っている Surface のエンコードは失敗するはず");
     assert!(
-        result.is_err(),
-        "PropertyStorage が残っている Surface のエンコードは失敗するはず"
+        err.to_string().contains("shared with other handles"),
+        "共有ハンドル拒否のエラーではない: {err}"
     );
     drop(property_storage);
 }
@@ -1718,7 +1654,7 @@ fn test_encode_rejects_surface_with_live_property_storage() {
 #[test]
 fn test_decode_rejects_buffer_with_cloned_handle() {
     let encoded_frames = encode(
-        h264_test_encoder_config(),
+        h264_cbr_test_encoder_config(),
         &[generate_dummy_nv12(320, 240, 0)],
     );
     let mut encoded = encoded_frames.into_iter();
@@ -1734,9 +1670,10 @@ fn test_decode_rejects_buffer_with_cloned_handle() {
     .expect("デコーダーの作成に失敗");
 
     let result = decoder.decode(first.into_parts().0, ());
+    let err = result.expect_err("クローンが残っている Buffer のデコードは失敗するはず");
     assert!(
-        result.is_err(),
-        "クローンが残っている Buffer のデコードは失敗するはず"
+        err.to_string().contains("shared with other handles"),
+        "共有ハンドル拒否のエラーではない: {err}"
     );
     drop(cloned);
 }
