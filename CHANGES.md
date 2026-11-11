@@ -13,7 +13,11 @@
 
 - [CHANGE] 最小サポート Rust バージョン (MSRV) を 1.88 から 1.93 に上げる
   - @voluntas
-- [FIX] `amf` モジュールで `Clone` したハンドル経由のメソッド呼び出しを共有ロックで直列化し、コンポーネントに投入するオブジェクトが共有されていないことを確認する
+- [CHANGE] `amf::Context::init_vulkan` を公開 API から削除する
+  - @melpon
+- [FIX] `amf` モジュールで `Clone` したハンドル経由のメソッド呼び出しがデータ競合する問題を修正し、コンポーネントに投入するオブジェクトが共有されていないことを確認する
+  - @melpon
+- [FIX] `AmfLibrary` と `amf::Context` の AMF 呼び出しがデータ競合し、複数スレッドから Encoder / Decoder を並列に初期化した際に SIGSEGV する問題を修正する
   - @melpon
 
 ### misc

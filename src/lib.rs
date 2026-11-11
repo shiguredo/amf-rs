@@ -14,9 +14,9 @@ mod sys;
 
 use std::path::Path;
 use std::ptr;
-use std::sync::{LazyLock, Mutex};
+use std::sync::{Arc, LazyLock, Mutex};
 
-use amf::{Component, Context};
+use amf::{AmfObjectState, Component, Context};
 use error::require_vtbl_fn;
 use sys::{AMF_DLL_NAME, AMF_FULL_VERSION, AMFFactory, AMFInit_Fn, AMFQueryVersion_Fn, amf_uint64};
 
@@ -60,6 +60,9 @@ struct AmfLibraryInner {
 /// プロセス全体で単一のインスタンスのみ存在し、
 /// [`AmfLibrary::instance()`] で取得する。
 pub struct AmfLibrary {
+    /// `AmfLibrary` と `Context` で共有するロック
+    state: Arc<AmfObjectState>,
+    /// AMF ランタイムの遅延初期化と factory の状態を保護する Mutex
     inner: Mutex<Option<AmfLibraryInner>>,
 }
 
@@ -69,6 +72,7 @@ unsafe impl Sync for AmfLibrary {}
 impl AmfLibrary {
     fn new() -> Self {
         Self {
+            state: AmfObjectState::new(),
             inner: Mutex::new(None),
         }
     }
@@ -115,6 +119,7 @@ impl AmfLibrary {
 
     /// AMF ランタイムのバージョンを問い合わせる
     pub fn query_version(&self) -> Result<(u16, u16, u16, u16), Error> {
+        let _guard = self.state.lock();
         let mut inner = self.inner.lock().unwrap();
         let inner = Self::ensure_inner(&mut inner)?;
         let amf_query_version: AMFQueryVersion_Fn = unsafe { inner.lib.get(b"AMFQueryVersion") }
@@ -138,6 +143,7 @@ impl AmfLibrary {
 
     /// AMFContext を作成する
     pub(crate) fn create_context(&self) -> Result<Context, Error> {
+        let _guard = self.state.lock();
         let mut inner = self.inner.lock().unwrap();
         let inner = Self::ensure_inner(&mut inner)?;
         let mut context: *mut sys::AMFContext = ptr::null_mut();
@@ -154,7 +160,7 @@ impl AmfLibrary {
             ));
         }
 
-        unsafe { Context::from_raw(context) }
+        unsafe { Context::from_raw_with_state(context, Arc::clone(&self.state)) }
     }
 
     /// AMFComponent を作成する
@@ -163,6 +169,7 @@ impl AmfLibrary {
         context: &Context,
         component_id: &str,
     ) -> Result<Component, Error> {
+        let _guard = self.state.lock();
         let mut inner = self.inner.lock().unwrap();
         let inner = Self::ensure_inner(&mut inner)?;
         let component_id_w = sys::to_wstring(component_id);
@@ -184,5 +191,38 @@ impl AmfLibrary {
             ));
         }
         unsafe { Component::from_raw(component) }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::ptr;
+    use std::sync::{Arc, Barrier};
+
+    use super::*;
+
+    /// 複数の Context の Vulkan デバイスを並列に初期化しても SIGSEGV しないことを確認する
+    ///
+    /// 複数の Context を並列に初期化できることを確かめる。
+    #[test]
+    fn test_parallel_init_vulkan() {
+        const CONTEXT_COUNT: usize = 64;
+
+        let lib = AmfLibrary::instance();
+        let contexts = (0..CONTEXT_COUNT)
+            .map(|_| lib.create_context().expect("Context の作成に失敗"))
+            .collect::<Vec<_>>();
+
+        // すべてのスレッドを同時に InitVulkan へ到達させる
+        let barrier = Arc::new(Barrier::new(CONTEXT_COUNT));
+        std::thread::scope(|scope| {
+            for context in &contexts {
+                let barrier = Arc::clone(&barrier);
+                scope.spawn(move || {
+                    barrier.wait();
+                    unsafe { context.init_vulkan(ptr::null_mut()) }.expect("InitVulkan に失敗");
+                });
+            }
+        });
     }
 }
