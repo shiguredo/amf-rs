@@ -799,7 +799,7 @@ impl<H: EncodeHandler> Encoder<H> {
             max_kbps: config.max_kbps,
             qpi: config.qpi,
             qpp: config.qpp,
-            // AV1 の初期設定では従来どおり qpb は設定しない
+            // AV1 の初期設定では qpb は設定しない
             qpb: None,
             gop_pic_size: config.gop_pic_size,
             ..ReconfigureParams::default()
@@ -957,7 +957,7 @@ impl<H: EncodeHandler> Encoder<H> {
     }
 }
 
-// 安全性:
+// Safety:
 // Drop 内でのみ component/context を解放する。
 // ワーカースレッドは Drop より先に停止させる。
 impl<H: EncodeHandler> Drop for Encoder<H> {

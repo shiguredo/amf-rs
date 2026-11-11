@@ -5,14 +5,34 @@
 //! vtable の関数ポインタは初期化時にすべて取り出して構造体メンバーに保持するため、
 //! メソッド呼び出しのたびに vtable 検証は行われない。
 //!
-//! 同じ AMF オブジェクトを指すハンドルは共有ロックを共有し、スレッドセーフでない
-//! 操作を 1 回ずつ直列化する。`Clone` したハンドルはラッパー経由の操作に限り
-//! 別スレッドで並行利用できる。
+//! ## スレッド安全性
 //!
-//! コンポーネントに投入する `Surface` / `Buffer` には、投入前に他のハンドルが
-//! 存在してはならない。AMF コンポーネントは投入したオブジェクトを解放するまで
-//! 排他アクセスするため、他のハンドルからアクセスするとデータ競合になる。
-//! ロックがポイズンされた場合はパニックする。
+//! 同じ AMF オブジェクトを指すハンドルは、スレッドセーフでない操作を 1 回ずつ
+//! 直列化する。`Clone` したハンドルはラッパー経由の操作に限り別スレッドで
+//! 並行利用できる。
+//!
+//! ## 生ポインタ
+//!
+//! `as_ptr` が返すポインタは、そのハンドルが生存する間のみ有効である。
+//! `into_raw` は所有権を放棄して生ポインタを返し、`Release` は呼び出し元が行う。
+//! 所有権を放棄したハンドルの `Drop` は `Release` を呼ばない。
+//! `as_ptr` / `into_raw` / `get_native` が返す生ポインタ経由の AMF 呼び出しや
+//! メモリアクセスは、この直列化の対象外である。
+//!
+//! `from_raw` は参照カウントを増やさず、呼び出し元が持つ参照の所有権を引き継ぐ。
+//! `from_raw_acquired` は `Acquire` を呼んで参照カウントを 1 増やし、独立した参照を
+//! 持つハンドルを作成する。どちらも既存のハンドルと直列化されないため、既存の
+//! ハンドルがある場合はそれらと並行して利用してはならない。
+//!
+//! ## コンポーネントへの投入
+//!
+//! コンポーネントに投入する `Surface` / `Buffer` には、投入前にそのオブジェクトを
+//! 指す他のハンドルが存在してはならない。`Surface` の場合は `Clone`、`Plane`、
+//! `PropertyStorage` が該当する。AMF コンポーネントは投入したオブジェクトを解放する
+//! まで排他アクセスするため、他のハンドルからアクセスするとデータ競合になる。
+//!
+//! ロック保持中に panic する実装バグがあるとロックがポイズンされ、以降の操作は
+//! パニックする。
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -28,24 +48,15 @@ use crate::sys;
 // 参照カウント操作 (`Acquire` / `Release` / `QueryInterface`) は `AMFInterface` の
 // デフォルト実装で thread-safe である (AMF SDK の Wiki
 // 「Guide for Video CODEC Encoder App Developers」§4.2)。
-// コンポーネントに投入するオブジェクトは、投入前に他のハンドルと共有されていないことを
-// safe な API が確認する。投入後はハンドルが残らないため、コンポーネントの
-// 排他アクセスと競合しない。
+// コンポーネントに投入するオブジェクトは、モジュール doc の「コンポーネントへの投入」を
+// 満たすこと。投入後はハンドルが残らないため、コンポーネントの排他アクセスと競合しない。
 // したがって、ラッパー経由の操作とコンポーネントへの投入のどちらもデータ競合しない。
-
-/// AMF オブジェクトの共有ロックを取得する
-///
-/// # Panics
-/// ロックがポイズンされている場合にパニックする。
-fn lock_shared(lock: &Mutex<()>) -> MutexGuard<'_, ()> {
-    lock.lock().expect("AMF object lock is poisoned")
-}
 
 /// 同じ AMF オブジェクトを指すハンドルで共有する状態
 #[derive(Debug)]
 struct AmfObjectState {
-    /// スレッドセーフでない操作を直列化するロック
-    lock: Mutex<()>,
+    /// スレッドセーフでない操作を直列化する Mutex
+    mutex: Mutex<()>,
     /// この状態を共有するハンドルの数
     handles: AtomicUsize,
 }
@@ -54,9 +65,17 @@ impl AmfObjectState {
     /// ハンドル数 0 の新しい状態を作成する
     fn new() -> Arc<Self> {
         Arc::new(Self {
-            lock: Mutex::new(()),
+            mutex: Mutex::new(()),
             handles: AtomicUsize::new(0),
         })
+    }
+
+    /// 共有ロックを取得する
+    ///
+    /// # Panics
+    /// ロックがポイズンされている場合にパニックする。
+    fn lock(&self) -> MutexGuard<'_, ()> {
+        self.mutex.lock().expect("AMF object lock is poisoned")
     }
 
     /// ハンドル数を増やす
@@ -92,7 +111,8 @@ struct PropertyStorageFuncs {
 
 /// `AMFPropertyStorage` の RAII ラッパー
 ///
-/// `Surface` や `Component` から `property_storage()` で取得する。
+/// `Surface` や `Component` から `property_storage()` で取得すると参照カウントが増え、
+/// `Drop` で減る。
 pub struct PropertyStorage {
     ptr: *mut sys::AMFPropertyStorage,
     f: PropertyStorageFuncs,
@@ -104,8 +124,6 @@ unsafe impl Sync for PropertyStorage {}
 
 impl PropertyStorage {
     /// ハンドルを作成する
-    ///
-    /// `state` のハンドル数を増やす。
     ///
     /// # Safety
     /// `ptr` は有効な `AMFPropertyStorage` を指すこと。
@@ -130,8 +148,7 @@ impl PropertyStorage {
     /// 生ポインタから PropertyStorage を作成する (Acquire なし)
     ///
     /// # Safety
-    /// `ptr` は有効な `AMFPropertyStorage` を指すこと。`ptr` を指す既存のハンドルとは共有ロックを
-    /// 共有しないため、それらと並行して利用しないこと。
+    /// `ptr` は有効な `AMFPropertyStorage` を指すこと。
     pub unsafe fn from_raw(ptr: *mut sys::AMFPropertyStorage) -> Result<Self, Error> {
         unsafe { Self::from_raw_with_acquire(ptr, false, AmfObjectState::new()) }
     }
@@ -139,22 +156,19 @@ impl PropertyStorage {
     /// 生ポインタから Acquire 付きで PropertyStorage を作成する
     ///
     /// # Safety
-    /// `ptr` は有効な `AMFPropertyStorage` を指すこと。`ptr` を指す既存のハンドルとは共有ロックを
-    /// 共有しないため、それらと並行して利用しないこと。
+    /// `ptr` は有効な `AMFPropertyStorage` を指すこと。
     pub unsafe fn from_raw_acquired(ptr: *mut sys::AMFPropertyStorage) -> Result<Self, Error> {
         unsafe { Self::from_raw_with_acquire(ptr, true, AmfObjectState::new()) }
     }
 
-    /// 生ポインタを返す。戻り値経由の AMF 呼び出しは共有ロックで保護されない。
+    /// 生ポインタを返す。
     pub fn as_ptr(&self) -> *mut sys::AMFPropertyStorage {
         self.ptr
     }
 
-    /// 所有権を放棄して生ポインタを返す (Release は呼ばない)。戻り値経由の AMF 呼び出しは
-    /// 共有ロックで保護されない。
+    /// 所有権を放棄して生ポインタを返す (Release は呼ばない)。
     pub fn into_raw(mut self) -> *mut sys::AMFPropertyStorage {
         let ptr = self.ptr;
-        // Release を呼ばずに所有権を移すため、ポインタを無効化する。
         self.ptr = std::ptr::null_mut();
         ptr
     }
@@ -168,7 +182,7 @@ impl PropertyStorage {
         name: *const sys::wchar_t,
         value: sys::AMFVariantStruct,
     ) -> sys::AMF_RESULT {
-        let _guard = lock_shared(&self.state.lock);
+        let _guard = self.state.lock();
         unsafe { (self.f.set_property)(self.ptr, name, value) }
     }
 
@@ -219,7 +233,6 @@ impl Clone for PropertyStorage {
 impl Drop for PropertyStorage {
     fn drop(&mut self) {
         self.state.dec();
-        // into_raw() で所有権を放棄したハンドルは Release を呼ばない。
         if self.ptr.is_null() {
             return;
         }
@@ -247,14 +260,8 @@ struct SurfaceFuncs {
 
 /// `AMFSurface` の RAII ラッパー
 ///
-/// `get_plane()` / `property_storage()` が返すハンドルは同じ共有ロックを共有する。
-///
-/// # コンポーネントへの投入
-///
-/// コンポーネントに投入する場合、このオブジェクトを指す他のハンドル (`Clone`、
-/// `Plane`、`PropertyStorage`) が存在してはならない。AMF コンポーネントは投入した
-/// `Surface` を解放するまで排他アクセスするため、他のハンドルからアクセスすると
-/// データ競合になる。
+/// `get_plane()` / `get_plane_at()` / `property_storage()` が返すハンドルの操作は、
+/// このハンドルの操作と直列化される。
 #[derive(Debug)]
 pub struct Surface {
     ptr: *mut sys::AMFSurface,
@@ -267,8 +274,6 @@ unsafe impl Sync for Surface {}
 
 impl Surface {
     /// ハンドルを作成する
-    ///
-    /// `state` のハンドル数を増やす。
     ///
     /// # Safety
     /// `ptr` は有効な `AMFSurface` を指すこと。
@@ -297,8 +302,7 @@ impl Surface {
     /// 生ポインタから Surface を作成する (Acquire なし)
     ///
     /// # Safety
-    /// `ptr` は有効な `AMFSurface` を指すこと。`ptr` を指す既存のハンドルとは共有ロックを
-    /// 共有しないため、それらと並行して利用しないこと。
+    /// `ptr` は有効な `AMFSurface` を指すこと。
     pub unsafe fn from_raw(ptr: *mut sys::AMFSurface) -> Result<Self, Error> {
         unsafe { Self::from_raw_with_acquire(ptr, false, AmfObjectState::new()) }
     }
@@ -306,8 +310,7 @@ impl Surface {
     /// 生ポインタから Acquire 付きで Surface を作成する
     ///
     /// # Safety
-    /// `ptr` は有効な `AMFSurface` を指すこと。`ptr` を指す既存のハンドルとは共有ロックを
-    /// 共有しないため、それらと並行して利用しないこと。
+    /// `ptr` は有効な `AMFSurface` を指すこと。
     pub unsafe fn from_raw_acquired(ptr: *mut sys::AMFSurface) -> Result<Self, Error> {
         unsafe { Self::from_raw_with_acquire(ptr, true, AmfObjectState::new()) }
     }
@@ -317,37 +320,33 @@ impl Surface {
         self.state.is_shared()
     }
 
-    /// 生ポインタを返す。戻り値経由の AMF 呼び出しは共有ロックで保護されない。
+    /// 生ポインタを返す。
     pub fn as_ptr(&self) -> *mut sys::AMFSurface {
         self.ptr
     }
 
-    /// 所有権を放棄して生ポインタを返す (Release は呼ばない)。戻り値経由の AMF 呼び出しは
-    /// 共有ロックで保護されない。
+    /// 所有権を放棄して生ポインタを返す (Release は呼ばない)。
     pub fn into_raw(mut self) -> *mut sys::AMFSurface {
         let ptr = self.ptr;
-        // Release を呼ばずに所有権を移すため、ポインタを無効化する。
         self.ptr = std::ptr::null_mut();
         ptr
     }
 
     /// PTS を設定する
     pub fn set_pts(&self, pts: sys::amf_pts) {
-        let _guard = lock_shared(&self.state.lock);
+        let _guard = self.state.lock();
         unsafe { (self.f.set_pts)(self.ptr, pts) }
     }
 
     /// Duration を設定する
     pub fn set_duration(&self, duration: sys::amf_pts) {
-        let _guard = lock_shared(&self.state.lock);
+        let _guard = self.state.lock();
         unsafe { (self.f.set_duration)(self.ptr, duration) }
     }
 
     /// 指定プレーンを取得する
-    ///
-    /// 戻り値の `Plane` はこの `Surface` と同じ共有ロックを共有する。
     pub fn get_plane(&self, plane_type: sys::AMF_PLANE_TYPE) -> Result<Plane, Error> {
-        let _guard = lock_shared(&self.state.lock);
+        let _guard = self.state.lock();
         let plane = unsafe { (self.f.get_plane)(self.ptr, plane_type) };
         if plane.is_null() {
             return Err(Error::new_custom("Surface::get_plane", "plane is null"));
@@ -356,10 +355,8 @@ impl Surface {
     }
 
     /// インデックスでプレーンを取得する
-    ///
-    /// 戻り値の `Plane` はこの `Surface` と同じ共有ロックを共有する。
     pub fn get_plane_at(&self, index: sys::amf_size) -> Result<Plane, Error> {
-        let _guard = lock_shared(&self.state.lock);
+        let _guard = self.state.lock();
         let plane = unsafe { (self.f.get_plane_at)(self.ptr, index) };
         if plane.is_null() {
             return Err(Error::new_custom("Surface::get_plane_at", "plane is null"));
@@ -369,14 +366,11 @@ impl Surface {
 
     /// GPU → Host メモリ変換
     pub fn convert(&self, type_: sys::AMF_MEMORY_TYPE) -> sys::AMF_RESULT {
-        let _guard = lock_shared(&self.state.lock);
+        let _guard = self.state.lock();
         unsafe { (self.f.convert)(self.ptr, type_) }
     }
 
     /// AMFPropertyStorage としてアクセスする
-    ///
-    /// 戻り値の `PropertyStorage` が `Drop` されるまで参照カウントが増える。
-    /// 戻り値はこの `Surface` と同じ共有ロックを共有する。
     pub fn property_storage(&self) -> Result<PropertyStorage, Error> {
         unsafe {
             PropertyStorage::from_raw_with_acquire(
@@ -405,7 +399,6 @@ impl Clone for Surface {
 impl Drop for Surface {
     fn drop(&mut self) {
         self.state.dec();
-        // into_raw() で所有権を放棄したハンドルは Release を呼ばない。
         if self.ptr.is_null() {
             return;
         }
@@ -435,12 +428,6 @@ struct BufferFuncs {
 }
 
 /// `AMFBuffer` の RAII ラッパー
-///
-/// # コンポーネントへの投入
-///
-/// コンポーネントに投入する場合、このオブジェクトを指す他のハンドル (`Clone`) が
-/// 存在してはならない。AMF コンポーネントは投入した `Buffer` を解放するまで
-/// 排他アクセスするため、他のハンドルからアクセスするとデータ競合になる。
 #[derive(Debug)]
 pub struct Buffer {
     ptr: *mut sys::AMFBuffer,
@@ -453,8 +440,6 @@ unsafe impl Sync for Buffer {}
 
 impl Buffer {
     /// ハンドルを作成する
-    ///
-    /// `state` のハンドル数を増やす。
     ///
     /// # Safety
     /// `ptr` は有効な `AMFBuffer` を指すこと。
@@ -483,8 +468,7 @@ impl Buffer {
     /// 生ポインタから Buffer を作成する (Acquire なし)
     ///
     /// # Safety
-    /// `ptr` は有効な `AMFBuffer` を指すこと。`ptr` を指す既存のハンドルとは共有ロックを
-    /// 共有しないため、それらと並行して利用しないこと。
+    /// `ptr` は有効な `AMFBuffer` を指すこと。
     pub unsafe fn from_raw(ptr: *mut sys::AMFBuffer) -> Result<Self, Error> {
         unsafe { Self::from_raw_with_acquire(ptr, false, AmfObjectState::new()) }
     }
@@ -492,8 +476,7 @@ impl Buffer {
     /// 生ポインタから Acquire 付きで Buffer を作成する
     ///
     /// # Safety
-    /// `ptr` は有効な `AMFBuffer` を指すこと。`ptr` を指す既存のハンドルとは共有ロックを
-    /// 共有しないため、それらと並行して利用しないこと。
+    /// `ptr` は有効な `AMFBuffer` を指すこと。
     pub unsafe fn from_raw_acquired(ptr: *mut sys::AMFBuffer) -> Result<Self, Error> {
         unsafe { Self::from_raw_with_acquire(ptr, true, AmfObjectState::new()) }
     }
@@ -503,41 +486,39 @@ impl Buffer {
         self.state.is_shared()
     }
 
-    /// 生ポインタを返す。戻り値経由の AMF 呼び出しは共有ロックで保護されない。
+    /// 生ポインタを返す。
     pub fn as_ptr(&self) -> *mut sys::AMFBuffer {
         self.ptr
     }
 
-    /// 所有権を放棄して生ポインタを返す (Release は呼ばない)。戻り値経由の AMF 呼び出しは
-    /// 共有ロックで保護されない。
+    /// 所有権を放棄して生ポインタを返す (Release は呼ばない)。
     pub fn into_raw(mut self) -> *mut sys::AMFBuffer {
         let ptr = self.ptr;
-        // Release を呼ばずに所有権を移すため、ポインタを無効化する。
         self.ptr = std::ptr::null_mut();
         ptr
     }
 
     /// バッファのネイティブポインタを取得する
     pub fn get_native(&self) -> *mut std::ffi::c_void {
-        let _guard = lock_shared(&self.state.lock);
+        let _guard = self.state.lock();
         unsafe { (self.f.get_native)(self.ptr) }
     }
 
     /// バッファサイズを取得する
     pub fn get_size(&self) -> sys::amf_size {
-        let _guard = lock_shared(&self.state.lock);
+        let _guard = self.state.lock();
         unsafe { (self.f.get_size)(self.ptr) }
     }
 
     /// PTS を取得する
     pub fn get_pts(&self) -> sys::amf_pts {
-        let _guard = lock_shared(&self.state.lock);
+        let _guard = self.state.lock();
         unsafe { (self.f.get_pts)(self.ptr) }
     }
 
     /// Duration を取得する
     pub fn get_duration(&self) -> sys::amf_pts {
-        let _guard = lock_shared(&self.state.lock);
+        let _guard = self.state.lock();
         unsafe { (self.f.get_duration)(self.ptr) }
     }
 
@@ -551,7 +532,7 @@ impl Buffer {
         name: *const sys::wchar_t,
         p_value: *mut sys::AMFVariantStruct,
     ) -> sys::AMF_RESULT {
-        let _guard = lock_shared(&self.state.lock);
+        let _guard = self.state.lock();
         unsafe { (self.f.get_property)(self.ptr, name, p_value) }
     }
 }
@@ -573,7 +554,6 @@ impl Clone for Buffer {
 impl Drop for Buffer {
     fn drop(&mut self) {
         self.state.dec();
-        // into_raw() で所有権を放棄したハンドルは Release を呼ばない。
         if self.ptr.is_null() {
             return;
         }
@@ -613,8 +593,6 @@ unsafe impl Sync for Plane {}
 impl Plane {
     /// ハンドルを作成する
     ///
-    /// `state` のハンドル数を増やす。
-    ///
     /// # Safety
     /// `ptr` は有効な `AMFPlane` を指すこと。
     unsafe fn from_raw_with_acquire(
@@ -642,8 +620,7 @@ impl Plane {
     /// 生ポインタから Plane を作成する (Acquire なし)
     ///
     /// # Safety
-    /// `ptr` は有効な `AMFPlane` を指すこと。`ptr` を指す既存のハンドルとは共有ロックを
-    /// 共有しないため、それらと並行して利用しないこと。
+    /// `ptr` は有効な `AMFPlane` を指すこと。
     pub unsafe fn from_raw(ptr: *mut sys::AMFPlane) -> Result<Self, Error> {
         unsafe { Self::from_raw_with_acquire(ptr, false, AmfObjectState::new()) }
     }
@@ -651,53 +628,50 @@ impl Plane {
     /// 生ポインタから Acquire 付きで Plane を作成する
     ///
     /// # Safety
-    /// `ptr` は有効な `AMFPlane` を指すこと。`ptr` を指す既存のハンドルとは共有ロックを
-    /// 共有しないため、それらと並行して利用しないこと。
+    /// `ptr` は有効な `AMFPlane` を指すこと。
     pub unsafe fn from_raw_acquired(ptr: *mut sys::AMFPlane) -> Result<Self, Error> {
         unsafe { Self::from_raw_with_acquire(ptr, true, AmfObjectState::new()) }
     }
 
-    /// 生ポインタを返す。戻り値経由の AMF 呼び出しは共有ロックで保護されない。
+    /// 生ポインタを返す。
     pub fn as_ptr(&self) -> *mut sys::AMFPlane {
         self.ptr
     }
 
-    /// 所有権を放棄して生ポインタを返す (Release は呼ばない)。戻り値経由の AMF 呼び出しは
-    /// 共有ロックで保護されない。
+    /// 所有権を放棄して生ポインタを返す (Release は呼ばない)。
     pub fn into_raw(mut self) -> *mut sys::AMFPlane {
         let ptr = self.ptr;
-        // Release を呼ばずに所有権を移すため、ポインタを無効化する。
         self.ptr = std::ptr::null_mut();
         ptr
     }
 
     /// プレーンのネイティブポインタを取得する
     pub fn get_native(&self) -> *mut std::ffi::c_void {
-        let _guard = lock_shared(&self.state.lock);
+        let _guard = self.state.lock();
         unsafe { (self.f.get_native)(self.ptr) }
     }
 
     /// 水平ピッチを取得する
     pub fn get_hpitch(&self) -> sys::amf_int32 {
-        let _guard = lock_shared(&self.state.lock);
+        let _guard = self.state.lock();
         unsafe { (self.f.get_hpitch)(self.ptr) }
     }
 
     /// 垂直ピッチを取得する
     pub fn get_vpitch(&self) -> sys::amf_int32 {
-        let _guard = lock_shared(&self.state.lock);
+        let _guard = self.state.lock();
         unsafe { (self.f.get_vpitch)(self.ptr) }
     }
 
     /// 幅を取得する
     pub fn get_width(&self) -> sys::amf_int32 {
-        let _guard = lock_shared(&self.state.lock);
+        let _guard = self.state.lock();
         unsafe { (self.f.get_width)(self.ptr) }
     }
 
     /// 高さを取得する
     pub fn get_height(&self) -> sys::amf_int32 {
-        let _guard = lock_shared(&self.state.lock);
+        let _guard = self.state.lock();
         unsafe { (self.f.get_height)(self.ptr) }
     }
 }
@@ -719,7 +693,6 @@ impl Clone for Plane {
 impl Drop for Plane {
     fn drop(&mut self) {
         self.state.dec();
-        // into_raw() で所有権を放棄したハンドルは Release を呼ばない。
         if self.ptr.is_null() {
             return;
         }
@@ -760,6 +733,9 @@ struct ContextFuncs {
 }
 
 /// `AMFContext` の RAII ラッパー
+///
+/// `alloc_surface()` / `alloc_buffer()` が返すハンドルの操作は、このハンドルの
+/// 操作とは直列化されない。
 pub struct Context {
     ptr: *mut sys::AMFContext,
     f: ContextFuncs,
@@ -771,8 +747,6 @@ unsafe impl Sync for Context {}
 
 impl Context {
     /// ハンドルを作成する
-    ///
-    /// `state` のハンドル数を増やす。
     ///
     /// # Safety
     /// `ptr` は有効な `AMFContext` を指すこと。
@@ -800,8 +774,7 @@ impl Context {
     /// 生ポインタから Context を作成する (Acquire なし)
     ///
     /// # Safety
-    /// `ptr` は有効な `AMFContext` を指すこと。`ptr` を指す既存のハンドルとは共有ロックを
-    /// 共有しないため、それらと並行して利用しないこと。
+    /// `ptr` は有効な `AMFContext` を指すこと。
     pub unsafe fn from_raw(ptr: *mut sys::AMFContext) -> Result<Self, Error> {
         unsafe { Self::from_raw_with_acquire(ptr, false, AmfObjectState::new()) }
     }
@@ -809,35 +782,33 @@ impl Context {
     /// 生ポインタから Acquire 付きで Context を作成する
     ///
     /// # Safety
-    /// `ptr` は有効な `AMFContext` を指すこと。`ptr` を指す既存のハンドルとは共有ロックを
-    /// 共有しないため、それらと並行して利用しないこと。
+    /// `ptr` は有効な `AMFContext` を指すこと。
     pub unsafe fn from_raw_acquired(ptr: *mut sys::AMFContext) -> Result<Self, Error> {
         unsafe { Self::from_raw_with_acquire(ptr, true, AmfObjectState::new()) }
     }
 
-    /// 生ポインタを返す。戻り値経由の AMF 呼び出しは共有ロックで保護されない。
+    /// 生ポインタを返す。
     pub fn as_ptr(&self) -> *mut sys::AMFContext {
         self.ptr
     }
 
-    /// 所有権を放棄して生ポインタを返す (Release は呼ばない)。戻り値経由の AMF 呼び出しは
-    /// 共有ロックで保護されない。
+    /// 所有権を放棄して生ポインタを返す (Release は呼ばない)。
     pub fn into_raw(mut self) -> *mut sys::AMFContext {
         let ptr = self.ptr;
-        // Release を呼ばずに所有権を移すため、ポインタを無効化する。
         self.ptr = std::ptr::null_mut();
         ptr
     }
 
     /// コンテキストを終了する
     pub fn terminate(&self) -> sys::AMF_RESULT {
-        let _guard = lock_shared(&self.state.lock);
+        let _guard = self.state.lock();
         unsafe { (self.f.terminate)(self.ptr) }
     }
 
     /// Surface を確保する
     ///
-    /// 戻り値の `Surface` はこの `Context` とは別の共有ロックを持つ。
+    /// # Errors
+    /// `AllocSurface` が失敗した場合、または返されたポインタが null の場合にエラーを返す。
     pub fn alloc_surface(
         &self,
         type_: sys::AMF_MEMORY_TYPE,
@@ -845,7 +816,7 @@ impl Context {
         width: sys::amf_int32,
         height: sys::amf_int32,
     ) -> Result<Surface, Error> {
-        let _guard = lock_shared(&self.state.lock);
+        let _guard = self.state.lock();
         let mut surface: *mut sys::AMFSurface = std::ptr::null_mut();
         let result =
             unsafe { (self.f.alloc_surface)(self.ptr, type_, format, width, height, &mut surface) };
@@ -863,13 +834,14 @@ impl Context {
 
     /// Buffer を確保する
     ///
-    /// 戻り値の `Buffer` はこの `Context` とは別の共有ロックを持つ。
+    /// # Errors
+    /// `AllocBuffer` が失敗した場合、または返されたポインタが null の場合にエラーを返す。
     pub fn alloc_buffer(
         &self,
         type_: sys::AMF_MEMORY_TYPE,
         size: sys::amf_size,
     ) -> Result<Buffer, Error> {
-        let _guard = lock_shared(&self.state.lock);
+        let _guard = self.state.lock();
         let mut buffer: *mut sys::AMFBuffer = std::ptr::null_mut();
         let result = unsafe { (self.f.alloc_buffer)(self.ptr, type_, size, &mut buffer) };
         Error::check(result, "AMFContext::AllocBuffer")?;
@@ -887,12 +859,11 @@ impl Context {
     /// QueryInterface で AMFContext1 を取得し Vulkan デバイスを初期化する
     ///
     /// `device` が `null` の場合はデフォルトデバイスが使用される。
-    /// この呼び出しは他の `Context` の操作と同じ共有ロックで直列化される。
     ///
     /// # Safety
     /// `device` は有効な Vulkan デバイスを指すこと。
     pub unsafe fn init_vulkan(&self, device: *mut std::ffi::c_void) -> Result<(), Error> {
-        let _guard = lock_shared(&self.state.lock);
+        let _guard = self.state.lock();
 
         let mut context1_ptr: *mut std::ffi::c_void = std::ptr::null_mut();
         let result = unsafe {
@@ -944,7 +915,6 @@ impl Clone for Context {
 impl Drop for Context {
     fn drop(&mut self) {
         self.state.dec();
-        // into_raw() で所有権を放棄したハンドルは Release を呼ばない。
         if self.ptr.is_null() {
             return;
         }
@@ -985,8 +955,10 @@ struct ComponentFuncs {
 
 /// `AMFComponent` の RAII ラッパー
 ///
-/// 自身の FFI 呼び出しはロックしないが、`property_storage()` が返すハンドルとは
-/// 同じ共有ロックを共有する。
+/// `AMFComponent` は AMF の仕様で thread-safe であり、自身のメソッドは複数スレッドから
+/// 並行に呼べる。
+/// `property_storage()` が返す `PropertyStorage` のプロパティ操作は、このハンドルの
+/// 操作と直列化される。
 pub struct Component {
     ptr: *mut sys::AMFComponent,
     f: ComponentFuncs,
@@ -1000,8 +972,7 @@ impl Component {
     /// ハンドルを作成する
     ///
     /// # Safety
-    /// `ptr` は有効な `AMFComponent` を指すこと。`ptr` を共有する他のハンドルと
-    /// 並行して利用しないこと。
+    /// `ptr` は有効な `AMFComponent` を指すこと。
     unsafe fn from_raw_with_acquire(
         ptr: *mut sys::AMFComponent,
         acquire: bool,
@@ -1030,8 +1001,7 @@ impl Component {
     /// 生ポインタから Component を作成する (Acquire なし)
     ///
     /// # Safety
-    /// `ptr` は有効な `AMFComponent` を指すこと。`ptr` を指す既存のハンドルとは共有ロックを
-    /// 共有しないため、それらと並行して利用しないこと。
+    /// `ptr` は有効な `AMFComponent` を指すこと。
     pub unsafe fn from_raw(ptr: *mut sys::AMFComponent) -> Result<Self, Error> {
         unsafe { Self::from_raw_with_acquire(ptr, false) }
     }
@@ -1039,22 +1009,19 @@ impl Component {
     /// 生ポインタから Acquire 付きで Component を作成する
     ///
     /// # Safety
-    /// `ptr` は有効な `AMFComponent` を指すこと。`ptr` を指す既存のハンドルとは共有ロックを
-    /// 共有しないため、それらと並行して利用しないこと。
+    /// `ptr` は有効な `AMFComponent` を指すこと。
     pub unsafe fn from_raw_acquired(ptr: *mut sys::AMFComponent) -> Result<Self, Error> {
         unsafe { Self::from_raw_with_acquire(ptr, true) }
     }
 
-    /// 生ポインタを返す。戻り値経由の AMF 呼び出しは共有ロックで保護されない。
+    /// 生ポインタを返す。
     pub fn as_ptr(&self) -> *mut sys::AMFComponent {
         self.ptr
     }
 
-    /// 所有権を放棄して生ポインタを返す (Release は呼ばない)。戻り値経由の AMF 呼び出しは
-    /// 共有ロックで保護されない。
+    /// 所有権を放棄して生ポインタを返す (Release は呼ばない)。
     pub fn into_raw(mut self) -> *mut sys::AMFComponent {
         let ptr = self.ptr;
-        // Release を呼ばずに所有権を移すため、ポインタを無効化する。
         self.ptr = std::ptr::null_mut();
         ptr
     }
@@ -1112,9 +1079,6 @@ impl Component {
     }
 
     /// AMFPropertyStorage としてアクセスする
-    ///
-    /// 戻り値の `PropertyStorage` が `Drop` されるまで参照カウントが増える。
-    /// 戻り値はこの `Component` が持つ共有ロックを共有し、プロパティ操作を直列化する。
     pub fn property_storage(&self) -> Result<PropertyStorage, Error> {
         unsafe {
             PropertyStorage::from_raw_with_acquire(
@@ -1144,7 +1108,6 @@ impl Clone for Component {
 impl Drop for Component {
     fn drop(&mut self) {
         self.state.dec();
-        // into_raw() で所有権を放棄したハンドルは Release を呼ばない。
         if self.ptr.is_null() {
             return;
         }
@@ -1152,5 +1115,117 @@ impl Drop for Component {
         unsafe {
             (self.f.release)(self.ptr);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use super::*;
+    use crate::AmfLibrary;
+
+    /// テスト用の Context を作成する
+    fn create_context() -> Context {
+        let context = AmfLibrary::instance()
+            .create_context()
+            .expect("Context の作成に失敗");
+        unsafe { context.init_vulkan(std::ptr::null_mut()) }.expect("InitVulkan に失敗");
+        context
+    }
+
+    /// テスト用の Surface を作成する
+    fn create_surface(context: &Context) -> Surface {
+        context
+            .alloc_surface(
+                sys::AMF_MEMORY_TYPE::AMF_MEMORY_HOST,
+                sys::AMF_SURFACE_FORMAT::AMF_SURFACE_NV12,
+                320,
+                240,
+            )
+            .expect("Surface の確保に失敗")
+    }
+
+    /// Plane が Surface と同じ状態を共有することを確認する
+    #[test]
+    fn test_plane_shares_state_with_surface() {
+        let context = create_context();
+        let surface = create_surface(&context);
+        let plane = surface
+            .get_plane(sys::AMF_PLANE_TYPE::AMF_PLANE_Y)
+            .expect("Y プレーンの取得に失敗");
+
+        assert!(
+            Arc::ptr_eq(&surface.state, &plane.state),
+            "Plane が Surface の状態を共有していない"
+        );
+    }
+
+    /// PropertyStorage が Surface と同じ状態を共有することを確認する
+    #[test]
+    fn test_property_storage_shares_state_with_surface() {
+        let context = create_context();
+        let surface = create_surface(&context);
+        let property_storage = surface
+            .property_storage()
+            .expect("PropertyStorage の取得に失敗");
+
+        assert!(
+            Arc::ptr_eq(&surface.state, &property_storage.state),
+            "PropertyStorage が Surface の状態を共有していない"
+        );
+    }
+
+    /// Component の PropertyStorage が Component と同じ状態を共有することを確認する
+    #[test]
+    fn test_component_property_storage_shares_state_with_component() {
+        let context = create_context();
+        let component = AmfLibrary::instance()
+            .create_component(&context, sys::str::AMFVideoEncoderVCE_AVC)
+            .expect("Component の作成に失敗");
+        let property_storage = component
+            .property_storage()
+            .expect("PropertyStorage の取得に失敗");
+
+        assert!(
+            Arc::ptr_eq(&component.state, &property_storage.state),
+            "PropertyStorage が Component の状態を共有していない"
+        );
+    }
+
+    /// from_raw で作り直したハンドルが状態を共有しないことを確認する
+    #[test]
+    fn test_from_raw_does_not_share_state() {
+        let context = create_context();
+        let surface = create_surface(&context);
+        let surface_state = Arc::clone(&surface.state);
+        let ptr = surface.into_raw();
+        let other = unsafe { Surface::from_raw(ptr) }.expect("Surface の再構築に失敗");
+
+        assert!(
+            !Arc::ptr_eq(&surface_state, &other.state),
+            "from_raw が状態を共有している"
+        );
+    }
+
+    /// Surface を複数スレッドから参照で並行利用できることを確認する
+    #[test]
+    fn test_surface_can_be_used_from_multiple_threads_by_reference() {
+        let context = create_context();
+        let surface = create_surface(&context);
+
+        std::thread::scope(|scope| {
+            for _ in 0..4 {
+                scope.spawn(|| {
+                    for i in 0..100 {
+                        surface.set_pts(i);
+                        let plane = surface
+                            .get_plane(sys::AMF_PLANE_TYPE::AMF_PLANE_Y)
+                            .expect("Y プレーンの取得に失敗");
+                        assert!(!plane.get_native().is_null(), "Y プレーンが null");
+                    }
+                });
+            }
+        });
     }
 }

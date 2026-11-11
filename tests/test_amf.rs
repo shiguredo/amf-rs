@@ -1,19 +1,48 @@
-use std::sync::atomic::{AtomicUsize, Ordering};
+//! `amf` モジュールのハンドルに関するテスト
+//!
+//! このファイルのテストは実 GPU と AMF ランタイムを必要とする。
+//! テストバイナリを並列実行すると `InitVulkan` の並列初期化で SIGSEGV する
+//! 既知の問題があるため、CI では `--test-threads=1` で実行する。
+
 use std::sync::{Arc, Mutex};
 
 use shiguredo_amf::amf::{Buffer, Component, Context, Plane, PropertyStorage, Surface};
 use shiguredo_amf::ffi::{AMF_PLANE_TYPE, amf_pts};
 use shiguredo_amf::{
-    AmfLibrary, CodecConfig, Decoder, DecoderCodec, DecoderConfig, EncodeOptions, Encoder,
-    EncoderConfig, FnDecodeHandler, FnEncodeHandler, FrameFormat, H264EncoderConfig, H264Profile,
-    RateControlMode, frame_type,
+    CodecConfig, Decoder, DecoderCodec, DecoderConfig, EncodeOptions, Encoder, EncoderConfig,
+    FnDecodeHandler, FnEncodeHandler, FrameFormat, H264EncoderConfig, H264Profile, RateControlMode,
+    frame_type,
 };
 
-/// 型が `Clone` であることをコンパイル時に表明する
-fn assert_clone<T: Clone>() {}
+/// 型が `Clone + Send + Sync` であることをコンパイル時に表明する
+fn assert_handle<T: Clone + Send + Sync>() {}
 
-/// 型が `Send + Sync` であることをコンパイル時に表明する
-fn assert_send_sync<T: Send + Sync>() {}
+/// テスト用の H.264 エンコーダー設定を返す
+fn h264_test_encoder_config() -> EncoderConfig {
+    let mut config = EncoderConfig::new(
+        CodecConfig::H264(H264EncoderConfig {
+            profile: Some(H264Profile::High),
+        }),
+        320,
+        240,
+        FrameFormat::Nv12,
+        30,
+        1,
+        RateControlMode::Cqp,
+    );
+    config.qpi = Some(26);
+    config.qpp = Some(28);
+    config.qpb = Some(30);
+    config.gop_pic_size = Some(30);
+    config
+}
+
+/// テスト用の H.264 デコーダー設定を返す
+fn h264_test_decoder_config() -> DecoderConfig {
+    DecoderConfig {
+        codec: DecoderCodec::H264,
+    }
+}
 
 /// NV12 のダミーフレームを Surface に書き込む
 ///
@@ -50,25 +79,34 @@ fn fill_nv12_surface(surface: &Surface, width: usize, height: usize) {
 /// `amf` モジュールの全ハンドルが `Clone + Send + Sync` であることを確認する
 #[test]
 fn test_amf_handles_are_clone_send_sync() {
-    // AMF ランタイムを実際に利用できる環境で実行する前提のテストであるため、
-    // ランタイムのバージョン照会が成功することを確認する。
-    AmfLibrary::instance()
-        .query_version()
-        .expect("AMF ランタイムのバージョン取得に失敗");
+    assert_handle::<Context>();
+    assert_handle::<Component>();
+    assert_handle::<Surface>();
+    assert_handle::<Buffer>();
+    assert_handle::<Plane>();
+    assert_handle::<PropertyStorage>();
 
-    assert_clone::<Context>();
-    assert_clone::<Component>();
-    assert_clone::<Surface>();
-    assert_clone::<Buffer>();
-    assert_clone::<Plane>();
-    assert_clone::<PropertyStorage>();
+    // コンパイル時の表明だけでなく、公開 API から実際にハンドルを作成できることも
+    // 確認する。Context と Component は Encoder の内部で作成されるため、ここでは
+    // Surface / Plane / PropertyStorage を確認する。
+    let encoder = Encoder::new(
+        h264_test_encoder_config(),
+        FnEncodeHandler::<()>::new(|_| {}),
+    )
+    .expect("エンコーダーの作成に失敗");
+    let surface = encoder.alloc_surface().expect("Surface の確保に失敗");
+    let plane = surface
+        .get_plane(AMF_PLANE_TYPE::AMF_PLANE_Y)
+        .expect("Y プレーンの取得に失敗");
+    let property_storage = surface
+        .property_storage()
+        .expect("PropertyStorage の取得に失敗");
 
-    assert_send_sync::<Context>();
-    assert_send_sync::<Component>();
-    assert_send_sync::<Surface>();
-    assert_send_sync::<Buffer>();
-    assert_send_sync::<Plane>();
-    assert_send_sync::<PropertyStorage>();
+    // 子ハンドルを先に破棄してから Surface と Encoder を破棄する
+    drop(property_storage);
+    drop(plane);
+    drop(surface);
+    drop(encoder);
 }
 
 /// 同じ `Surface` を指す Clone を複数スレッドで並行利用しても安全であることを確認する
@@ -80,24 +118,11 @@ fn test_surface_clone_concurrent_access() {
     const WIDTH: usize = 320;
     const HEIGHT: usize = 240;
 
-    let mut config = EncoderConfig::new(
-        CodecConfig::H264(H264EncoderConfig {
-            profile: Some(H264Profile::High),
-        }),
-        WIDTH as u32,
-        HEIGHT as u32,
-        FrameFormat::Nv12,
-        30,
-        1,
-        RateControlMode::Cqp,
-    );
-    config.qpi = Some(26);
-    config.qpp = Some(28);
-    config.qpb = Some(30);
-    config.gop_pic_size = Some(30);
-
-    let mut encoder =
-        Encoder::new(config, FnEncodeHandler::<()>::new(|_| {})).expect("エンコーダーの作成に失敗");
+    let mut encoder = Encoder::new(
+        h264_test_encoder_config(),
+        FnEncodeHandler::<()>::new(|_| {}),
+    )
+    .expect("エンコーダーの作成に失敗");
     let surface = encoder.alloc_surface().expect("Surface の確保に失敗");
     fill_nv12_surface(&surface, WIDTH, HEIGHT);
 
@@ -124,13 +149,14 @@ fn test_surface_clone_concurrent_access() {
                     );
                     assert!(!y_plane.get_native().is_null(), "Y プレーンが null");
 
-                    // PropertyStorage も Surface と同じ共有ロックを共有する。
-                    // 存在しないプロパティへの設定は失敗するが、ここでは共有ロックの
-                    // 下で FFI 呼び出しが直列化されることだけを確認する。
+                    // AMFPropertyStorage::SetProperty は存在しないプロパティでも
+                    // AMF_OK を返す。ここでは共有ロックの下で FFI 呼び出しが
+                    // 直列化されることだけを確認する。
                     let prop = surface
                         .property_storage()
                         .expect("PropertyStorage の取得に失敗");
-                    let _ = prop.set_property_int64("AmfRustConcurrentTestProperty", i as i64);
+                    prop.set_property_int64("AmfRustConcurrentTestProperty", i as i64)
+                        .expect("プロパティの設定に失敗");
                 }
             });
         }
@@ -159,16 +185,20 @@ fn test_surface_clone_concurrent_access() {
     encoder.finish().expect("finish に失敗");
 }
 
-/// 同じ `Buffer` を指す Clone を複数スレッドで並行利用しても安全であることを確認する
+/// 同じ `Buffer` を指す Clone からの読み取りを並行してもクラッシュやデッドロックが
+/// 起きないことを確認するスモークテスト
+///
+/// `Buffer` には書き込み系の API がないため、ここでは読み取りの並行呼び出しだけを
+/// 確認する。
 #[test]
 fn test_buffer_clone_concurrent_access() {
     const BUFFER_SIZE: usize = 4096;
 
-    let config = DecoderConfig {
-        codec: DecoderCodec::H264,
-    };
-    let decoder =
-        Decoder::new(config, FnDecodeHandler::<()>::new(|_| {})).expect("デコーダーの作成に失敗");
+    let decoder = Decoder::new(
+        h264_test_decoder_config(),
+        FnDecodeHandler::<()>::new(|_| {}),
+    )
+    .expect("デコーダーの作成に失敗");
     let buffer = decoder
         .alloc_buffer(BUFFER_SIZE)
         .expect("Buffer の確保に失敗");
@@ -197,47 +227,38 @@ fn test_buffer_clone_concurrent_access() {
     assert_eq!(buffer.get_size(), BUFFER_SIZE, "サイズが一致しない");
 }
 
-/// ハンドラー呼び出し中にフレームの共有ロックが保持されていないことを確認する
+/// ハンドラーからフレームのメソッドを呼べることを確認する
 ///
-/// エンコードハンドラーでは受け取った `Buffer` の、デコードハンドラーでは
-/// 受け取った `Surface` のメソッドを呼ぶ。ワーカースレッドが同じロックを
-/// 保持したままハンドラーを呼ぶと、同じスレッドでロックを取得しようとして
-/// デッドロックする。
+/// ワーカーが共有ロックを保持したままハンドラーを呼ぶ実装では、ハンドラー内の
+/// 同じハンドルへのアクセスでデッドロックする。このテストはその実装になって
+/// いないことを確認する。
 #[test]
 fn test_handlers_can_access_frames() {
     const WIDTH: usize = 320;
     const HEIGHT: usize = 240;
 
-    let mut config = EncoderConfig::new(
-        CodecConfig::H264(H264EncoderConfig {
-            profile: Some(H264Profile::High),
-        }),
-        WIDTH as u32,
-        HEIGHT as u32,
-        FrameFormat::Nv12,
-        30,
-        1,
-        RateControlMode::Cqp,
-    );
-    config.qpi = Some(26);
-    config.qpp = Some(28);
-    config.qpb = Some(30);
-    config.gop_pic_size = Some(30);
-
     // エンコードハンドラーは受け取った Buffer のメソッドを呼ぶ
     let encoded = Arc::new(Mutex::new(Vec::new()));
+    let encode_observations = Arc::new(Mutex::new(Vec::new()));
     let e = Arc::clone(&encoded);
+    let eo = Arc::clone(&encode_observations);
     let mut encoder = Encoder::new(
-        config,
+        h264_test_encoder_config(),
         FnEncodeHandler::<()>::new(move |result| {
-            let frame = result.expect("エンコード結果の受信に失敗");
-            // Buffer の共有ロックが保持されていればここでデッドロックする
-            assert!(frame.buffer().get_size() > 0, "エンコード済みバッファが空");
-            assert!(
-                !frame.buffer().get_native().is_null(),
-                "エンコード済みバッファのポインタが null"
-            );
-            e.lock().unwrap().push(frame.into_parts().0);
+            let observation = match result {
+                Ok(frame) => {
+                    let size = frame.buffer().get_size();
+                    let native_ok = !frame.buffer().get_native().is_null();
+                    e.lock()
+                        .expect("エンコード結果の記録用 Mutex がポイズンされた")
+                        .push(frame.into_parts().0);
+                    Ok((size, native_ok))
+                }
+                Err(err) => Err(format!("エンコード結果の受信に失敗: {err}")),
+            };
+            eo.lock()
+                .expect("エンコード観察の記録用 Mutex がポイズンされた")
+                .push(observation);
         }),
     )
     .expect("エンコーダーの作成に失敗");
@@ -253,12 +274,31 @@ fn test_handlers_can_access_frames() {
             .expect("エンコードに失敗");
     }
     encoder.finish().expect("finish に失敗");
+
+    // ワーカーを join してハンドラーが保持する Arc を落とす
     drop(encoder);
 
-    let encoded_buffers = Arc::try_unwrap(encoded)
-        .expect("Arc の参照が残っている")
+    let encode_observations = Arc::try_unwrap(encode_observations)
+        .expect("エンコード観察の Arc の参照が残っている")
         .into_inner()
-        .unwrap();
+        .expect("エンコード観察の Mutex がポイズンされた");
+    assert_eq!(
+        encode_observations.len(),
+        2,
+        "エンコード結果の数が期待値と一致しない"
+    );
+    for (i, observation) in encode_observations.iter().enumerate() {
+        let (size, native_ok) = observation
+            .as_ref()
+            .unwrap_or_else(|err| panic!("エンコード結果 {i}: {err}"));
+        assert!(*size > 0, "エンコード済みバッファ {i} が空");
+        assert!(*native_ok, "エンコード済みバッファ {i} のポインタが null");
+    }
+
+    let encoded_buffers = Arc::try_unwrap(encoded)
+        .expect("エンコード結果の Arc の参照が残っている")
+        .into_inner()
+        .expect("エンコード結果の Mutex がポイズンされた");
     assert_eq!(
         encoded_buffers.len(),
         2,
@@ -266,31 +306,25 @@ fn test_handlers_can_access_frames() {
     );
 
     // デコードハンドラーは受け取った Surface のメソッドを呼ぶ
-    let decoded_count = Arc::new(AtomicUsize::new(0));
     let observations = Arc::new(Mutex::new(Vec::new()));
-    let d = Arc::clone(&decoded_count);
     let o = Arc::clone(&observations);
     let mut decoder = Decoder::new(
-        DecoderConfig {
-            codec: DecoderCodec::H264,
-        },
+        h264_test_decoder_config(),
         FnDecodeHandler::<()>::new(move |result| {
             let observation = match result {
-                Ok(frame) => {
-                    // Surface の共有ロックが保持されていればここでデッドロックする
-                    match frame.surface().get_plane(AMF_PLANE_TYPE::AMF_PLANE_Y) {
-                        Ok(plane) => Ok((
-                            plane.get_width(),
-                            plane.get_height(),
-                            !plane.get_native().is_null(),
-                        )),
-                        Err(err) => Err(format!("Y プレーンの取得に失敗: {err}")),
-                    }
-                }
+                Ok(frame) => match frame.surface().get_plane(AMF_PLANE_TYPE::AMF_PLANE_Y) {
+                    Ok(plane) => Ok((
+                        plane.get_width(),
+                        plane.get_height(),
+                        !plane.get_native().is_null(),
+                    )),
+                    Err(err) => Err(format!("Y プレーンの取得に失敗: {err}")),
+                },
                 Err(err) => Err(format!("デコード結果の受信に失敗: {err}")),
             };
-            o.lock().unwrap().push(observation);
-            d.fetch_add(1, Ordering::SeqCst);
+            o.lock()
+                .expect("デコード観察の記録用 Mutex がポイズンされた")
+                .push(observation);
         }),
     )
     .expect("デコーダーの作成に失敗");
@@ -299,9 +333,13 @@ fn test_handlers_can_access_frames() {
         decoder.decode(buffer, ()).expect("デコードに失敗");
     }
     decoder.finish().expect("finish に失敗");
+
+    // ワーカーを join してハンドラーが保持する Arc を落とす
     drop(decoder);
 
-    let observations = observations.lock().unwrap();
+    let observations = observations
+        .lock()
+        .expect("デコード観察用 Mutex がポイズンされた");
     assert_eq!(
         observations.len(),
         2,
@@ -321,39 +359,22 @@ fn test_handlers_can_access_frames() {
         );
         assert!(*native_ok, "デコード済みフレーム {i} の Y プレーンが null");
     }
-    assert_eq!(
-        decoded_count.load(Ordering::SeqCst),
-        2,
-        "デコード結果の数が期待値と一致しない"
-    );
 }
 
 /// `into_raw()` が AMF の参照を呼び出し元へ移し、`from_raw()` で再構築できることを確認する
 ///
-/// `into_raw()` が参照を解放してしまうと、再構築したハンドルの利用時に
-/// 解放済みのオブジェクトへアクセスすることになる。
+/// `Context` と `Component` は公開 API から安全に構築できないため、ここでは
+/// `Surface` / `Buffer` / `Plane` / `PropertyStorage` を対象にする。
 #[test]
 fn test_surface_into_raw_and_from_raw() {
     const WIDTH: usize = 320;
     const HEIGHT: usize = 240;
 
-    let mut config = EncoderConfig::new(
-        CodecConfig::H264(H264EncoderConfig {
-            profile: Some(H264Profile::High),
-        }),
-        WIDTH as u32,
-        HEIGHT as u32,
-        FrameFormat::Nv12,
-        30,
-        1,
-        RateControlMode::Cqp,
-    );
-    config.qpi = Some(26);
-    config.qpp = Some(28);
-    config.qpb = Some(30);
-
-    let encoder =
-        Encoder::new(config, FnEncodeHandler::<()>::new(|_| {})).expect("エンコーダーの作成に失敗");
+    let encoder = Encoder::new(
+        h264_test_encoder_config(),
+        FnEncodeHandler::<()>::new(|_| {}),
+    )
+    .expect("エンコーダーの作成に失敗");
     let surface = encoder.alloc_surface().expect("Surface の確保に失敗");
 
     // 参照の所有権を呼び出し元へ移す
@@ -368,7 +389,88 @@ fn test_surface_into_raw_and_from_raw() {
     assert_eq!(y_plane.get_width(), WIDTH as i32, "幅が一致しない");
     assert_eq!(y_plane.get_height(), HEIGHT as i32, "高さが一致しない");
 
-    // Drop で参照が解放される
+    // 子ハンドルと Surface を Encoder より先に破棄する
+    drop(y_plane);
+    drop(surface);
+    drop(encoder);
+}
+
+/// `Buffer` の `into_raw()` と `from_raw()` を確認する
+#[test]
+fn test_buffer_into_raw_and_from_raw() {
+    const BUFFER_SIZE: usize = 4096;
+
+    let decoder = Decoder::new(
+        h264_test_decoder_config(),
+        FnDecodeHandler::<()>::new(|_| {}),
+    )
+    .expect("デコーダーの作成に失敗");
+    let buffer = decoder
+        .alloc_buffer(BUFFER_SIZE)
+        .expect("Buffer の確保に失敗");
+
+    let ptr = buffer.into_raw();
+    assert!(!ptr.is_null(), "into_raw() が null を返した");
+
+    let buffer = unsafe { Buffer::from_raw(ptr) }.expect("Buffer の再構築に失敗");
+    assert_eq!(buffer.get_size(), BUFFER_SIZE, "サイズが一致しない");
+    assert!(!buffer.get_native().is_null(), "バッファが null");
+
+    // Buffer を Decoder より先に破棄する
+    drop(buffer);
+    drop(decoder);
+}
+
+/// `Plane` の `into_raw()` と `from_raw()` を確認する
+#[test]
+fn test_plane_into_raw_and_from_raw() {
+    let encoder = Encoder::new(
+        h264_test_encoder_config(),
+        FnEncodeHandler::<()>::new(|_| {}),
+    )
+    .expect("エンコーダーの作成に失敗");
+    let surface = encoder.alloc_surface().expect("Surface の確保に失敗");
+    let plane = surface
+        .get_plane(AMF_PLANE_TYPE::AMF_PLANE_Y)
+        .expect("Y プレーンの取得に失敗");
+
+    let ptr = plane.into_raw();
+    assert!(!ptr.is_null(), "into_raw() が null を返した");
+
+    let plane = unsafe { Plane::from_raw(ptr) }.expect("Plane の再構築に失敗");
+    assert_eq!(plane.get_width(), 320, "幅が一致しない");
+    assert_eq!(plane.get_height(), 240, "高さが一致しない");
+
+    // Plane を Surface より先に、Surface を Encoder より先に破棄する
+    drop(plane);
+    drop(surface);
+    drop(encoder);
+}
+
+/// `PropertyStorage` の `into_raw()` と `from_raw()` を確認する
+#[test]
+fn test_property_storage_into_raw_and_from_raw() {
+    let encoder = Encoder::new(
+        h264_test_encoder_config(),
+        FnEncodeHandler::<()>::new(|_| {}),
+    )
+    .expect("エンコーダーの作成に失敗");
+    let surface = encoder.alloc_surface().expect("Surface の確保に失敗");
+    let property_storage = surface
+        .property_storage()
+        .expect("PropertyStorage の取得に失敗");
+
+    let ptr = property_storage.into_raw();
+    assert!(!ptr.is_null(), "into_raw() が null を返した");
+
+    let property_storage =
+        unsafe { PropertyStorage::from_raw(ptr) }.expect("PropertyStorage の再構築に失敗");
+    property_storage
+        .set_property_int64("AmfRustIntoRawTestProperty", 1)
+        .expect("プロパティの設定に失敗");
+
+    // PropertyStorage を Surface より先に、Surface を Encoder より先に破棄する
+    drop(property_storage);
     drop(surface);
     drop(encoder);
 }

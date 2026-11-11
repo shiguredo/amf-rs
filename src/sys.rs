@@ -71,8 +71,6 @@ pub const IID_AMF_CONTEXT1: AMFGuid = AMFGuid {
 // フィールド名は bindgen の生成結果に依存する。
 // AMF SDK の Variant.h では AMFVariantStruct の共用体は
 // 匿名共用体または名前付きフィールドで定義される。
-// ビルドエラーが発生した場合、OUT_DIR/bindings.rs の
-// AMFVariantStruct 定義を確認して修正すること。
 // ---------------------------------------------------------------------------
 
 /// bindgen が生成する匿名共用体の型別名

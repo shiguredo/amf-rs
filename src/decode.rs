@@ -253,7 +253,7 @@ impl<H: DecodeHandler> Decoder<H> {
     }
 }
 
-// 安全性:
+// Safety:
 // Drop 内でのみ component/context を解放する。
 // ワーカースレッドは Drop より先に停止させる。
 impl<H: DecodeHandler> Drop for Decoder<H> {
