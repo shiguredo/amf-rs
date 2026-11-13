@@ -168,6 +168,12 @@ for frame in decoded.lock().unwrap().iter() {
 }
 ```
 
+`decode()` には 1 フレーム分のビットストリームを格納した `Buffer` を渡します。
+B フレームを含むストリームでは出力順が入力順と異なりますが、`decode()` に渡した
+`user_data` は対応する出力フレームに付きます。`decode()` は入力 `Buffer` に設定した
+PTS を対応する出力 `Surface` に引き継ぎます。PTS を設定していない場合は 0 になります。
+B フレームを含むストリームでは出力 `Surface` の PTS も入力順には並びません。
+
 ### コーデック対応状況の確認
 
 ```rust

@@ -21,6 +21,14 @@
   - `Encoder::new` / `Decoder::new` が `Context` を受け取るように変更する
   - `amf` の各オブジェクトにコンテキストを取得する `context` 関数を追加する
   - @melpon
+- [ADD] `amf::Buffer::set_pts` と `amf::Surface::get_pts` を追加する
+  - @melpon
+- [FIX] `Decoder::decode` の `user_data` が B フレームを含むストリームで誤ったフレームに付く問題を修正する
+  - 入力 `Buffer` に一意な PTS を設定し、出力 `Surface` の PTS で `user_data` を引き当てる
+  - 対応付けに使った PTS は、通知前に呼び出し元が設定した値へ戻す
+  - `finish()` を呼び出した後に `decode()` を呼ぶとエラーを返す
+  - `finish()` はワーカーの完了まで待つ
+  - @melpon
 - [FIX] `amf` モジュールで `Clone` したハンドル経由のメソッド呼び出しがデータ競合する問題を修正し、コンポーネントに投入するオブジェクトが共有されていないことを確認する
   - @melpon
 - [FIX] `AmfLibrary` / `amf::Context` / `Component::init` の AMF 呼び出しがデータ競合し、複数スレッドから Encoder / Decoder を並列に初期化した際に SIGSEGV する問題を修正する
