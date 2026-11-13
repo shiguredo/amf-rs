@@ -18,6 +18,7 @@ AMD GPU 向けハードウェアアクセラレーションによるビデオエ
 - **エンコード中の動的プロパティ再設定** (`Encoder::reconfigure`)
 - **CQP / CBR / VBR / LCVBR / QVBR / HQVBR / HQCBR** レート制御モード
 - **ハンドラーベースのコールバック**設計: エンコード/デコード結果はワーカースレッドから `EncodeHandler` / `DecodeHandler` に通知される
+- **AMFContext の明示的な管理**: 利用者が任意の個数の Context を作成し、`Context` を Clone して Encoder / Decoder に渡す。同じ Context ならデコード結果の Surface をそのままエンコードできる
 - ビルド時に GitHub から AMF ヘッダーを自動取得 (`bindgen` 経由)
 
 ## バージョン情報
@@ -43,13 +44,18 @@ AMD GPU 向けハードウェアアクセラレーションによるビデオエ
 
 | 型/関数 | 説明 | 主要 API |
 |--------|------|---------|
-| `AmfLibrary` | AMF ランタイムライブラリのプロセスシングルトン | `instance()`, `query_version() -> Result<(u16, u16, u16, u16), Error>` |
-| `Encoder<H: EncodeHandler>` | AMF ハードウェアエンコーダー | `new(EncoderConfig, H)`, `alloc_surface()`, `encode(Surface, &EncodeOptions, H::UserData)`, `reconfigure(ReconfigureParams)`, `finish()` |
-| `Decoder<H: DecodeHandler>` | AMF ハードウェアデコーダー | `new(DecoderConfig, H)`, `alloc_buffer(size)`, `decode(Buffer, H::UserData)`, `finish()` |
-| `supported_codecs() -> Vec<CodecInfo>` | このバックエンドで利用可能なコーデック情報の一覧を返す (ランタイムがロードできない場合は全コーデック非対応を返す) | - |
+| `AmfLibrary` | AMF ランタイムライブラリのプロセスシングルトン | `instance()`, `query_version() -> Result<(u16, u16, u16, u16), Error>`, `create_context() -> Result<Context, Error>` |
+| `Encoder<H: EncodeHandler>` | AMF ハードウェアエンコーダー | `new(Context, EncoderConfig, H)`, `context()`, `alloc_surface()`, `encode(Surface, &EncodeOptions, H::UserData)`, `reconfigure(ReconfigureParams)`, `finish()` |
+| `Decoder<H: DecodeHandler>` | AMF ハードウェアデコーダー | `new(Context, DecoderConfig, H)`, `context()`, `alloc_buffer(size)`, `decode(Buffer, H::UserData)`, `finish()` |
+| `supported_codecs() -> Vec<CodecInfo>` | このバックエンドで利用可能なコーデック情報の一覧を返す (ランタイムのロードまたは判定用 Context の初期化に失敗した場合は全コーデック非対応を返す) | - |
 | `BUILD_VERSION` | ビルド時の AMF バージョン文字列 (`&'static str`) | - |
 
 `Encoder` / `Decoder` は内部でワーカースレッドを起動し、`encode()` / `decode()` で投入したフレームの結果は `EncodeHandler::on_encoded` / `DecodeHandler::on_decoded` に非同期で通知される。`finish()` は残りのフレームをハンドラーが受け取り終わるまで待機する。
+
+`AmfLibrary::create_context()` は呼び出しごとに新しい `Context` を作成する。
+同じ `Context` を Clone して Encoder と Decoder に渡すと、Decoder の `on_decoded` で受け取った
+`Surface` をそのまま Encoder の `encode()` に投入できる。別の `Context` を渡すこともできるが、
+`Surface` / `Buffer` は同じ Context のコンポーネントにしか投入できない。
 
 ### エンコーダー設定型
 
@@ -126,16 +132,31 @@ AMD GPU 向けハードウェアアクセラレーションによるビデオエ
 
 | 型 | 説明 | 主要メソッド |
 |----|------|-------------|
-| `Context` | `AMFContext` のラッパー | `terminate()`, `alloc_surface(memory_type, format, width, height)`, `alloc_buffer(memory_type, size)`, `as_ptr()`, `into_raw()` |
-| `Component` | `AMFComponent` のラッパー | `init(format, width, height)`, `re_init(width, height)`, `terminate()`, `drain()`, `flush()`, `unsafe submit_input(*mut AMFData)`, `unsafe query_output(*mut *mut AMFData)`, `get_context()`, `property_storage() -> Result<PropertyStorage, Error>` |
-| `Surface` | `AMFSurface` のラッパー | `set_pts(amf_pts)`, `set_duration(amf_pts)`, `get_plane(AMF_PLANE_TYPE) -> Result<Plane, Error>`, `get_plane_at(index)`, `convert(AMF_MEMORY_TYPE)`, `property_storage()`, `as_ptr()`, `into_raw()` |
-| `Buffer` | `AMFBuffer` のラッパー | `get_native() -> *mut c_void`, `get_size() -> amf_size`, `get_pts() -> amf_pts`, `get_duration() -> amf_pts`, `unsafe get_property(name_w, *mut AMFVariantStruct)`, `as_ptr()`, `into_raw()` |
-| `Plane` | `AMFPlane` のラッパー | `get_native() -> *mut c_void`, `get_hpitch() -> amf_int32`, `get_vpitch() -> amf_int32`, `get_width() -> amf_int32`, `get_height() -> amf_int32`, `as_ptr()`, `into_raw()` |
-| `PropertyStorage` | `AMFPropertyStorage` のラッパー | `set_property_int64(name, value)`, `set_property_size(name, width, height)`, `set_property_rate(name, num, den)`, `unsafe set_property(name_w, AMFVariantStruct)`, `as_ptr()`, `into_raw()` |
+| `Context` | `AMFContext` の参照カウントを管理する Clone 可能なハンドル | `alloc_surface(memory_type, format, width, height)`, `alloc_buffer(memory_type, size)`, `as_ptr()` |
+| `Component` | `AMFComponent` のラッパー | `init(format, width, height)`, `re_init(width, height)`, `terminate()`, `drain()`, `flush()`, `unsafe submit_input(*mut AMFData)`, `unsafe query_output(*mut *mut AMFData)`, `get_context()`, `context()`, `property_storage() -> Result<PropertyStorage, Error>` |
+| `Surface` | `AMFSurface` のラッパー | `context()`, `set_pts(amf_pts)`, `set_duration(amf_pts)`, `get_plane(AMF_PLANE_TYPE) -> Result<Plane, Error>`, `get_plane_at(index)`, `convert(AMF_MEMORY_TYPE)`, `property_storage()`, `as_ptr()`, `into_raw()` |
+| `Buffer` | `AMFBuffer` のラッパー | `context()`, `get_native() -> *mut c_void`, `get_size() -> amf_size`, `get_pts() -> amf_pts`, `get_duration() -> amf_pts`, `unsafe get_property(name_w, *mut AMFVariantStruct)`, `as_ptr()`, `into_raw()` |
+| `Plane` | `AMFPlane` のラッパー | `context()`, `get_native() -> *mut c_void`, `get_hpitch() -> amf_int32`, `get_vpitch() -> amf_int32`, `get_width() -> amf_int32`, `get_height() -> amf_int32`, `as_ptr()`, `into_raw()` |
+| `PropertyStorage` | `AMFPropertyStorage` のラッパー | `context()`, `set_property_int64(name, value)`, `set_property_size(name, width, height)`, `set_property_rate(name, num, den)`, `unsafe set_property(name_w, AMFVariantStruct)`, `as_ptr()`, `into_raw()` |
 
-全ラッパーは `Clone` 実装で `Acquire` を呼び、`Drop` 実装で `Release` を呼ぶ。`Surface` / `Buffer` / `Plane` / `PropertyStorage` は `unsafe from_raw(ptr)` (Acquire なし) と `unsafe from_raw_acquired(ptr)` (Acquire 付き) の 2 系統のコンストラクタを持つ。`Context` / `Component` は `AmfLibrary` の内部でのみ作成し、公開の raw コンストラクタを持たない。`into_raw()` は所有権を放棄して `Release` を呼ばずに生ポインタを返す。
+`Context::alloc_surface` / `alloc_buffer` は `&self` に対して呼び出す。`Context` の `Clone` は
+`AMFContext::Acquire`、`Drop` は `AMFContext::Release` を呼ぶ。最後の参照が解放されたときに
+AMFContext が破棄され、そのデストラクタが `Terminate` を呼ぶ。`Context` は `PartialEq` / `Eq` を
+実装しており、同じ AMFContext を指すかを比較できる。各ハンドルは `context()` で保持する
+`Context` を取得できる。
+`Surface` / `Buffer` / `Plane` / `PropertyStorage` / `Component` は `Clone` 実装で `Acquire` を呼び、
+`Drop` 実装で `Release` を呼ぶ。`Surface` / `Buffer` / `Plane` / `PropertyStorage` は
+`unsafe from_raw(ptr, Context)` (Acquire なし) と `unsafe from_raw_acquired(ptr, Context)` (Acquire 付き) の
+2 系統のコンストラクタを持つ。`Component` は `AmfLibrary` の内部でのみ作成し、公開の raw
+コンストラクタを持たない。`into_raw()` は所有権を放棄して `Release` を呼ばずに生ポインタを返す。
+生ポインタを利用する間は、対応する `Context` の Clone を保持すること。
 
-`Clone` したハンドルは同じ AMF オブジェクトを指す。コンポーネントに投入する `Surface` / `Buffer` は、投入前に他のハンドルを破棄する必要がある。`Encoder::encode` / `Decoder::decode` は投入前に他のハンドルと共有されていないことを確認し、共有されている場合はエラーを返す。
+`Surface` / `Buffer` / `Plane` / `PropertyStorage` / `Component` は作成元の `Context` の Clone を保持するため、これらのハンドルが生きている限り `Context` は破棄されない。
+
+`Clone` したハンドルは同じ AMF オブジェクトを指す。コンポーネントに投入する `Surface` / `Buffer` は、
+投入前に他のハンドルを破棄する必要がある。`Encoder::encode` / `Decoder::decode` は、投入する
+ハンドルが自分と同じ Context のものであり、かつ他のハンドルと共有されていないことを確認し、
+条件を満たさない場合はエラーを返す。
 
 ## エラー型
 
@@ -151,6 +172,11 @@ AMD GPU 向けハードウェアアクセラレーションによるビデオエ
 
 主な `AMF_RESULT` バリアント (`ffi::AMF_RESULT` で公開): `AMF_OK`, `AMF_FAIL`, `AMF_INVALID_ARG`, `AMF_OUT_OF_MEMORY`, `AMF_NOT_SUPPORTED`, `AMF_WRONG_STATE`, `AMF_NO_DEVICE`, `AMF_EOF`, `AMF_REPEAT`, `AMF_INPUT_FULL`, `AMF_NEED_MORE_INPUT`, `AMF_DECODER_NO_FREE_SURFACES`, `AMF_VULKAN_FAILED` 等。
 
+`Encoder::encode` / `Decoder::decode` は、投入する `Surface` / `Buffer` が別の Context のもの、
+または他のハンドルと共有されている場合にエラーを返す。メッセージにはそれぞれ
+`does not belong to the encoder's AMF context` / `does not belong to the decoder's AMF context`、
+`shared with other handles` が含まれる。
+
 ## FFI モジュール
 
 `ffi` モジュールは内部 `sys` モジュールの再公開で、`#[doc(hidden)]` 属性が付いている。semver 保証の対象外。`AMFSurface`, `AMFBuffer`, `AMF_SURFACE_FORMAT`, `AMF_PLANE_TYPE`, `AMF_MEMORY_TYPE` 等の `bindgen` 生成型と AMF プロパティ文字列定数 (`sys::str::*`) を含む。
@@ -163,9 +189,11 @@ AMD GPU 向けハードウェアアクセラレーションによるビデオエ
 use std::sync::{Arc, Mutex};
 
 use shiguredo_amf::{
-    CodecConfig, EncodeOptions, EncodedFrame, Encoder, EncoderConfig, FrameFormat,
+    AmfLibrary, CodecConfig, EncodeOptions, EncodedFrame, Encoder, EncoderConfig, FrameFormat,
     H264EncoderConfig, H264Profile, RateControlMode, ReconfigureParams, frame_type,
 };
+
+let context = AmfLibrary::instance().create_context()?;
 
 let mut config = EncoderConfig::new(
     CodecConfig::H264(H264EncoderConfig {
@@ -183,7 +211,7 @@ config.target_kbps = Some(5_000);
 // クロージャをハンドラーにラップする
 let encoded = Arc::new(Mutex::new(Vec::new()));
 let e = encoded.clone();
-let mut encoder = Encoder::new(config, move |frame: EncodedFrame<()>| {
+let mut encoder = Encoder::new(context.clone(), config, move |frame: EncodedFrame<()>| {
     e.lock().unwrap().push(frame);
 })?;
 
@@ -205,17 +233,21 @@ for frame in encoded.lock().unwrap().iter() {
 
 `Encoder::new` に渡すクロージャは `FnMut(Result<EncodedFrame<T>, E>) + Send + 'static` であれば暗黙的に `FnEncodeHandler` 相当として扱える。`UserData` 型 (上記の `()` の位置) はフレーム単位の任意ユーザーデータで、`encode()` で渡した値が `EncodedFrame::user_data()` から取り出せる。
 
+`Encoder::new` の第 1 引数には `AmfLibrary::create_context()` で作成した `Context` を渡す。同じ `Context` を Clone して共有する `Decoder` の出力 `Surface` を、そのまま `encode()` に投入できる。
+
 ### デコード
 
 ```rust
 use std::sync::{Arc, Mutex};
 
-use shiguredo_amf::{DecodedFrame, Decoder, DecoderCodec, DecoderConfig};
+use shiguredo_amf::{AmfLibrary, DecodedFrame, Decoder, DecoderCodec, DecoderConfig};
+
+let context = AmfLibrary::instance().create_context()?;
 
 let config = DecoderConfig { codec: DecoderCodec::H264 };
 let decoded = Arc::new(Mutex::new(Vec::new()));
 let d = decoded.clone();
-let mut decoder = Decoder::new(config, move |frame: DecodedFrame<()>| {
+let mut decoder = Decoder::new(context.clone(), config, move |frame: DecodedFrame<()>| {
     d.lock().unwrap().push(frame);
 })?;
 
@@ -236,6 +268,8 @@ for frame in decoded.lock().unwrap().iter() {
 ```
 
 デコーダーは初期化時に解像度 `0x0` で AMF コンポーネントを Init するため、ビットストリームのシーケンスヘッダーから解像度が自動検出される。出力 `Surface` は内部で `convert(AMF_MEMORY_HOST)` 済みのため、`get_plane()` 経由でホストメモリから直接読み出せる。
+
+`Decoder::new` の第 1 引数には `Context` を渡す。同じ `Context` を Clone して `Encoder::new` にも渡すと、デコード結果の `Surface` をコピーせずにエンコードできる。
 
 ### エンコード中の動的プロパティ再設定
 
@@ -389,12 +423,13 @@ H.264 / HEVC / AV1 で AMF SDK 内部の enum 値順序が異なるが、`shigur
 
 ## スレッド設計
 
-- `AmfLibrary` はプロセスシングルトン (`LazyLock<AmfLibrary>`)。AMF ランタイムを遅延初期化する。
+- `AmfLibrary` はプロセスシングルトン (`LazyLock<AmfLibrary>`)。AMF ランタイムを遅延初期化し、`create_context()` で新しい `Context` を作成する。
+- `Context` は `AMFContext` の参照カウントを直接管理する Clone 可能なハンドルである。`Clone` は `AMFContext::Acquire`、`Drop` は `AMFContext::Release` を呼ぶ。最後の参照が解放されたときに AMFContext のデストラクタが `Terminate` を呼ぶ。
 - `Encoder<H>` / `Decoder<H>` は内部で `amf-encoder-worker` / `amf-decoder-worker` という名前のワーカースレッドを起動し、`mpsc::channel` で `Submit(UserData)` / `Finish` コマンドを受け取る。
 - `encode()` / `decode()` はメインスレッドから `SubmitInput` を呼び (必要に応じて `AMF_INPUT_FULL` / `AMF_REPEAT` / `AMF_DECODER_NO_FREE_SURFACES` で 1ms スリープしながら最大 100 回までリトライ)、その後ワーカーへ `UserData` を送る。
 - ワーカーは `pending` キューにマッチするように `QueryOutput` の結果を保持し、対応が取れたところで `on_encoded` / `on_decoded` を呼ぶ。
 - `finish()` は `Drain` を呼んだあと `Finish(sync_channel)` をワーカーに送り、最大 5 秒で完了を待つ。
-- `Drop` 実装は `cmd_tx` を落としてワーカーを停止させ、`Component::terminate()` / `Context::terminate()` を呼んでから AMF オブジェクトを解放する。
+- `Drop` 実装は `cmd_tx` を落としてワーカーを停止させ、`Component::terminate()` を呼んでから AMF オブジェクトを解放する。`Context` は保持している `Context` の Clone がなくなった時点で破棄される。
 
 ## 公開モジュール
 

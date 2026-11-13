@@ -111,13 +111,13 @@ pub enum Av1EncodingProfile {
 
 /// このバックエンドで利用可能なコーデック情報の一覧を返す
 ///
-/// AMF ランタイムがロードできない場合は全コーデック非対応を返す。
+/// AMF ランタイムを初期化できない場合は全コーデック非対応を返す。
 pub fn supported_codecs() -> Vec<CodecInfo> {
     let codecs = VideoCodecType::all();
 
-    let probe = match ProbeContext::new() {
-        Some(p) => p,
-        None => {
+    let context = match AmfLibrary::instance().create_context() {
+        Ok(context) => context,
+        Err(_) => {
             return codecs.iter().map(|&codec| not_supported(codec)).collect();
         }
     };
@@ -125,8 +125,8 @@ pub fn supported_codecs() -> Vec<CodecInfo> {
     codecs
         .iter()
         .map(|&codec| {
-            let enc_supported = probe.try_create_encoder(codec);
-            let dec_supported = probe.try_create_decoder(codec);
+            let enc_supported = try_create_encoder(&context, codec);
+            let dec_supported = try_create_decoder(&context, codec);
 
             CodecInfo {
                 codec,
@@ -211,58 +211,29 @@ fn encoding_info(codec: VideoCodecType) -> EncodingInfo {
     }
 }
 
-/// コーデック対応判定用の内部コンテキスト
-///
-/// Drop で AMFContext を安全に解放する。
-struct ProbeContext {
-    context: Context,
+/// 指定コーデックのエンコーダーを作成できるかを返す
+fn try_create_encoder(context: &Context, codec: VideoCodecType) -> bool {
+    let component_id = match codec {
+        VideoCodecType::H264 => sys::str::AMFVideoEncoderVCE_AVC,
+        VideoCodecType::Hevc => sys::str::AMFVideoEncoder_HEVC,
+        VideoCodecType::Av1 => sys::str::AMFVideoEncoder_AV1,
+    };
+    try_create_component(context, component_id)
 }
 
-impl ProbeContext {
-    /// AMF ランタイムをロードして判定用コンテキストを作成する
-    ///
-    /// ロードまたは Vulkan 初期化に失敗した場合は None を返す。
-    fn new() -> Option<Self> {
-        let lib = AmfLibrary::instance();
-        let context = lib.create_context().ok()?;
-        unsafe { context.init_vulkan(std::ptr::null_mut()) }.ok()?;
-        Some(Self { context })
-    }
-
-    /// エンコーダーの CreateComponent を試みて対応状況を返す
-    fn try_create_encoder(&self, codec: VideoCodecType) -> bool {
-        let component_id = match codec {
-            VideoCodecType::H264 => sys::str::AMFVideoEncoderVCE_AVC,
-            VideoCodecType::Hevc => sys::str::AMFVideoEncoder_HEVC,
-            VideoCodecType::Av1 => sys::str::AMFVideoEncoder_AV1,
-        };
-        self.try_create_component(component_id)
-    }
-
-    /// デコーダーの CreateComponent を試みて対応状況を返す
-    fn try_create_decoder(&self, codec: VideoCodecType) -> bool {
-        let component_id = match codec {
-            VideoCodecType::H264 => sys::str::AMFVideoDecoderUVD_H264_AVC,
-            VideoCodecType::Hevc => sys::str::AMFVideoDecoderHW_H265_HEVC,
-            VideoCodecType::Av1 => sys::str::AMFVideoDecoderHW_AV1,
-        };
-        self.try_create_component(component_id)
-    }
-
-    /// 指定のコンポーネント ID で CreateComponent を試みる
-    ///
-    /// 成功した場合はコンポーネントを即座に解放して true を返す。
-    fn try_create_component(&self, component_id: &str) -> bool {
-        let lib = AmfLibrary::instance();
-        // エンコーダーは Init なしでは Terminate できないためスキップする。
-        // デコーダーは Init(NV12, 0, 0) で初期化できるが、probe 目的では不要。
-        // CreateComponent が成功すればそのコーデックは対応している。
-        lib.create_component(&self.context, component_id).is_ok()
-    }
+/// 指定コーデックのデコーダーを作成できるかを返す
+fn try_create_decoder(context: &Context, codec: VideoCodecType) -> bool {
+    let component_id = match codec {
+        VideoCodecType::H264 => sys::str::AMFVideoDecoderUVD_H264_AVC,
+        VideoCodecType::Hevc => sys::str::AMFVideoDecoderHW_H265_HEVC,
+        VideoCodecType::Av1 => sys::str::AMFVideoDecoderHW_AV1,
+    };
+    try_create_component(context, component_id)
 }
 
-impl Drop for ProbeContext {
-    fn drop(&mut self) {
-        let _ = self.context.terminate();
-    }
+/// 指定のコンポーネント ID のコンポーネントを作成できるかを返す
+fn try_create_component(context: &Context, component_id: &str) -> bool {
+    let lib = AmfLibrary::instance();
+    // 対応判定にはコンポーネントの作成だけで十分なため、Init は呼ばない。
+    lib.create_component(context, component_id).is_ok()
 }

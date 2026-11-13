@@ -1,10 +1,18 @@
 //! テスト用の共通ヘルパー
 
-use shiguredo_amf::amf::Surface;
+use shiguredo_amf::AmfLibrary;
+use shiguredo_amf::amf::{Context, Surface};
 use shiguredo_amf::ffi::AMF_PLANE_TYPE;
 use shiguredo_amf::{
     CodecConfig, EncoderConfig, FrameFormat, H264EncoderConfig, H264Profile, RateControlMode,
 };
+
+/// テスト用の Context を作成する
+pub fn create_context() -> Context {
+    AmfLibrary::instance()
+        .create_context()
+        .expect("Context の作成に失敗")
+}
 
 /// テスト用の H.264 CBR エンコーダー設定を返す
 pub fn h264_cbr_test_encoder_config() -> EncoderConfig {

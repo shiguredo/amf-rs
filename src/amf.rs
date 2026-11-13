@@ -9,7 +9,9 @@
 //!
 //! `as_ptr` が返すポインタは、そのハンドルが生存する間のみ有効である。
 //! `into_raw` は所有権を放棄して生ポインタを返し、`Release` は呼び出し元が行う。
-//! 所有権を放棄したハンドルの `Drop` は `Release` を呼ばない。
+//! 所有権を放棄したハンドルの `Drop` は `Release` を呼ばない。`into_raw` は
+//! ハンドルが保持していた `Context` も手放すため、生ポインタを利用する間は
+//! 呼び出し元が `Context` の Clone を保持すること。
 //! `as_ptr` / `into_raw` / `get_native` が返す生ポインタ経由の AMF 呼び出しや
 //! メモリアクセスは、呼び出し元の責任である。
 //!
@@ -108,6 +110,7 @@ pub struct PropertyStorage {
     ptr: *mut sys::AMFPropertyStorage,
     f: PropertyStorageFuncs,
     state: Arc<AmfObjectState>,
+    context: Context,
 }
 
 unsafe impl Send for PropertyStorage {}
@@ -122,6 +125,7 @@ impl PropertyStorage {
         ptr: *mut sys::AMFPropertyStorage,
         acquire: bool,
         state: Arc<AmfObjectState>,
+        context: Context,
     ) -> Result<Self, Error> {
         let vtbl = unsafe { &*(*ptr).pVtbl };
         let f = PropertyStorageFuncs {
@@ -133,23 +137,39 @@ impl PropertyStorage {
             unsafe { (f.acquire)(ptr) };
         }
         state.inc();
-        Ok(Self { ptr, f, state })
+        Ok(Self {
+            ptr,
+            f,
+            state,
+            context,
+        })
     }
 
     /// 生ポインタから PropertyStorage を作成する (Acquire なし)
     ///
     /// # Safety
-    /// `ptr` は有効な `AMFPropertyStorage` を指すこと。
-    pub unsafe fn from_raw(ptr: *mut sys::AMFPropertyStorage) -> Result<Self, Error> {
-        unsafe { Self::from_raw_with_acquire(ptr, false, AmfObjectState::new()) }
+    /// `ptr` は `context` に属する有効な `AMFPropertyStorage` を指すこと。
+    pub unsafe fn from_raw(
+        ptr: *mut sys::AMFPropertyStorage,
+        context: Context,
+    ) -> Result<Self, Error> {
+        unsafe { Self::from_raw_with_acquire(ptr, false, AmfObjectState::new(), context) }
     }
 
     /// 生ポインタから Acquire 付きで PropertyStorage を作成する
     ///
     /// # Safety
-    /// `ptr` は有効な `AMFPropertyStorage` を指すこと。
-    pub unsafe fn from_raw_acquired(ptr: *mut sys::AMFPropertyStorage) -> Result<Self, Error> {
-        unsafe { Self::from_raw_with_acquire(ptr, true, AmfObjectState::new()) }
+    /// `ptr` は `context` に属する有効な `AMFPropertyStorage` を指すこと。
+    pub unsafe fn from_raw_acquired(
+        ptr: *mut sys::AMFPropertyStorage,
+        context: Context,
+    ) -> Result<Self, Error> {
+        unsafe { Self::from_raw_with_acquire(ptr, true, AmfObjectState::new(), context) }
+    }
+
+    /// このハンドルが保持する `Context` を返す
+    pub fn context(&self) -> Context {
+        self.context.clone()
     }
 
     /// 生ポインタを返す。
@@ -217,6 +237,7 @@ impl Clone for PropertyStorage {
             ptr: self.ptr,
             f: self.f,
             state: Arc::clone(&self.state),
+            context: self.context.clone(),
         }
     }
 }
@@ -258,6 +279,7 @@ pub struct Surface {
     ptr: *mut sys::AMFSurface,
     f: SurfaceFuncs,
     state: Arc<AmfObjectState>,
+    context: Context,
 }
 
 unsafe impl Send for Surface {}
@@ -272,6 +294,7 @@ impl Surface {
         ptr: *mut sys::AMFSurface,
         acquire: bool,
         state: Arc<AmfObjectState>,
+        context: Context,
     ) -> Result<Self, Error> {
         let vtbl = unsafe { &*(*ptr).pVtbl };
         let f = SurfaceFuncs {
@@ -287,28 +310,41 @@ impl Surface {
             unsafe { (f.acquire)(ptr) };
         }
         state.inc();
-        Ok(Self { ptr, f, state })
+        Ok(Self {
+            ptr,
+            f,
+            state,
+            context,
+        })
     }
 
     /// 生ポインタから Surface を作成する (Acquire なし)
     ///
     /// # Safety
-    /// `ptr` は有効な `AMFSurface` を指すこと。
-    pub unsafe fn from_raw(ptr: *mut sys::AMFSurface) -> Result<Self, Error> {
-        unsafe { Self::from_raw_with_acquire(ptr, false, AmfObjectState::new()) }
+    /// `ptr` は `context` から取得した有効な `AMFSurface` を指すこと。
+    pub unsafe fn from_raw(ptr: *mut sys::AMFSurface, context: Context) -> Result<Self, Error> {
+        unsafe { Self::from_raw_with_acquire(ptr, false, AmfObjectState::new(), context) }
     }
 
     /// 生ポインタから Acquire 付きで Surface を作成する
     ///
     /// # Safety
-    /// `ptr` は有効な `AMFSurface` を指すこと。
-    pub unsafe fn from_raw_acquired(ptr: *mut sys::AMFSurface) -> Result<Self, Error> {
-        unsafe { Self::from_raw_with_acquire(ptr, true, AmfObjectState::new()) }
+    /// `ptr` は `context` から取得した有効な `AMFSurface` を指すこと。
+    pub unsafe fn from_raw_acquired(
+        ptr: *mut sys::AMFSurface,
+        context: Context,
+    ) -> Result<Self, Error> {
+        unsafe { Self::from_raw_with_acquire(ptr, true, AmfObjectState::new(), context) }
     }
 
     /// このハンドルが他のハンドルと共有されているかを返す
     pub(crate) fn is_shared(&self) -> bool {
         self.state.is_shared()
+    }
+
+    /// このハンドルが保持する `Context` を返す
+    pub fn context(&self) -> Context {
+        self.context.clone()
     }
 
     /// 生ポインタを返す。
@@ -342,7 +378,9 @@ impl Surface {
         if plane.is_null() {
             return Err(Error::new_custom("Surface::get_plane", "plane is null"));
         }
-        unsafe { Plane::from_raw_with_acquire(plane, true, Arc::clone(&self.state)) }
+        unsafe {
+            Plane::from_raw_with_acquire(plane, true, Arc::clone(&self.state), self.context.clone())
+        }
     }
 
     /// インデックスでプレーンを取得する
@@ -352,7 +390,9 @@ impl Surface {
         if plane.is_null() {
             return Err(Error::new_custom("Surface::get_plane_at", "plane is null"));
         }
-        unsafe { Plane::from_raw_with_acquire(plane, true, Arc::clone(&self.state)) }
+        unsafe {
+            Plane::from_raw_with_acquire(plane, true, Arc::clone(&self.state), self.context.clone())
+        }
     }
 
     /// GPU → Host メモリ変換
@@ -368,6 +408,7 @@ impl Surface {
                 self.ptr as *mut sys::AMFPropertyStorage,
                 true,
                 Arc::clone(&self.state),
+                self.context.clone(),
             )
         }
     }
@@ -383,6 +424,7 @@ impl Clone for Surface {
             ptr: self.ptr,
             f: self.f,
             state: Arc::clone(&self.state),
+            context: self.context.clone(),
         }
     }
 }
@@ -424,6 +466,7 @@ pub struct Buffer {
     ptr: *mut sys::AMFBuffer,
     f: BufferFuncs,
     state: Arc<AmfObjectState>,
+    context: Context,
 }
 
 unsafe impl Send for Buffer {}
@@ -438,6 +481,7 @@ impl Buffer {
         ptr: *mut sys::AMFBuffer,
         acquire: bool,
         state: Arc<AmfObjectState>,
+        context: Context,
     ) -> Result<Self, Error> {
         let vtbl = unsafe { &*(*ptr).pVtbl };
         let f = BufferFuncs {
@@ -453,28 +497,41 @@ impl Buffer {
             unsafe { (f.acquire)(ptr) };
         }
         state.inc();
-        Ok(Self { ptr, f, state })
+        Ok(Self {
+            ptr,
+            f,
+            state,
+            context,
+        })
     }
 
     /// 生ポインタから Buffer を作成する (Acquire なし)
     ///
     /// # Safety
-    /// `ptr` は有効な `AMFBuffer` を指すこと。
-    pub unsafe fn from_raw(ptr: *mut sys::AMFBuffer) -> Result<Self, Error> {
-        unsafe { Self::from_raw_with_acquire(ptr, false, AmfObjectState::new()) }
+    /// `ptr` は `context` から取得した有効な `AMFBuffer` を指すこと。
+    pub unsafe fn from_raw(ptr: *mut sys::AMFBuffer, context: Context) -> Result<Self, Error> {
+        unsafe { Self::from_raw_with_acquire(ptr, false, AmfObjectState::new(), context) }
     }
 
     /// 生ポインタから Acquire 付きで Buffer を作成する
     ///
     /// # Safety
-    /// `ptr` は有効な `AMFBuffer` を指すこと。
-    pub unsafe fn from_raw_acquired(ptr: *mut sys::AMFBuffer) -> Result<Self, Error> {
-        unsafe { Self::from_raw_with_acquire(ptr, true, AmfObjectState::new()) }
+    /// `ptr` は `context` から取得した有効な `AMFBuffer` を指すこと。
+    pub unsafe fn from_raw_acquired(
+        ptr: *mut sys::AMFBuffer,
+        context: Context,
+    ) -> Result<Self, Error> {
+        unsafe { Self::from_raw_with_acquire(ptr, true, AmfObjectState::new(), context) }
     }
 
     /// このハンドルが他のハンドルと共有されているかを返す
     pub(crate) fn is_shared(&self) -> bool {
         self.state.is_shared()
+    }
+
+    /// このハンドルが保持する `Context` を返す
+    pub fn context(&self) -> Context {
+        self.context.clone()
     }
 
     /// 生ポインタを返す。
@@ -538,6 +595,7 @@ impl Clone for Buffer {
             ptr: self.ptr,
             f: self.f,
             state: Arc::clone(&self.state),
+            context: self.context.clone(),
         }
     }
 }
@@ -576,6 +634,7 @@ pub struct Plane {
     ptr: *mut sys::AMFPlane,
     f: PlaneFuncs,
     state: Arc<AmfObjectState>,
+    context: Context,
 }
 
 unsafe impl Send for Plane {}
@@ -590,6 +649,7 @@ impl Plane {
         ptr: *mut sys::AMFPlane,
         acquire: bool,
         state: Arc<AmfObjectState>,
+        context: Context,
     ) -> Result<Self, Error> {
         let vtbl = unsafe { &*(*ptr).pVtbl };
         let f = PlaneFuncs {
@@ -605,23 +665,36 @@ impl Plane {
             unsafe { (f.acquire)(ptr) };
         }
         state.inc();
-        Ok(Self { ptr, f, state })
+        Ok(Self {
+            ptr,
+            f,
+            state,
+            context,
+        })
     }
 
     /// 生ポインタから Plane を作成する (Acquire なし)
     ///
     /// # Safety
-    /// `ptr` は有効な `AMFPlane` を指すこと。
-    pub unsafe fn from_raw(ptr: *mut sys::AMFPlane) -> Result<Self, Error> {
-        unsafe { Self::from_raw_with_acquire(ptr, false, AmfObjectState::new()) }
+    /// `ptr` は `context` に属する有効な `AMFPlane` を指すこと。
+    pub unsafe fn from_raw(ptr: *mut sys::AMFPlane, context: Context) -> Result<Self, Error> {
+        unsafe { Self::from_raw_with_acquire(ptr, false, AmfObjectState::new(), context) }
     }
 
     /// 生ポインタから Acquire 付きで Plane を作成する
     ///
     /// # Safety
-    /// `ptr` は有効な `AMFPlane` を指すこと。
-    pub unsafe fn from_raw_acquired(ptr: *mut sys::AMFPlane) -> Result<Self, Error> {
-        unsafe { Self::from_raw_with_acquire(ptr, true, AmfObjectState::new()) }
+    /// `ptr` は `context` に属する有効な `AMFPlane` を指すこと。
+    pub unsafe fn from_raw_acquired(
+        ptr: *mut sys::AMFPlane,
+        context: Context,
+    ) -> Result<Self, Error> {
+        unsafe { Self::from_raw_with_acquire(ptr, true, AmfObjectState::new(), context) }
+    }
+
+    /// このハンドルが保持する `Context` を返す
+    pub fn context(&self) -> Context {
+        self.context.clone()
     }
 
     /// 生ポインタを返す。
@@ -677,6 +750,7 @@ impl Clone for Plane {
             ptr: self.ptr,
             f: self.f,
             state: Arc::clone(&self.state),
+            context: self.context.clone(),
         }
     }
 }
@@ -701,7 +775,6 @@ impl Drop for Plane {
 struct ContextFuncs {
     acquire: unsafe extern "C" fn(*mut sys::AMFContext) -> sys::amf_long,
     release: unsafe extern "C" fn(*mut sys::AMFContext) -> sys::amf_long,
-    terminate: unsafe extern "C" fn(*mut sys::AMFContext) -> sys::AMF_RESULT,
     alloc_surface: unsafe extern "C" fn(
         *mut sys::AMFContext,
         sys::AMF_MEMORY_TYPE,
@@ -723,10 +796,13 @@ struct ContextFuncs {
     ) -> sys::AMF_RESULT,
 }
 
-/// `AMFContext` の RAII ラッパー
+/// `AMFContext` を共有するハンドル
 ///
-/// `alloc_surface()` / `alloc_buffer()` が返すハンドルは、このハンドルとは別の
-/// AMF オブジェクトである。
+/// 新しい Context は [`crate::AmfLibrary::create_context`] で作成する。`Clone` は
+/// 同じ `AMFContext` を指すハンドルを返す。最後のハンドルが破棄されると
+/// `AMFContext` は破棄される。
+///
+/// 同じ `AMFContext` を指すハンドル同士は等しいと判定される。
 pub struct Context {
     ptr: *mut sys::AMFContext,
     f: ContextFuncs,
@@ -736,65 +812,52 @@ pub struct Context {
 unsafe impl Send for Context {}
 unsafe impl Sync for Context {}
 
+impl std::fmt::Debug for Context {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Context")
+            .field("ptr", &format_args!("{:p}", self.ptr))
+            .finish()
+    }
+}
+
+impl PartialEq for Context {
+    fn eq(&self, other: &Self) -> bool {
+        self.ptr == other.ptr
+    }
+}
+
+impl Eq for Context {}
+
 impl Context {
-    /// ハンドルを作成する
+    /// 共有状態を指定して生ポインタから Context を作成する
     ///
     /// # Safety
-    /// `ptr` は有効な `AMFContext` を指すこと。
-    unsafe fn from_raw_with_acquire(
+    /// `ptr` は有効な `AMFContext` を指すこと。呼び出し元の参照の所有権を引き継ぐ。
+    pub(crate) unsafe fn from_raw_with_state(
         ptr: *mut sys::AMFContext,
-        acquire: bool,
         state: Arc<AmfObjectState>,
     ) -> Result<Self, Error> {
         let vtbl = unsafe { &*(*ptr).pVtbl };
         let f = ContextFuncs {
             acquire: require_vtbl_fn(vtbl.Acquire, "AMFContext::Acquire")?,
             release: require_vtbl_fn(vtbl.Release, "AMFContext::Release")?,
-            terminate: require_vtbl_fn(vtbl.Terminate, "AMFContext::Terminate")?,
             alloc_surface: require_vtbl_fn(vtbl.AllocSurface, "AMFContext::AllocSurface")?,
             alloc_buffer: require_vtbl_fn(vtbl.AllocBuffer, "AMFContext::AllocBuffer")?,
             query_interface: require_vtbl_fn(vtbl.QueryInterface, "AMFContext::QueryInterface")?,
         };
-        if acquire {
-            unsafe { (f.acquire)(ptr) };
-        }
         state.inc();
         Ok(Self { ptr, f, state })
     }
 
-    /// 共有状態を指定して生ポインタから Context を作成する (Acquire なし)
-    ///
-    /// # Safety
-    /// `ptr` は有効な `AMFContext` を指すこと。
-    pub(crate) unsafe fn from_raw_with_state(
-        ptr: *mut sys::AMFContext,
-        state: Arc<AmfObjectState>,
-    ) -> Result<Self, Error> {
-        unsafe { Self::from_raw_with_acquire(ptr, false, state) }
-    }
-
-    /// 生ポインタを返す。
+    /// このハンドルが指す `AMFContext` の生ポインタを返す。
     pub fn as_ptr(&self) -> *mut sys::AMFContext {
         self.ptr
-    }
-
-    /// 所有権を放棄して生ポインタを返す (Release は呼ばない)。
-    pub fn into_raw(mut self) -> *mut sys::AMFContext {
-        let ptr = self.ptr;
-        self.ptr = std::ptr::null_mut();
-        ptr
-    }
-
-    /// コンテキストを終了する
-    pub fn terminate(&self) -> sys::AMF_RESULT {
-        let _guard = self.state.lock();
-        unsafe { (self.f.terminate)(self.ptr) }
     }
 
     /// Surface を確保する
     ///
     /// # Errors
-    /// `AllocSurface` が失敗した場合、または返されたポインタが null の場合にエラーを返す。
+    /// Surface の確保に失敗した場合、または返されたポインタが null の場合にエラーを返す。
     pub fn alloc_surface(
         &self,
         type_: sys::AMF_MEMORY_TYPE,
@@ -815,13 +878,15 @@ impl Context {
             ));
         }
 
-        unsafe { Surface::from_raw_with_acquire(surface, false, AmfObjectState::new()) }
+        unsafe {
+            Surface::from_raw_with_acquire(surface, false, AmfObjectState::new(), self.clone())
+        }
     }
 
     /// Buffer を確保する
     ///
     /// # Errors
-    /// `AllocBuffer` が失敗した場合、または返されたポインタが null の場合にエラーを返す。
+    /// Buffer の確保に失敗した場合、または返されたポインタが null の場合にエラーを返す。
     pub fn alloc_buffer(
         &self,
         type_: sys::AMF_MEMORY_TYPE,
@@ -839,10 +904,10 @@ impl Context {
             ));
         }
 
-        unsafe { Buffer::from_raw_with_acquire(buffer, false, AmfObjectState::new()) }
+        unsafe { Buffer::from_raw_with_acquire(buffer, false, AmfObjectState::new(), self.clone()) }
     }
 
-    /// QueryInterface で AMFContext1 を取得し Vulkan デバイスを初期化する
+    /// Vulkan デバイスを初期化する
     ///
     /// `device` が `null` の場合はデフォルトデバイスが使用される。
     ///
@@ -886,6 +951,7 @@ impl Context {
 
 impl Clone for Context {
     fn clone(&self) -> Self {
+        // AMFContext は AMFInterface の参照カウントで管理されている。
         unsafe {
             (self.f.acquire)(self.ptr);
         }
@@ -900,13 +966,12 @@ impl Clone for Context {
 
 impl Drop for Context {
     fn drop(&mut self) {
-        self.state.dec();
-        if self.ptr.is_null() {
-            return;
-        }
+        // AMFContext の参照カウント操作は thread-safe なので、状態ロックは取らない。
+        // 最後の参照が解放されると AMFContext のデストラクタが Terminate を呼ぶ。
         unsafe {
             (self.f.release)(self.ptr);
         }
+        self.state.dec();
     }
 }
 
@@ -954,6 +1019,7 @@ pub struct Component {
     state: Arc<AmfObjectState>,
     /// プロセス全体で共有する状態
     process_state: Arc<AmfObjectState>,
+    context: Context,
 }
 
 unsafe impl Send for Component {}
@@ -968,6 +1034,7 @@ impl Component {
         ptr: *mut sys::AMFComponent,
         acquire: bool,
         process_state: Arc<AmfObjectState>,
+        context: Context,
     ) -> Result<Self, Error> {
         let state = AmfObjectState::new();
         let vtbl = unsafe { &*(*ptr).pVtbl };
@@ -993,18 +1060,26 @@ impl Component {
             f,
             state,
             process_state,
+            context,
         })
     }
 
-    /// プロセス全体の状態を指定して生ポインタから Component を作成する (Acquire なし)
+    /// プロセス全体の状態と Context を指定して生ポインタから Component を作成する
     ///
     /// # Safety
-    /// `ptr` は有効な `AMFComponent` を指すこと。
+    /// `ptr` は有効な `AMFComponent` を指すこと。`context` は `ptr` のコンポーネントを
+    /// 作成した `Context` であること。
     pub(crate) unsafe fn from_raw_with_state(
         ptr: *mut sys::AMFComponent,
         process_state: Arc<AmfObjectState>,
+        context: Context,
     ) -> Result<Self, Error> {
-        unsafe { Self::from_raw_with_acquire(ptr, false, process_state) }
+        unsafe { Self::from_raw_with_acquire(ptr, false, process_state, context) }
+    }
+
+    /// このコンポーネントが保持する `Context` を返す
+    pub fn context(&self) -> Context {
+        self.context.clone()
     }
 
     /// 生ポインタを返す。
@@ -1080,6 +1155,7 @@ impl Component {
                 self.ptr as *mut sys::AMFPropertyStorage,
                 true,
                 Arc::clone(&self.state),
+                self.context.clone(),
             )
         }
     }
@@ -1098,6 +1174,7 @@ impl Clone for Component {
             f: self.f,
             state: Arc::clone(&self.state),
             process_state: Arc::clone(&self.process_state),
+            context: self.context.clone(),
         }
     }
 }
@@ -1125,11 +1202,9 @@ mod tests {
 
     /// テスト用の Context を作成する
     fn create_context() -> Context {
-        let context = AmfLibrary::instance()
+        AmfLibrary::instance()
             .create_context()
-            .expect("Context の作成に失敗");
-        unsafe { context.init_vulkan(std::ptr::null_mut()) }.expect("InitVulkan に失敗");
-        context
+            .expect("Context の作成に失敗")
     }
 
     /// テスト用の Surface を作成する
@@ -1149,6 +1224,62 @@ mod tests {
         context
             .alloc_buffer(sys::AMF_MEMORY_TYPE::AMF_MEMORY_HOST, 4096)
             .expect("Buffer の確保に失敗")
+    }
+
+    /// Surface と Buffer が確保元の Context を保持することを確認する
+    #[test]
+    fn test_handle_context_matches_source_context() {
+        let context_a = create_context();
+        let context_b = create_context();
+        let surface_a = create_surface(&context_a);
+        let surface_b = create_surface(&context_b);
+        let buffer_a = create_buffer(&context_a);
+
+        assert_eq!(
+            surface_a.context(),
+            context_a,
+            "Surface が確保元の Context を保持していない"
+        );
+        assert_ne!(
+            surface_a.context(),
+            context_b,
+            "別の Context の Surface が同じ Context と判定された"
+        );
+        assert_eq!(
+            surface_b.context(),
+            context_b,
+            "Surface が確保元の Context を保持していない"
+        );
+        assert_eq!(
+            buffer_a.context(),
+            context_a,
+            "Buffer が確保元の Context を保持していない"
+        );
+        assert_ne!(
+            buffer_a.context(),
+            context_b,
+            "別の Context の Buffer が同じ Context と判定された"
+        );
+
+        // from_raw で再構築しても、指定した Context を保持する
+        let raw_surface =
+            unsafe { Surface::from_raw(surface_a.clone().into_raw(), context_a.clone()) }
+                .expect("Surface の再構築に失敗");
+        assert_eq!(
+            raw_surface.context(),
+            context_a,
+            "from_raw で再構築した Surface が Context を保持していない"
+        );
+
+        let cloned_context = context_a.clone();
+        assert_eq!(
+            cloned_context, context_a,
+            "Clone した Context が元の Context と等しくない"
+        );
+        assert_ne!(
+            context_a, context_b,
+            "別々に作成した Context が等しいと判定された"
+        );
     }
 
     /// Plane が Surface と同じ状態を共有することを確認する
@@ -1196,6 +1327,11 @@ mod tests {
             Arc::ptr_eq(&component.state, &property_storage.state),
             "PropertyStorage が Component の状態を共有していない"
         );
+        assert_eq!(
+            component.context(),
+            property_storage.context(),
+            "PropertyStorage の Context が Component の Context と一致しない"
+        );
     }
 
     /// from_raw_acquired で作成したハンドルが状態を共有しないことを確認する
@@ -1204,7 +1340,7 @@ mod tests {
         let context = create_context();
         let surface = create_surface(&context);
         let clone = surface.clone();
-        let other = unsafe { Surface::from_raw_acquired(surface.as_ptr()) }
+        let other = unsafe { Surface::from_raw_acquired(surface.as_ptr(), context.clone()) }
             .expect("Surface の再構築に失敗");
 
         assert!(

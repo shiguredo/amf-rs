@@ -67,9 +67,11 @@ DOCS_RS=1 cargo doc --no-deps
 use std::sync::{Arc, Mutex};
 
 use shiguredo_amf::{
-    CodecConfig, EncodeOptions, EncodedFrame, Encoder, EncoderConfig, FrameFormat,
+    AmfLibrary, CodecConfig, EncodeOptions, EncodedFrame, Encoder, EncoderConfig, FrameFormat,
     H264EncoderConfig, H264Profile, RateControlMode, ReconfigureParams, frame_type,
 };
+
+let context = AmfLibrary::instance().create_context()?;
 
 let mut config = EncoderConfig::new(
     CodecConfig::H264(H264EncoderConfig {
@@ -86,7 +88,7 @@ config.target_kbps = Some(5_000);
 
 let encoded = Arc::new(Mutex::new(Vec::new()));
 let e = encoded.clone();
-let mut encoder = Encoder::new(config, move |frame: EncodedFrame<()>| {
+let mut encoder = Encoder::new(context.clone(), config, move |frame: EncodedFrame<()>| {
     e.lock().unwrap().push(frame);
 })?;
 
@@ -136,14 +138,16 @@ for encoded in encoded.lock().unwrap().iter() {
 ```rust
 use std::sync::{Arc, Mutex};
 
-use shiguredo_amf::{DecodedFrame, Decoder, DecoderCodec, DecoderConfig};
+use shiguredo_amf::{AmfLibrary, DecodedFrame, Decoder, DecoderCodec, DecoderConfig};
+
+let context = AmfLibrary::instance().create_context()?;
 
 let config = DecoderConfig {
     codec: DecoderCodec::H264,
 };
 let decoded = Arc::new(Mutex::new(Vec::new()));
 let d = decoded.clone();
-let mut decoder = Decoder::new(config, move |frame: DecodedFrame<()>| {
+let mut decoder = Decoder::new(context.clone(), config, move |frame: DecodedFrame<()>| {
     d.lock().unwrap().push(frame);
 })?;
 
