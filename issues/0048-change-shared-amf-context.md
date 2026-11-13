@@ -1,7 +1,7 @@
 # Encoder / Decoder で AMFContext を共有し、Context をハンドルより長生きさせる
 
 - Created: 2026-11-11
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-11-14
 - Branch: feature/change-shared-amf-context
 - Polished: {YYYY-MM-DD}
 - Reporter: @melpon
@@ -63,3 +63,15 @@ Context はアプリケーションが任意の個数作成できるようにし
 - 同じ Context を共有する Encoder / Decoder と、別々の Context を使う Encoder / Decoder のテストが通り、`cargo clippy --workspace --all-targets -- -D warnings` と `cargo test --workspace -- --test-threads=1` が通る。
 - `CHANGES.md` の `## develop` に `[CHANGE]` を追記する。
 - `skills/shiguredo-amf/SKILL.md` と必要な doc を更新する。
+
+## 解決方法
+
+- `AmfLibrary::create_context()` を公開し、利用者が `AMFContext` を作成できるようにした。
+- `amf::Context` を `AMFContext` の参照カウントを直接管理する `Clone` 可能なハンドルにした。`Clone` は `Acquire`、`Drop` は `Release` を行い、最後の参照の解放時に AMFContext のデストラクタが `Terminate` を呼ぶ。
+- `Encoder::new` / `Decoder::new` が利用者の `Context` を第 1 引数で受け取り、内部で Context を生成しないようにした。
+- `Surface` / `Buffer` / `Plane` / `PropertyStorage` / `Component` は `Context` の Clone を保持し、`from_raw` / `from_raw_acquired` は `Context` を受け取るようにした。
+- `Context` に `PartialEq` / `Eq` を実装し、`Context` を保持する各ハンドルに `context()` を追加した。
+- `Context::terminate()` / `Context::into_raw()` を削除した。
+- `Encoder::encode` / `Decoder::decode` は別 Context の `Surface` / `Buffer` を拒否するようにした。
+- `Context::Drop` の `Release` と `Terminate` はプロセス共有の `state` ロック内で実行し、AMF 呼び出しと直列化するようにした。
+- AMD GPU 実機で `cargo fmt --all --check`、`cargo clippy --workspace --all-targets -- -D warnings`、`cargo test --workspace -- --test-threads=1`、`DOCS_RS=1 cargo doc --no-deps` を通した。
