@@ -12,9 +12,10 @@ mod encode;
 mod error;
 mod sys;
 
+use std::cell::UnsafeCell;
 use std::path::Path;
 use std::ptr;
-use std::sync::{Arc, LazyLock, Mutex};
+use std::sync::{Arc, LazyLock, MutexGuard};
 
 use amf::{AmfObjectState, Component, Context};
 use error::require_vtbl_fn;
@@ -60,10 +61,12 @@ struct AmfLibraryInner {
 /// プロセス全体で単一のインスタンスのみ存在し、
 /// [`AmfLibrary::instance()`] で取得する。
 pub struct AmfLibrary {
-    /// `AmfLibrary` と `Context` で共有するロック
+    /// プロセス全体で共有するロック
     state: Arc<AmfObjectState>,
-    /// AMF ランタイムの遅延初期化と factory の状態を保護する Mutex
-    inner: Mutex<Option<AmfLibraryInner>>,
+    /// AMF ランタイムの状態
+    ///
+    /// `state` のロック保持中にのみアクセスすること。
+    inner: UnsafeCell<Option<AmfLibraryInner>>,
 }
 
 unsafe impl Send for AmfLibrary {}
@@ -73,7 +76,7 @@ impl AmfLibrary {
     fn new() -> Self {
         Self {
             state: AmfObjectState::new(),
-            inner: Mutex::new(None),
+            inner: UnsafeCell::new(None),
         }
     }
 
@@ -85,7 +88,15 @@ impl AmfLibrary {
     ///
     /// 初回呼び出し時に AMF ランタイムをロードし、2 回目以降はキャッシュされた
     /// インスタンスを返す。
-    fn ensure_inner(inner: &mut Option<AmfLibraryInner>) -> Result<&mut AmfLibraryInner, Error> {
+    ///
+    /// `_guard` は `self.state` のロックを保持していることを示すトークンである。
+    fn ensure_inner<'a>(
+        &'a self,
+        _guard: &MutexGuard<'a, ()>,
+    ) -> Result<&'a AmfLibraryInner, Error> {
+        // SAFETY: 呼び出し元は `self.state` のロックを保持しており、`inner` への
+        // アクセスはすべてこのロックの下で行う。
+        let inner = unsafe { &mut *self.inner.get() };
         if inner.is_none() {
             let lib = dl::DynLib::open(Path::new(AMF_DLL_NAME)).map_err(|e| {
                 Error::new_custom(
@@ -114,14 +125,13 @@ impl AmfLibrary {
 
             *inner = Some(AmfLibraryInner { lib, factory });
         }
-        Ok(inner.as_mut().unwrap())
+        Ok(inner.as_ref().expect("AmfLibraryInner must be initialized"))
     }
 
     /// AMF ランタイムのバージョンを問い合わせる
     pub fn query_version(&self) -> Result<(u16, u16, u16, u16), Error> {
-        let _guard = self.state.lock();
-        let mut inner = self.inner.lock().unwrap();
-        let inner = Self::ensure_inner(&mut inner)?;
+        let guard = self.state.lock();
+        let inner = self.ensure_inner(&guard)?;
         let amf_query_version: AMFQueryVersion_Fn = unsafe { inner.lib.get(b"AMFQueryVersion") }
             .map_err(|e| {
                 Error::new_custom(
@@ -143,9 +153,8 @@ impl AmfLibrary {
 
     /// AMFContext を作成する
     pub(crate) fn create_context(&self) -> Result<Context, Error> {
-        let _guard = self.state.lock();
-        let mut inner = self.inner.lock().unwrap();
-        let inner = Self::ensure_inner(&mut inner)?;
+        let guard = self.state.lock();
+        let inner = self.ensure_inner(&guard)?;
         let mut context: *mut sys::AMFContext = ptr::null_mut();
         let result = unsafe {
             let vtbl = &*(*inner.factory).pVtbl;
@@ -169,9 +178,8 @@ impl AmfLibrary {
         context: &Context,
         component_id: &str,
     ) -> Result<Component, Error> {
-        let _guard = self.state.lock();
-        let mut inner = self.inner.lock().unwrap();
-        let inner = Self::ensure_inner(&mut inner)?;
+        let guard = self.state.lock();
+        let inner = self.ensure_inner(&guard)?;
         let component_id_w = sys::to_wstring(component_id);
         let mut component: *mut sys::AMFComponent = ptr::null_mut();
         let result = unsafe {
@@ -190,7 +198,7 @@ impl AmfLibrary {
                 "CreateComponent returned null",
             ));
         }
-        unsafe { Component::from_raw(component) }
+        unsafe { Component::from_raw_with_state(component, Arc::clone(&self.state)) }
     }
 }
 

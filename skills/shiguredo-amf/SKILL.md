@@ -133,7 +133,7 @@ AMD GPU 向けハードウェアアクセラレーションによるビデオエ
 | `Plane` | `AMFPlane` のラッパー | `get_native() -> *mut c_void`, `get_hpitch() -> amf_int32`, `get_vpitch() -> amf_int32`, `get_width() -> amf_int32`, `get_height() -> amf_int32`, `as_ptr()`, `into_raw()` |
 | `PropertyStorage` | `AMFPropertyStorage` のラッパー | `set_property_int64(name, value)`, `set_property_size(name, width, height)`, `set_property_rate(name, num, den)`, `unsafe set_property(name_w, AMFVariantStruct)`, `as_ptr()`, `into_raw()` |
 
-全ラッパーは `Clone` 実装で `Acquire` を呼び、`Drop` 実装で `Release` を呼ぶ。`unsafe from_raw(ptr)` (Acquire なし) と `unsafe from_raw_acquired(ptr)` (Acquire 付き) の 2 系統のコンストラクタを持つ。`into_raw()` は所有権を放棄して `Release` を呼ばずに生ポインタを返す。
+全ラッパーは `Clone` 実装で `Acquire` を呼び、`Drop` 実装で `Release` を呼ぶ。`Surface` / `Buffer` / `Plane` / `PropertyStorage` は `unsafe from_raw(ptr)` (Acquire なし) と `unsafe from_raw_acquired(ptr)` (Acquire 付き) の 2 系統のコンストラクタを持つ。`Context` / `Component` は `AmfLibrary` の内部でのみ作成し、公開の raw コンストラクタを持たない。`into_raw()` は所有権を放棄して `Release` を呼ばずに生ポインタを返す。
 
 `Clone` したハンドルは同じ AMF オブジェクトを指す。コンポーネントに投入する `Surface` / `Buffer` は、投入前に他のハンドルを破棄する必要がある。`Encoder::encode` / `Decoder::decode` は投入前に他のハンドルと共有されていないことを確認し、共有されている場合はエラーを返す。
 

@@ -15,9 +15,11 @@
   - @voluntas
 - [CHANGE] `amf::Context::init_vulkan` を公開 API から削除する
   - @melpon
+- [CHANGE] `amf::Context` / `amf::Component` の `from_raw` / `from_raw_acquired` を公開 API から削除する
+  - @melpon
 - [FIX] `amf` モジュールで `Clone` したハンドル経由のメソッド呼び出しがデータ競合する問題を修正し、コンポーネントに投入するオブジェクトが共有されていないことを確認する
   - @melpon
-- [FIX] `AmfLibrary` と `amf::Context` の AMF 呼び出しがデータ競合し、複数スレッドから Encoder / Decoder を並列に初期化した際に SIGSEGV する問題を修正する
+- [FIX] `AmfLibrary` / `amf::Context` / `Component::init` の AMF 呼び出しがデータ競合し、複数スレッドから Encoder / Decoder を並列に初期化した際に SIGSEGV する問題を修正する
   - @melpon
 
 ### misc

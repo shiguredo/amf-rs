@@ -101,12 +101,13 @@
 
 - `AmfLibrary` に `AmfObjectState` を持たせ、`create_context` で作成する `Context` に同じ状態を共有させた。これにより `AmfLibrary` の factory 操作と `Context` の操作が同じロックで直列化される。
 - `Context` の `init_vulkan` / `alloc_surface` / `alloc_buffer` / `terminate` を共有ロックの対象にした。
+- `Component` に `AmfLibrary` / `Context` と共有するプロセス状態を持たせ、`init` / `re_init` を同じロックで直列化した。
+- `Context` / `Component` の raw コンストラクタを公開 API から削除した。
 - `Context::init_vulkan` は `Context` のメソッドのまま `pub(crate)` にし、`AmfLibrary::init_vulkan` は設けていない。
 - 64 個の `Context` を並列に `init_vulkan` する回帰テストを追加した。修正前は 5 回中 5 回 SIGSEGV し、修正後は 5 回連続で成功した。
 - GPU CI から `--test-threads=1` を外し、`CHANGES.md` と `skills/shiguredo-amf/SKILL.md` を更新した。
 
 ## 残存リスク
 
-- `Component::init` は `AmfLibrary` / `Context` の共有ロックに含めていない。`AMFComponent` は thread-safe と明記されているが、`Init` が内部で `AMFFactoryHelper` を触るため、並列 `Encoder::new` で helper 競合が残る可能性がある。
 - AMF の内部スレッド (`AMFGPUEventProfiler` など) はアプリ側のロックでは排他できない。
 - `AMFFactoryHelper` 以外にも `s_pTrace` / `s_pDebug`、cache folder、programs、performance monitor、Vulkan import table などの共有状態がある。公開 API の全経路を安全にするには、AMD 側の修正か、内部 helper を pin する C++ shim が必要になる。

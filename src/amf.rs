@@ -762,14 +762,6 @@ impl Context {
         Ok(Self { ptr, f, state })
     }
 
-    /// 生ポインタから Context を作成する (Acquire なし)
-    ///
-    /// # Safety
-    /// `ptr` は有効な `AMFContext` を指すこと。
-    pub unsafe fn from_raw(ptr: *mut sys::AMFContext) -> Result<Self, Error> {
-        unsafe { Self::from_raw_with_acquire(ptr, false, AmfObjectState::new()) }
-    }
-
     /// 共有状態を指定して生ポインタから Context を作成する (Acquire なし)
     ///
     /// # Safety
@@ -779,14 +771,6 @@ impl Context {
         state: Arc<AmfObjectState>,
     ) -> Result<Self, Error> {
         unsafe { Self::from_raw_with_acquire(ptr, false, state) }
-    }
-
-    /// 生ポインタから Acquire 付きで Context を作成する
-    ///
-    /// # Safety
-    /// `ptr` は有効な `AMFContext` を指すこと。
-    pub unsafe fn from_raw_acquired(ptr: *mut sys::AMFContext) -> Result<Self, Error> {
-        unsafe { Self::from_raw_with_acquire(ptr, true, AmfObjectState::new()) }
     }
 
     /// 生ポインタを返す。
@@ -956,10 +940,20 @@ struct ComponentFuncs {
 }
 
 /// `AMFComponent` の RAII ラッパー
+///
+/// # スレッド安全性について
+///
+/// `AMFComponent` は、ドキュメント上はスレッドセーフと記載されているが、実際はスレッドセーフではない。
+/// 少なくとも `AMFComponent::Init()` および `AMFComponent::ReInit()` では、グローバルなオブジェクトをロック無しで触れている。
+/// そのため [Component] はプロセス全体で共有のロックを保持し、[Component::init()] および [Component::re_init()] で
+/// グローバルなロックをすることでスレッド安全性を確保している。
 pub struct Component {
     ptr: *mut sys::AMFComponent,
     f: ComponentFuncs,
+    /// コンポーネント固有の状態
     state: Arc<AmfObjectState>,
+    /// プロセス全体で共有する状態
+    process_state: Arc<AmfObjectState>,
 }
 
 unsafe impl Send for Component {}
@@ -973,6 +967,7 @@ impl Component {
     unsafe fn from_raw_with_acquire(
         ptr: *mut sys::AMFComponent,
         acquire: bool,
+        process_state: Arc<AmfObjectState>,
     ) -> Result<Self, Error> {
         let state = AmfObjectState::new();
         let vtbl = unsafe { &*(*ptr).pVtbl };
@@ -992,23 +987,24 @@ impl Component {
             unsafe { (f.acquire)(ptr) };
         }
         state.inc();
-        Ok(Self { ptr, f, state })
+        process_state.inc();
+        Ok(Self {
+            ptr,
+            f,
+            state,
+            process_state,
+        })
     }
 
-    /// 生ポインタから Component を作成する (Acquire なし)
+    /// プロセス全体の状態を指定して生ポインタから Component を作成する (Acquire なし)
     ///
     /// # Safety
     /// `ptr` は有効な `AMFComponent` を指すこと。
-    pub unsafe fn from_raw(ptr: *mut sys::AMFComponent) -> Result<Self, Error> {
-        unsafe { Self::from_raw_with_acquire(ptr, false) }
-    }
-
-    /// 生ポインタから Acquire 付きで Component を作成する
-    ///
-    /// # Safety
-    /// `ptr` は有効な `AMFComponent` を指すこと。
-    pub unsafe fn from_raw_acquired(ptr: *mut sys::AMFComponent) -> Result<Self, Error> {
-        unsafe { Self::from_raw_with_acquire(ptr, true) }
+    pub(crate) unsafe fn from_raw_with_state(
+        ptr: *mut sys::AMFComponent,
+        process_state: Arc<AmfObjectState>,
+    ) -> Result<Self, Error> {
+        unsafe { Self::from_raw_with_acquire(ptr, false, process_state) }
     }
 
     /// 生ポインタを返す。
@@ -1030,11 +1026,13 @@ impl Component {
         width: sys::amf_int32,
         height: sys::amf_int32,
     ) -> sys::AMF_RESULT {
+        let _guard = self.process_state.lock();
         unsafe { (self.f.init)(self.ptr, format, width, height) }
     }
 
     /// コンポーネントを再初期化する (解像度変更)
     pub fn re_init(&self, width: sys::amf_int32, height: sys::amf_int32) -> sys::AMF_RESULT {
+        let _guard = self.process_state.lock();
         unsafe { (self.f.re_init)(self.ptr, width, height) }
     }
 
@@ -1094,10 +1092,12 @@ impl Clone for Component {
             (self.f.acquire)(self.ptr);
         }
         self.state.inc();
+        self.process_state.inc();
         Self {
             ptr: self.ptr,
             f: self.f,
             state: Arc::clone(&self.state),
+            process_state: Arc::clone(&self.process_state),
         }
     }
 }
@@ -1105,6 +1105,7 @@ impl Clone for Component {
 impl Drop for Component {
     fn drop(&mut self) {
         self.state.dec();
+        self.process_state.dec();
         if self.ptr.is_null() {
             return;
         }
