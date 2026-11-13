@@ -189,26 +189,30 @@ impl AmfLibrary {
         context: &Context,
         component_id: &str,
     ) -> Result<Component, Error> {
-        let guard = self.state.lock();
-        let inner = self.ensure_inner(&guard)?;
-        let component_id_w = sys::to_wstring(component_id);
-        let mut component: *mut sys::AMFComponent = ptr::null_mut();
-        let result = unsafe {
-            let vtbl = &*(*inner.factory).pVtbl;
-            require_vtbl_fn(vtbl.CreateComponent, "CreateComponent")?(
-                inner.factory,
-                context.as_ptr(),
-                component_id_w.as_ptr(),
-                &mut component,
-            )
+        let component = {
+            let guard = self.state.lock();
+            let inner = self.ensure_inner(&guard)?;
+            let component_id_w = sys::to_wstring(component_id);
+            let mut component: *mut sys::AMFComponent = ptr::null_mut();
+            let result = unsafe {
+                let vtbl = &*(*inner.factory).pVtbl;
+                require_vtbl_fn(vtbl.CreateComponent, "CreateComponent")?(
+                    inner.factory,
+                    context.as_ptr(),
+                    component_id_w.as_ptr(),
+                    &mut component,
+                )
+            };
+            Error::check(result, "AMFFactory::CreateComponent")?;
+            if component.is_null() {
+                return Err(Error::new_custom(
+                    "AmfLibrary::create_component",
+                    "CreateComponent returned null",
+                ));
+            }
+            component
         };
-        Error::check(result, "AMFFactory::CreateComponent")?;
-        if component.is_null() {
-            return Err(Error::new_custom(
-                "AmfLibrary::create_component",
-                "CreateComponent returned null",
-            ));
-        }
+
         unsafe {
             Component::from_raw_with_state(component, Arc::clone(&self.state), context.clone())
         }

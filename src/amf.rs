@@ -38,12 +38,8 @@ use crate::sys;
 // `AMFPropertyStorage` (§2.2.14.1)、`AMFData` (§2.3.1)、`AMFSurface` (§2.3.3.1) は
 // thread-safe ではなく、`AMFPlane` (§2.3.3.3) と `AMFContext` (§2.4.1) には記述がない。
 // そのためスレッドセーフでない操作は共有ロックで直列化する。
-// 参照カウント操作 (`Acquire` / `Release` / `QueryInterface`) は `AMFInterface` の
-// デフォルト実装で thread-safe である (AMF SDK の Wiki
-// 「Guide for Video CODEC Encoder App Developers」§4.2)。
 // コンポーネントに投入するオブジェクトは、モジュール doc の「コンポーネントへの投入」を
 // 満たすこと。投入後はハンドルが残らないため、コンポーネントの排他アクセスと競合しない。
-// したがって、ラッパー経由の操作とコンポーネントへの投入のどちらもデータ競合しない。
 
 /// 同じ AMF オブジェクトを指すハンドルで共有する状態
 #[derive(Debug)]
@@ -865,18 +861,22 @@ impl Context {
         width: sys::amf_int32,
         height: sys::amf_int32,
     ) -> Result<Surface, Error> {
-        let _guard = self.state.lock();
-        let mut surface: *mut sys::AMFSurface = std::ptr::null_mut();
-        let result =
-            unsafe { (self.f.alloc_surface)(self.ptr, type_, format, width, height, &mut surface) };
-        Error::check(result, "AMFContext::AllocSurface")?;
+        let surface = {
+            let _guard = self.state.lock();
+            let mut surface: *mut sys::AMFSurface = std::ptr::null_mut();
+            let result = unsafe {
+                (self.f.alloc_surface)(self.ptr, type_, format, width, height, &mut surface)
+            };
+            Error::check(result, "AMFContext::AllocSurface")?;
 
-        if surface.is_null() {
-            return Err(Error::new_custom(
-                "Context::alloc_surface",
-                "AllocSurface returned null",
-            ));
-        }
+            if surface.is_null() {
+                return Err(Error::new_custom(
+                    "Context::alloc_surface",
+                    "AllocSurface returned null",
+                ));
+            }
+            surface
+        };
 
         unsafe {
             Surface::from_raw_with_acquire(surface, false, AmfObjectState::new(), self.clone())
@@ -892,17 +892,20 @@ impl Context {
         type_: sys::AMF_MEMORY_TYPE,
         size: sys::amf_size,
     ) -> Result<Buffer, Error> {
-        let _guard = self.state.lock();
-        let mut buffer: *mut sys::AMFBuffer = std::ptr::null_mut();
-        let result = unsafe { (self.f.alloc_buffer)(self.ptr, type_, size, &mut buffer) };
-        Error::check(result, "AMFContext::AllocBuffer")?;
+        let buffer = {
+            let _guard = self.state.lock();
+            let mut buffer: *mut sys::AMFBuffer = std::ptr::null_mut();
+            let result = unsafe { (self.f.alloc_buffer)(self.ptr, type_, size, &mut buffer) };
+            Error::check(result, "AMFContext::AllocBuffer")?;
 
-        if buffer.is_null() {
-            return Err(Error::new_custom(
-                "Context::alloc_buffer",
-                "AllocBuffer returned null",
-            ));
-        }
+            if buffer.is_null() {
+                return Err(Error::new_custom(
+                    "Context::alloc_buffer",
+                    "AllocBuffer returned null",
+                ));
+            }
+            buffer
+        };
 
         unsafe { Buffer::from_raw_with_acquire(buffer, false, AmfObjectState::new(), self.clone()) }
     }
@@ -966,7 +969,7 @@ impl Clone for Context {
 
 impl Drop for Context {
     fn drop(&mut self) {
-        // AMFContext の参照カウント操作は thread-safe なので、状態ロックは取らない。
+        let _guard = self.state.lock();
         // 最後の参照が解放されると AMFContext のデストラクタが Terminate を呼ぶ。
         unsafe {
             (self.f.release)(self.ptr);
@@ -1163,7 +1166,6 @@ impl Component {
 
 impl Clone for Component {
     fn clone(&self) -> Self {
-        // AMFComponent は thread-safe であるため、参照カウントの操作はロックしない。
         unsafe {
             (self.f.acquire)(self.ptr);
         }
@@ -1186,7 +1188,6 @@ impl Drop for Component {
         if self.ptr.is_null() {
             return;
         }
-        // AMFComponent は thread-safe であるため、参照カウントの操作はロックしない。
         unsafe {
             (self.f.release)(self.ptr);
         }
