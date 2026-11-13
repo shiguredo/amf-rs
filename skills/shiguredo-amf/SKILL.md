@@ -26,7 +26,7 @@ AMD GPU 向けハードウェアアクセラレーションによるビデオエ
 - crate 名: `shiguredo_amf`
 - バージョン: 2026.3.0
 - Rust Edition: 2024
-- 最小 Rust バージョン: 1.93
+- 最小 Rust バージョン: 1.95
 - AMF SDK バージョン: v1.5.2
 - ライセンス: Apache-2.0
 

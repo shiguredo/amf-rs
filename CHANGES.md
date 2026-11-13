@@ -11,7 +11,7 @@
 
 ## develop
 
-- [CHANGE] 最小サポート Rust バージョン (MSRV) を 1.88 から 1.93 に上げる
+- [CHANGE] 最小サポート Rust バージョン (MSRV) を 1.88 から 1.95 に上げる
   - @voluntas
 - [CHANGE] `amf::Context` 周りの整理
   - `init_vulkan` を非公開にし、`AmfLibrary::create_context` で Vulkan デバイスを初期化した `amf::Context` を作成できるようにする
@@ -34,7 +34,7 @@
   - @voluntas
 - [UPDATE] `prek.toml` を shiguredo-rust 規約に合わせて整備する (builtin フック拡充、tombi、`cargo test` の pre-push 限定)
   - @voluntas
-- [UPDATE] `rust-toolchain.toml` のツールチェインを MSRV の 1.93 に固定し、CI と devcontainer のツールチェインも 1.93 に統一する
+- [UPDATE] `rust-toolchain.toml` のツールチェインを MSRV の 1.95 に固定し、CI と devcontainer のツールチェインも 1.95 に統一する
   - @voluntas
 
 ## 2026.3.0
