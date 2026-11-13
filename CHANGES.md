@@ -13,9 +13,13 @@
 
 - [CHANGE] 最小サポート Rust バージョン (MSRV) を 1.88 から 1.93 に上げる
   - @voluntas
-- [CHANGE] `amf::Context::init_vulkan` を公開 API から削除する
-  - @melpon
-- [CHANGE] `amf::Context` / `amf::Component` の `from_raw` / `from_raw_acquired` を公開 API から削除する
+- [CHANGE] `amf::Context` 周りの整理
+  - `init_vulkan` を非公開にし、`AmfLibrary::create_context` で Vulkan デバイスを初期化した `amf::Context` を作成できるようにする
+  - `from_raw` / `from_raw_acquired` を非公開にする
+  - `terminate` / `into_raw` を削除する
+  - `PartialEq` / `Eq` を実装する
+  - `Encoder::new` / `Decoder::new` が `Context` を受け取るように変更する
+  - `amf` の各オブジェクトにコンテキストを取得する `context` 関数を追加する
   - @melpon
 - [FIX] `amf` モジュールで `Clone` したハンドル経由のメソッド呼び出しがデータ競合する問題を修正し、コンポーネントに投入するオブジェクトが共有されていないことを確認する
   - @melpon

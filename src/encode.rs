@@ -377,7 +377,7 @@ impl<H: EncodeHandler> Encoder<H> {
     /// エンコーダーを作成して初期化する
     ///
     /// `handler` はエンコード完了時にワーカースレッドから呼び出される。
-    pub fn new(config: EncoderConfig, handler: H) -> Result<Self, Error> {
+    pub fn new(context: Context, config: EncoderConfig, handler: H) -> Result<Self, Error> {
         // 入力パラメータのバリデーション
         if config.width == 0 || config.height == 0 {
             return Err(Error::new_custom(
@@ -417,10 +417,6 @@ impl<H: EncodeHandler> Encoder<H> {
         }
 
         let lib = AmfLibrary::instance();
-        let context = lib.create_context()?;
-
-        // Linux では Vulkan/OpenCL でコンテキストを初期化する
-        unsafe { context.init_vulkan(ptr::null_mut()) }?;
 
         // コーデック固有のコンポーネント ID を選択する
         let component_id = match &config.codec {
@@ -813,10 +809,15 @@ impl<H: EncodeHandler> Encoder<H> {
         Ok(())
     }
 
+    /// このエンコーダーが使用する `Context` を返す
+    pub fn context(&self) -> Context {
+        self.context.clone()
+    }
+
     /// エンコード用の Surface を確保する
     ///
     /// 確保された Surface は呼び出し元がフレームデータを書き込んでから
-    /// [`encode()`] に渡す。
+    /// [`Encoder::encode`] に渡す。
     pub fn alloc_surface(&self) -> Result<Surface, Error> {
         self.context.alloc_surface(
             AMF_MEMORY_TYPE::AMF_MEMORY_HOST,
@@ -829,13 +830,25 @@ impl<H: EncodeHandler> Encoder<H> {
     /// フレームをエンコードする
     ///
     /// `user_data` はエンコード完了時にハンドラーへ渡される。
-    /// `surface` が他のハンドルと共有されている場合はエラーを返す。
+    ///
+    /// `surface` はこのエンコーダーと同じ `Context` から確保したものでなければ
+    /// ならない。別の Context から確保した Surface を渡した場合はエラーを返す。
+    /// `surface` が他のハンドルと共有されている場合もエラーを返す。
     pub fn encode(
         &mut self,
         surface: Surface,
         options: &EncodeOptions,
         user_data: H::UserData,
     ) -> Result<(), Error> {
+        // AMF は同じ Context に載ったオブジェクトの受け渡しを前提としているため、
+        // 投入前に同じ Context のハンドルであることを確認する。
+        if surface.context() != self.context {
+            return Err(Error::new_custom(
+                "Encoder::encode",
+                "surface does not belong to the encoder's AMF context",
+            ));
+        }
+
         // AMF コンポーネントは投入した Surface を解放するまで排他アクセスするため、
         // 他のハンドルが残っている状態では投入しない。
         if surface.is_shared() {
@@ -958,8 +971,7 @@ impl<H: EncodeHandler> Encoder<H> {
 }
 
 // Safety:
-// Drop 内でのみ component/context を解放する。
-// ワーカースレッドは Drop より先に停止させる。
+// Drop 内でのみ component を解放する。ワーカースレッドは Drop より先に停止させる。
 impl<H: EncodeHandler> Drop for Encoder<H> {
     fn drop(&mut self) {
         // ワーカースレッドを停止する (cmd_tx を drop → チャネル切断 → ワーカー終了)
@@ -970,7 +982,6 @@ impl<H: EncodeHandler> Drop for Encoder<H> {
         }
 
         let _ = self.component.terminate();
-        let _ = self.context.terminate();
     }
 }
 
@@ -1043,6 +1054,7 @@ fn drain_output<H: EncodeHandler>(
     component: &Component,
     codec_config: &CodecConfig,
 ) {
+    let context = component.context();
     // 出力をバッファに格納する
     loop {
         let mut data: *mut AMFData = ptr::null_mut();
@@ -1054,7 +1066,7 @@ fn drain_output<H: EncodeHandler>(
         if result != AMF_RESULT::AMF_OK || data.is_null() {
             break;
         }
-        output_buffer.push_back(extract_encoded_output(data, codec_config));
+        output_buffer.push_back(extract_encoded_output(data, codec_config, &context));
     }
 
     // バッファされた出力と pending をマッチングする
@@ -1077,6 +1089,7 @@ fn drain_output<H: EncodeHandler>(
 fn extract_encoded_output(
     data: *mut AMFData,
     codec_config: &CodecConfig,
+    context: &Context,
 ) -> Result<(Buffer, PictureType), Error> {
     let buffer = data as *mut AMFBuffer;
     if buffer.is_null() {
@@ -1085,7 +1098,8 @@ fn extract_encoded_output(
             "buffer is null",
         ));
     }
-    let buffer = unsafe { Buffer::from_raw(buffer) }?;
+    // エンコーダーの出力バッファは、エンコーダーが作成された Context から確保されている
+    let buffer = unsafe { Buffer::from_raw(buffer, context.clone()) }?;
     let buf_size = buffer.get_size();
     if buf_size == 0 {
         return Err(Error::new_custom(

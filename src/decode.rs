@@ -123,11 +123,8 @@ impl<H: DecodeHandler> Decoder<H> {
     /// デコーダーを作成する
     ///
     /// `handler` はデコード完了時にワーカースレッドから呼び出される。
-    pub fn new(config: DecoderConfig, handler: H) -> Result<Self, Error> {
+    pub fn new(context: Context, config: DecoderConfig, handler: H) -> Result<Self, Error> {
         let lib = AmfLibrary::instance();
-        let context = lib.create_context()?;
-
-        unsafe { context.init_vulkan(ptr::null_mut()) }?;
 
         let component_id = match config.codec {
             DecoderCodec::H264 => sys::str::AMFVideoDecoderUVD_H264_AVC,
@@ -163,10 +160,15 @@ impl<H: DecodeHandler> Decoder<H> {
         })
     }
 
+    /// このデコーダーが使用する `Context` を返す
+    pub fn context(&self) -> Context {
+        self.context.clone()
+    }
+
     /// デコード用のバッファを確保する
     ///
     /// 確保されたバッファは呼び出し元がビットストリームデータを書き込んでから
-    /// [`decode()`] に渡す。
+    /// [`Decoder::decode`] に渡す。
     pub fn alloc_buffer(&self, size: usize) -> Result<Buffer, Error> {
         self.context
             .alloc_buffer(AMF_MEMORY_TYPE::AMF_MEMORY_HOST, size)
@@ -175,8 +177,20 @@ impl<H: DecodeHandler> Decoder<H> {
     /// ビットストリームをデコードする
     ///
     /// `user_data` はデコード完了時にハンドラーへ渡される。
-    /// `buffer` が他のハンドルと共有されている場合はエラーを返す。
+    ///
+    /// `buffer` はこのデコーダーと同じ `Context` から確保したものでなければならない。
+    /// 別の Context から確保した Buffer を渡した場合はエラーを返す。`buffer` が他の
+    /// ハンドルと共有されている場合もエラーを返す。
     pub fn decode(&mut self, buffer: Buffer, user_data: H::UserData) -> Result<(), Error> {
+        // AMF は同じ Context に載ったオブジェクトの受け渡しを前提としているため、
+        // 投入前に同じ Context のハンドルであることを確認する。
+        if buffer.context() != self.context {
+            return Err(Error::new_custom(
+                "Decoder::decode",
+                "buffer does not belong to the decoder's AMF context",
+            ));
+        }
+
         // AMF コンポーネントは投入した Buffer を解放するまで排他アクセスするため、
         // 他のハンドルが残っている状態では投入しない。
         if buffer.is_shared() {
@@ -254,8 +268,7 @@ impl<H: DecodeHandler> Decoder<H> {
 }
 
 // Safety:
-// Drop 内でのみ component/context を解放する。
-// ワーカースレッドは Drop より先に停止させる。
+// Drop 内でのみ component を解放する。ワーカースレッドは Drop より先に停止させる。
 impl<H: DecodeHandler> Drop for Decoder<H> {
     fn drop(&mut self) {
         self.cmd_tx = None;
@@ -265,7 +278,6 @@ impl<H: DecodeHandler> Drop for Decoder<H> {
         }
 
         let _ = self.component.terminate();
-        let _ = self.context.terminate();
     }
 }
 
@@ -329,6 +341,7 @@ fn drain_output<H: DecodeHandler>(
     handler: &mut H,
     component: &Component,
 ) {
+    let context = component.context();
     loop {
         let mut data: *mut AMFData = ptr::null_mut();
         let result = unsafe { component.query_output(&mut data) };
@@ -339,7 +352,7 @@ fn drain_output<H: DecodeHandler>(
         // デコーダーとエンコーダーで AMF ランタイムの挙動が異なるため非対称になっている。
         if result == AMF_RESULT::AMF_REPEAT {
             if !data.is_null() {
-                output_buffer.push_back(extract_frame(data as *mut AMFSurface));
+                output_buffer.push_back(extract_frame(data as *mut AMFSurface, &context));
                 continue;
             }
             break;
@@ -350,7 +363,7 @@ fn drain_output<H: DecodeHandler>(
         if result != AMF_RESULT::AMF_OK || data.is_null() {
             break;
         }
-        output_buffer.push_back(extract_frame(data as *mut AMFSurface));
+        output_buffer.push_back(extract_frame(data as *mut AMFSurface, &context));
     }
 
     while !output_buffer.is_empty() && !pending.is_empty() {
@@ -370,13 +383,15 @@ fn drain_output<H: DecodeHandler>(
 
 /// AMFSurface を抽出して convert する
 ///
+/// `context` には `surface` に対する [Context] を指定する。
 /// null ポインタや convert 失敗の場合は `Err` を返す。
-fn extract_frame(surface: *mut AMFSurface) -> Result<Surface, Error> {
+fn extract_frame(surface: *mut AMFSurface, context: &Context) -> Result<Surface, Error> {
     if surface.is_null() {
         return Err(Error::new_custom("extract_frame", "surface is null"));
     }
 
-    let surface = unsafe { Surface::from_raw(surface) }?;
+    // デコーダーの出力 Surface は、デコーダーが作成された Context から確保されている
+    let surface = unsafe { Surface::from_raw(surface, context.clone()) }?;
 
     let result = surface.convert(AMF_MEMORY_TYPE::AMF_MEMORY_HOST);
     if result != AMF_RESULT::AMF_OK {

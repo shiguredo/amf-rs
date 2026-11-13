@@ -151,25 +151,36 @@ impl AmfLibrary {
         Ok((major, minor, release, build))
     }
 
-    /// AMFContext を作成する
-    pub(crate) fn create_context(&self) -> Result<Context, Error> {
-        let guard = self.state.lock();
-        let inner = self.ensure_inner(&guard)?;
-        let mut context: *mut sys::AMFContext = ptr::null_mut();
-        let result = unsafe {
-            let vtbl = &*(*inner.factory).pVtbl;
-            require_vtbl_fn(vtbl.CreateContext, "CreateContext")?(inner.factory, &mut context)
+    /// 新しい AMFContext を作成し、既定の Vulkan デバイスで初期化する
+    ///
+    /// # Errors
+    /// AMF ランタイムのロード、Context の作成、または Vulkan デバイスの初期化に
+    /// 失敗した場合にエラーを返す。
+    pub fn create_context(&self) -> Result<Context, Error> {
+        // Context::init_vulkan も state のロックを取得するため、Context を作成したら
+        // ロックを解放してから Vulkan デバイスを初期化する。
+        let context = {
+            let guard = self.state.lock();
+            let inner = self.ensure_inner(&guard)?;
+            let mut context: *mut sys::AMFContext = ptr::null_mut();
+            let result = unsafe {
+                let vtbl = &*(*inner.factory).pVtbl;
+                require_vtbl_fn(vtbl.CreateContext, "CreateContext")?(inner.factory, &mut context)
+            };
+            Error::check(result, "AMFFactory::CreateContext")?;
+
+            if context.is_null() {
+                return Err(Error::new_custom(
+                    "AmfLibrary::create_context",
+                    "CreateContext returned null",
+                ));
+            }
+
+            unsafe { Context::from_raw_with_state(context, Arc::clone(&self.state)) }?
         };
-        Error::check(result, "AMFFactory::CreateContext")?;
 
-        if context.is_null() {
-            return Err(Error::new_custom(
-                "AmfLibrary::create_context",
-                "CreateContext returned null",
-            ));
-        }
-
-        unsafe { Context::from_raw_with_state(context, Arc::clone(&self.state)) }
+        unsafe { context.init_vulkan(ptr::null_mut()) }?;
+        Ok(context)
     }
 
     /// AMFComponent を作成する
@@ -178,59 +189,72 @@ impl AmfLibrary {
         context: &Context,
         component_id: &str,
     ) -> Result<Component, Error> {
-        let guard = self.state.lock();
-        let inner = self.ensure_inner(&guard)?;
-        let component_id_w = sys::to_wstring(component_id);
-        let mut component: *mut sys::AMFComponent = ptr::null_mut();
-        let result = unsafe {
-            let vtbl = &*(*inner.factory).pVtbl;
-            require_vtbl_fn(vtbl.CreateComponent, "CreateComponent")?(
-                inner.factory,
-                context.as_ptr(),
-                component_id_w.as_ptr(),
-                &mut component,
-            )
+        let component = {
+            let guard = self.state.lock();
+            let inner = self.ensure_inner(&guard)?;
+            let component_id_w = sys::to_wstring(component_id);
+            let mut component: *mut sys::AMFComponent = ptr::null_mut();
+            let result = unsafe {
+                let vtbl = &*(*inner.factory).pVtbl;
+                require_vtbl_fn(vtbl.CreateComponent, "CreateComponent")?(
+                    inner.factory,
+                    context.as_ptr(),
+                    component_id_w.as_ptr(),
+                    &mut component,
+                )
+            };
+            Error::check(result, "AMFFactory::CreateComponent")?;
+            if component.is_null() {
+                return Err(Error::new_custom(
+                    "AmfLibrary::create_component",
+                    "CreateComponent returned null",
+                ));
+            }
+            component
         };
-        Error::check(result, "AMFFactory::CreateComponent")?;
-        if component.is_null() {
-            return Err(Error::new_custom(
-                "AmfLibrary::create_component",
-                "CreateComponent returned null",
-            ));
+
+        unsafe {
+            Component::from_raw_with_state(component, Arc::clone(&self.state), context.clone())
         }
-        unsafe { Component::from_raw_with_state(component, Arc::clone(&self.state)) }
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use std::ptr;
     use std::sync::{Arc, Barrier};
 
     use super::*;
 
-    /// 複数の Context の Vulkan デバイスを並列に初期化しても SIGSEGV しないことを確認する
-    ///
-    /// 複数の Context を並列に初期化できることを確かめる。
+    /// 複数の Context を並列に作成・初期化しても SIGSEGV しないことを確認する
     #[test]
-    fn test_parallel_init_vulkan() {
+    fn test_parallel_create_context() {
         const CONTEXT_COUNT: usize = 64;
 
         let lib = AmfLibrary::instance();
-        let contexts = (0..CONTEXT_COUNT)
-            .map(|_| lib.create_context().expect("Context の作成に失敗"))
-            .collect::<Vec<_>>();
-
-        // すべてのスレッドを同時に InitVulkan へ到達させる
         let barrier = Arc::new(Barrier::new(CONTEXT_COUNT));
-        std::thread::scope(|scope| {
-            for context in &contexts {
-                let barrier = Arc::clone(&barrier);
-                scope.spawn(move || {
-                    barrier.wait();
-                    unsafe { context.init_vulkan(ptr::null_mut()) }.expect("InitVulkan に失敗");
-                });
-            }
+        let contexts = std::thread::scope(|scope| {
+            let handles = (0..CONTEXT_COUNT)
+                .map(|_| {
+                    let barrier = Arc::clone(&barrier);
+                    scope.spawn(move || {
+                        barrier.wait();
+                        lib.create_context().expect("Context の作成に失敗")
+                    })
+                })
+                .collect::<Vec<_>>();
+            handles
+                .into_iter()
+                .map(|handle| handle.join().expect("スレッドの join に失敗"))
+                .collect::<Vec<_>>()
         });
+
+        for (i, context) in contexts.iter().enumerate() {
+            for other in contexts.iter().skip(i + 1) {
+                assert!(
+                    context.as_ptr() != other.as_ptr(),
+                    "同じ Context が複数作成された"
+                );
+            }
+        }
     }
 }

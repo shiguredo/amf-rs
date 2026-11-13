@@ -1,8 +1,8 @@
 use std::ptr;
 use std::sync::{Arc, Mutex};
 
-use shiguredo_amf::amf::Surface;
-use shiguredo_amf::ffi::AMF_PLANE_TYPE;
+use shiguredo_amf::amf::{Context, Surface};
+use shiguredo_amf::ffi::{AMF_MEMORY_TYPE, AMF_PLANE_TYPE, AMF_SURFACE_FORMAT};
 use shiguredo_amf::{
     Av1EncoderConfig, Av1Profile, CodecConfig, Decoder, DecoderCodec, DecoderConfig, EncodeOptions,
     EncodedFrame, Encoder, EncoderConfig, FnDecodeHandler, FnEncodeHandler, FrameFormat,
@@ -12,7 +12,9 @@ use shiguredo_amf::{
 
 pub mod helpers;
 
-use helpers::{copy_nv12_to_surface, generate_dummy_nv12, h264_cbr_test_encoder_config};
+use helpers::{
+    copy_nv12_to_surface, create_context, generate_dummy_nv12, h264_cbr_test_encoder_config,
+};
 
 /// I420/YV12 データを Surface にコピーする
 fn copy_i420_to_surface(surface: &Surface, data: &[u8], width: usize, height: usize) {
@@ -226,7 +228,7 @@ fn psnr_y(original: &[u8], decoded_surface: &Surface, width: usize, height: usiz
 /// エンコードしてフレーム一覧を返すヘルパー
 ///
 /// 各 EncodedFrame のデータはコールバックで蓄積される。
-fn encode(config: EncoderConfig, frames: &[Vec<u8>]) -> Vec<EncodedFrame<()>> {
+fn encode(context: &Context, config: EncoderConfig, frames: &[Vec<u8>]) -> Vec<EncodedFrame<()>> {
     let width = config.width as usize;
     let height = config.height as usize;
     let format = config.frame_format;
@@ -234,6 +236,7 @@ fn encode(config: EncoderConfig, frames: &[Vec<u8>]) -> Vec<EncodedFrame<()>> {
     let result = Arc::new(Mutex::new(Vec::new()));
     let r = result.clone();
     let mut encoder = Encoder::new(
+        context.clone(),
         config,
         FnEncodeHandler::<()>::new(move |result| {
             r.lock().unwrap().push(result.unwrap());
@@ -262,6 +265,7 @@ fn encode(config: EncoderConfig, frames: &[Vec<u8>]) -> Vec<EncodedFrame<()>> {
 
 /// 強制キーフレームを含むシーケンスをエンコードする
 fn encode_with_forced_keyframe(
+    context: &Context,
     config: EncoderConfig,
     force_at: usize,
     num_frames: usize,
@@ -273,6 +277,7 @@ fn encode_with_forced_keyframe(
     let result = Arc::new(Mutex::new(Vec::new()));
     let r = result.clone();
     let mut encoder = Encoder::new(
+        context.clone(),
         config,
         FnEncodeHandler::<()>::new(move |result| {
             r.lock().unwrap().push(result.unwrap());
@@ -445,6 +450,7 @@ fn av1_contains_sequence_header_obu(data: &[u8]) -> bool {
 ///
 /// AMF デコーダーはフレーム単位でデータを受け取る必要がある。
 fn decode(
+    context: &Context,
     decoder_codec: DecoderCodec,
     encoded_frames: Vec<EncodedFrame<()>>,
 ) -> Vec<shiguredo_amf::DecodedFrame<()>> {
@@ -454,6 +460,7 @@ fn decode(
     let result = Arc::new(Mutex::new(Vec::new()));
     let r = result.clone();
     let mut decoder = Decoder::new(
+        context.clone(),
         config,
         FnDecodeHandler::<()>::new(move |result| {
             r.lock().unwrap().push(result.unwrap());
@@ -487,7 +494,9 @@ fn roundtrip(
     let height = encoder_config.height as usize;
     let num_frames = input_frames.len();
 
-    let encoded_frames = encode(encoder_config, input_frames);
+    // エンコードとデコードで同じ Context を共有する
+    let context = create_context();
+    let encoded_frames = encode(&context, encoder_config, input_frames);
 
     assert!(
         !encoded_frames.is_empty(),
@@ -500,7 +509,7 @@ fn roundtrip(
         );
     }
 
-    let decoded_frames = decode(decoder_codec, encoded_frames);
+    let decoded_frames = decode(&context, decoder_codec, encoded_frames);
 
     assert_eq!(
         decoded_frames.len(),
@@ -623,9 +632,11 @@ fn test_roundtrip_h264_force_idr() {
     let height = config.height as usize;
     let format = config.frame_format;
 
+    let context = create_context();
     let result = Arc::new(Mutex::new(Vec::new()));
     let r = result.clone();
     let mut encoder = Encoder::new(
+        context.clone(),
         config,
         FnEncodeHandler::<()>::new(move |result| {
             r.lock().unwrap().push(result.unwrap());
@@ -670,7 +681,7 @@ fn test_roundtrip_h264_force_idr() {
     );
 
     // フレーム単位でデコードして復号できることを確認する
-    let decoded_frames = decode(DecoderCodec::H264, encoded_frames);
+    let decoded_frames = decode(&context, DecoderCodec::H264, encoded_frames);
     assert_eq!(decoded_frames.len(), 15);
 }
 
@@ -691,7 +702,8 @@ fn test_force_picture_type_h264_outputs_idr_and_sps_pps() {
     config.target_kbps = Some(1000);
     config.gop_pic_size = Some(300);
 
-    let encoded_frames = encode_with_forced_keyframe(config, 10, 15);
+    let context = create_context();
+    let encoded_frames = encode_with_forced_keyframe(&context, config, 10, 15);
     let forced_idr_index = nth_idr_frame_index(&encoded_frames, 2);
     let forced_idr = &encoded_frames[forced_idr_index];
 
@@ -763,7 +775,8 @@ fn test_force_picture_type_hevc_outputs_idr_and_vps_sps_pps() {
     config.target_kbps = Some(1000);
     config.gop_pic_size = Some(300);
 
-    let encoded_frames = encode_with_forced_keyframe(config, 10, 15);
+    let context = create_context();
+    let encoded_frames = encode_with_forced_keyframe(&context, config, 10, 15);
     let forced_idr_index = nth_idr_frame_index(&encoded_frames, 2);
     let forced_idr = &encoded_frames[forced_idr_index];
 
@@ -835,7 +848,8 @@ fn test_force_picture_type_av1_outputs_keyframe_and_sequence_header() {
     config.target_kbps = Some(1000);
     config.gop_pic_size = Some(300);
 
-    let encoded_frames = encode_with_forced_keyframe(config, 10, 15);
+    let context = create_context();
+    let encoded_frames = encode_with_forced_keyframe(&context, config, 10, 15);
     let forced_key_index = nth_idr_frame_index(&encoded_frames, 2);
     let forced_key = &encoded_frames[forced_key_index];
 
@@ -860,8 +874,9 @@ fn test_reconfigure_invalid_framerate_zero() {
         1,
         RateControlMode::Cbr,
     );
-    let mut encoder =
-        Encoder::new(config, FnEncodeHandler::<()>::new(|_| {})).expect("エンコーダーの作成に失敗");
+    let context = create_context();
+    let mut encoder = Encoder::new(context.clone(), config, FnEncodeHandler::<()>::new(|_| {}))
+        .expect("エンコーダーの作成に失敗");
 
     let err = encoder
         .reconfigure(ReconfigureParams {
@@ -893,9 +908,11 @@ fn test_reconfigure_h264_runtime_change() {
     config.target_kbps = Some(1000);
     let format = config.frame_format;
 
+    let context = create_context();
     let result = Arc::new(Mutex::new(Vec::new()));
     let r = result.clone();
     let mut encoder = Encoder::new(
+        context.clone(),
         config,
         FnEncodeHandler::<()>::new(move |result| {
             r.lock().unwrap().push(result.unwrap());
@@ -944,7 +961,7 @@ fn test_reconfigure_h264_runtime_change() {
         "エンコード済みフレームが生成されなかった"
     );
 
-    let decoded = decode(DecoderCodec::H264, encoded_frames);
+    let decoded = decode(&context, DecoderCodec::H264, encoded_frames);
     assert_eq!(decoded.len(), 10);
 }
 
@@ -965,9 +982,11 @@ fn test_reconfigure_hevc_ignores_qpb_and_gop() {
     config.target_kbps = Some(1000);
     let format = config.frame_format;
 
+    let context = create_context();
     let result = Arc::new(Mutex::new(Vec::new()));
     let r = result.clone();
     let mut encoder = Encoder::new(
+        context.clone(),
         config,
         FnEncodeHandler::<()>::new(move |result| {
             r.lock().unwrap().push(result.unwrap());
@@ -1020,7 +1039,7 @@ fn test_reconfigure_hevc_ignores_qpb_and_gop() {
         "エンコード済みフレームが生成されなかった"
     );
 
-    let decoded = decode(DecoderCodec::Hevc, encoded_frames);
+    let decoded = decode(&context, DecoderCodec::Hevc, encoded_frames);
     assert_eq!(decoded.len(), 8);
 }
 
@@ -1041,9 +1060,11 @@ fn test_reconfigure_av1_qpb_and_gop() {
     config.target_kbps = Some(1000);
     let format = config.frame_format;
 
+    let context = create_context();
     let result = Arc::new(Mutex::new(Vec::new()));
     let r = result.clone();
     let mut encoder = Encoder::new(
+        context.clone(),
         config,
         FnEncodeHandler::<()>::new(move |result| {
             r.lock().unwrap().push(result.unwrap());
@@ -1096,7 +1117,7 @@ fn test_reconfigure_av1_qpb_and_gop() {
         "エンコード済みフレームが生成されなかった"
     );
 
-    let decoded = decode(DecoderCodec::Av1, encoded_frames);
+    let decoded = decode(&context, DecoderCodec::Av1, encoded_frames);
     assert_eq!(decoded.len(), 8);
 }
 
@@ -1518,10 +1539,12 @@ fn test_user_data_delivered_in_submit_order() {
     config.target_kbps = Some(1000);
     config.gop_pic_size = Some(30);
 
+    let context = create_context();
     let received = Arc::new(Mutex::new(Vec::new()));
     let r = received.clone();
 
     let mut encoder = Encoder::new(
+        context.clone(),
         config,
         FnEncodeHandler::<usize>::new(move |result| {
             r.lock().unwrap().push(result.unwrap().into_parts().1);
@@ -1560,7 +1583,9 @@ fn test_user_data_delivered_in_submit_order() {
 /// Surface のクローンが残っている場合はエンコードが拒否されることを確認する
 #[test]
 fn test_encode_rejects_surface_with_cloned_handle() {
+    let context = create_context();
     let mut encoder = Encoder::new(
+        context.clone(),
         h264_cbr_test_encoder_config(),
         FnEncodeHandler::<()>::new(|_| {}),
     )
@@ -1595,7 +1620,9 @@ fn test_encode_rejects_surface_with_cloned_handle() {
 /// Plane を保持したままの Surface のエンコードが拒否されることを確認する
 #[test]
 fn test_encode_rejects_surface_with_live_plane() {
+    let context = create_context();
     let mut encoder = Encoder::new(
+        context.clone(),
         h264_cbr_test_encoder_config(),
         FnEncodeHandler::<()>::new(|_| {}),
     )
@@ -1624,7 +1651,9 @@ fn test_encode_rejects_surface_with_live_plane() {
 /// PropertyStorage を保持したままの Surface のエンコードが拒否されることを確認する
 #[test]
 fn test_encode_rejects_surface_with_live_property_storage() {
+    let context = create_context();
     let mut encoder = Encoder::new(
+        context.clone(),
         h264_cbr_test_encoder_config(),
         FnEncodeHandler::<()>::new(|_| {}),
     )
@@ -1653,7 +1682,9 @@ fn test_encode_rejects_surface_with_live_property_storage() {
 /// Buffer のクローンが残っている場合はデコードが拒否されることを確認する
 #[test]
 fn test_decode_rejects_buffer_with_cloned_handle() {
+    let context = create_context();
     let encoded_frames = encode(
+        &context,
         h264_cbr_test_encoder_config(),
         &[generate_dummy_nv12(320, 240, 0)],
     );
@@ -1662,6 +1693,7 @@ fn test_decode_rejects_buffer_with_cloned_handle() {
     let cloned = first.buffer().clone();
 
     let mut decoder = Decoder::new(
+        context.clone(),
         DecoderConfig {
             codec: DecoderCodec::H264,
         },
@@ -1676,4 +1708,150 @@ fn test_decode_rejects_buffer_with_cloned_handle() {
         "共有ハンドル拒否のエラーではない: {err}"
     );
     drop(cloned);
+}
+
+// ---------------------------------------------------------------------------
+// Context ごとの独立性と Context 間の受け渡し拒否のテスト
+// ---------------------------------------------------------------------------
+
+/// デコーダーが出力した Surface を同じ Context の別の Encoder にそのまま投入できることを確認する
+#[test]
+fn test_decoded_surface_can_be_reencoded() {
+    const WIDTH: usize = 320;
+    const HEIGHT: usize = 240;
+    const NUM_FRAMES: usize = 3;
+
+    let context = create_context();
+    let input_frames: Vec<Vec<u8>> = (0..NUM_FRAMES)
+        .map(|i| generate_dummy_nv12(WIDTH, HEIGHT, i))
+        .collect();
+    let encoded_frames = encode(&context, h264_cbr_test_encoder_config(), &input_frames);
+    let decoded_frames = decode(&context, DecoderCodec::H264, encoded_frames);
+    assert_eq!(
+        decoded_frames.len(),
+        NUM_FRAMES,
+        "デコードされたフレーム数が期待値と一致しない"
+    );
+
+    // デコード結果の Surface を、デコーダーとは別の Encoder にそのまま投入する
+    let reencoded = Arc::new(Mutex::new(Vec::new()));
+    let r = Arc::clone(&reencoded);
+    let mut encoder = Encoder::new(
+        context.clone(),
+        h264_cbr_test_encoder_config(),
+        FnEncodeHandler::<()>::new(move |result| {
+            r.lock()
+                .expect("再エンコード結果の記録用 Mutex がポイズンされた")
+                .push(result.expect("再エンコード結果の受信に失敗"));
+        }),
+    )
+    .expect("エンコーダーの作成に失敗");
+
+    for frame in decoded_frames {
+        let (surface, _) = frame.into_parts();
+        encoder
+            .encode(surface, &EncodeOptions::default(), ())
+            .expect("デコード済み Surface の再エンコードに失敗");
+    }
+    encoder.finish().expect("finish に失敗");
+    drop(encoder);
+
+    let reencoded = Arc::try_unwrap(reencoded)
+        .expect("再エンコード結果の Arc の参照が残っている")
+        .into_inner()
+        .expect("再エンコード結果の Mutex がポイズンされた");
+    assert_eq!(
+        reencoded.len(),
+        NUM_FRAMES,
+        "再エンコードされたフレーム数が期待値と一致しない"
+    );
+    for (i, frame) in reencoded.iter().enumerate() {
+        assert!(
+            frame.buffer().get_size() > 0,
+            "再エンコード済みフレーム {i} のバッファが空"
+        );
+    }
+}
+
+/// 別の Context から確保した Surface はエンコードできないことを確認する
+#[test]
+fn test_encode_rejects_surface_from_other_context() {
+    let encoder_context = create_context();
+    let surface_context = create_context();
+    let mut encoder = Encoder::new(
+        encoder_context.clone(),
+        h264_cbr_test_encoder_config(),
+        FnEncodeHandler::<()>::new(|_| {}),
+    )
+    .expect("エンコーダーの作成に失敗");
+
+    let surface = surface_context
+        .alloc_surface(
+            AMF_MEMORY_TYPE::AMF_MEMORY_HOST,
+            AMF_SURFACE_FORMAT::AMF_SURFACE_NV12,
+            320,
+            240,
+        )
+        .expect("別 Context の Surface の確保に失敗");
+
+    let result = encoder.encode(surface, &EncodeOptions::default(), ());
+    let err = result.expect_err("別 Context の Surface のエンコードは失敗するはず");
+    assert!(
+        err.to_string().contains("does not belong"),
+        "Context 不一致のエラーではない: {err}"
+    );
+}
+
+/// 別の Context から確保した Buffer はデコードできないことを確認する
+#[test]
+fn test_decode_rejects_buffer_from_other_context() {
+    let encoder_context = create_context();
+    let decoder_context = create_context();
+
+    let encoded_frames = encode(
+        &encoder_context,
+        h264_cbr_test_encoder_config(),
+        &[generate_dummy_nv12(320, 240, 0)],
+    );
+    let mut encoded = encoded_frames.into_iter();
+    let first = encoded.next().expect("エンコード結果が空");
+
+    let mut decoder = Decoder::new(
+        decoder_context,
+        DecoderConfig {
+            codec: DecoderCodec::H264,
+        },
+        FnDecodeHandler::<()>::new(|_| {}),
+    )
+    .expect("デコーダーの作成に失敗");
+
+    let result = decoder.decode(first.into_parts().0, ());
+    let err = result.expect_err("別 Context の Buffer のデコードは失敗するはず");
+    assert!(
+        err.to_string().contains("does not belong"),
+        "Context 不一致のエラーではない: {err}"
+    );
+}
+
+/// 異なる Context の Encoder が独立して動作することを確認する
+#[test]
+fn test_multiple_contexts_encode_independently() {
+    let context_a = create_context();
+    let context_b = create_context();
+    let frame = generate_dummy_nv12(320, 240, 0);
+
+    for context in [context_a, context_b] {
+        let mut encoder = Encoder::new(
+            context,
+            h264_cbr_test_encoder_config(),
+            FnEncodeHandler::<()>::new(|_| {}),
+        )
+        .expect("エンコーダーの作成に失敗");
+        let surface = encoder.alloc_surface().expect("Surface の確保に失敗");
+        copy_nv12_to_surface(&surface, &frame, 320, 240);
+        encoder
+            .encode(surface, &EncodeOptions::default(), ())
+            .expect("エンコードに失敗");
+        encoder.finish().expect("finish に失敗");
+    }
 }

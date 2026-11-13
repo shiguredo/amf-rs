@@ -3,6 +3,7 @@
 //! AMF ランタイムのロード、バージョン照会、コーデック対応状況の表示、
 //! エンコーダー/デコーダーの初期化確認を行う。
 
+use shiguredo_amf::amf::Context;
 use shiguredo_amf::{
     AmfLibrary, Av1EncoderConfig, BUILD_VERSION, CodecConfig, Decoder, DecoderCodec, DecoderConfig,
     Encoder, EncoderConfig, EncodingProfiles, FnDecodeHandler, FnEncodeHandler, FrameFormat,
@@ -166,11 +167,11 @@ fn encoder_config(codec: VideoCodecType, width: u32, height: u32) -> EncoderConf
     config
 }
 
-fn check_encoder_init(codec: VideoCodecType, width: u32, height: u32) -> bool {
+fn check_encoder_init(context: &Context, codec: VideoCodecType, width: u32, height: u32) -> bool {
     let name = codec_name(codec);
     print!("[encoder] {name} init ({width}x{height}) ... ");
     let config = encoder_config(codec, width, height);
-    match Encoder::new(config, FnEncodeHandler::<()>::new(|_| {})) {
+    match Encoder::new(context.clone(), config, FnEncodeHandler::<()>::new(|_| {})) {
         Ok(_encoder) => {
             println!("OK");
             true
@@ -182,7 +183,7 @@ fn check_encoder_init(codec: VideoCodecType, width: u32, height: u32) -> bool {
     }
 }
 
-fn check_decoder_init(codec: VideoCodecType) -> bool {
+fn check_decoder_init(context: &Context, codec: VideoCodecType) -> bool {
     let name = codec_name(codec);
     print!("[decoder] {name} init ... ");
     let decoder_codec = match codec {
@@ -193,7 +194,7 @@ fn check_decoder_init(codec: VideoCodecType) -> bool {
     let config = DecoderConfig {
         codec: decoder_codec,
     };
-    match Decoder::new(config, FnDecodeHandler::<()>::new(|_| {})) {
+    match Decoder::new(context.clone(), config, FnDecodeHandler::<()>::new(|_| {})) {
         Ok(_decoder) => {
             println!("OK");
             true
@@ -209,10 +210,18 @@ fn check_component_init(width: u32, height: u32) -> bool {
     println!();
     println!("=== Component Init ===");
 
+    let context = match AmfLibrary::instance().create_context() {
+        Ok(context) => context,
+        Err(e) => {
+            println!("[context] create ... NG ({e})");
+            return false;
+        }
+    };
+
     let mut ok = true;
     for info in supported_codecs() {
         if info.encoding.supported {
-            if !check_encoder_init(info.codec, width, height) {
+            if !check_encoder_init(&context, info.codec, width, height) {
                 ok = false;
             }
         } else {
@@ -223,7 +232,7 @@ fn check_component_init(width: u32, height: u32) -> bool {
         }
 
         if info.decoding.supported {
-            if !check_decoder_init(info.codec) {
+            if !check_decoder_init(&context, info.codec) {
                 ok = false;
             }
         } else {
