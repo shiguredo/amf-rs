@@ -5,24 +5,18 @@
 //! vtable の関数ポインタは初期化時にすべて取り出して構造体メンバーに保持するため、
 //! メソッド呼び出しのたびに vtable 検証は行われない。
 //!
-//! ## スレッド安全性
-//!
-//! 同じ AMF オブジェクトを指すハンドルは、スレッドセーフでない操作を 1 回ずつ
-//! 直列化する。`Clone` したハンドルはラッパー経由の操作に限り別スレッドで
-//! 並行利用できる。
-//!
 //! ## 生ポインタ
 //!
 //! `as_ptr` が返すポインタは、そのハンドルが生存する間のみ有効である。
 //! `into_raw` は所有権を放棄して生ポインタを返し、`Release` は呼び出し元が行う。
 //! 所有権を放棄したハンドルの `Drop` は `Release` を呼ばない。
 //! `as_ptr` / `into_raw` / `get_native` が返す生ポインタ経由の AMF 呼び出しや
-//! メモリアクセスは、この直列化の対象外である。
+//! メモリアクセスは、呼び出し元の責任である。
 //!
 //! `from_raw` は参照カウントを増やさず、呼び出し元が持つ参照の所有権を引き継ぐ。
 //! `from_raw_acquired` は `Acquire` を呼んで参照カウントを 1 増やし、独立した参照を
-//! 持つハンドルを作成する。どちらも既存のハンドルと直列化されないため、既存の
-//! ハンドルがある場合はそれらと並行して利用してはならない。
+//! 持つハンドルを作成する。どちらも新しいハンドル状態を作るため、既存のハンドルと
+//! ハンドル数を共有しない。既存のハンドルがある場合は使ってはならない。
 //!
 //! ## コンポーネントへの投入
 //!
@@ -30,9 +24,6 @@
 //! 指す他のハンドルが存在してはならない。`Surface` の場合は `Clone`、`Plane`、
 //! `PropertyStorage` が該当する。AMF コンポーネントは投入したオブジェクトを解放する
 //! まで排他アクセスするため、他のハンドルからアクセスするとデータ競合になる。
-//!
-//! ロック保持中に panic する実装バグがあるとロックがポイズンされ、以降の操作は
-//! パニックする。
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -54,7 +45,7 @@ use crate::sys;
 
 /// 同じ AMF オブジェクトを指すハンドルで共有する状態
 #[derive(Debug)]
-struct AmfObjectState {
+pub(crate) struct AmfObjectState {
     /// スレッドセーフでない操作を直列化する Mutex
     mutex: Mutex<()>,
     /// この状態を共有するハンドルの数
@@ -63,7 +54,7 @@ struct AmfObjectState {
 
 impl AmfObjectState {
     /// ハンドル数 0 の新しい状態を作成する
-    fn new() -> Arc<Self> {
+    pub(crate) fn new() -> Arc<Self> {
         Arc::new(Self {
             mutex: Mutex::new(()),
             handles: AtomicUsize::new(0),
@@ -74,7 +65,7 @@ impl AmfObjectState {
     ///
     /// # Panics
     /// ロックがポイズンされている場合にパニックする。
-    fn lock(&self) -> MutexGuard<'_, ()> {
+    pub(crate) fn lock(&self) -> MutexGuard<'_, ()> {
         self.mutex.lock().expect("AMF object lock is poisoned")
     }
 
@@ -260,8 +251,8 @@ struct SurfaceFuncs {
 
 /// `AMFSurface` の RAII ラッパー
 ///
-/// `get_plane()` / `get_plane_at()` / `property_storage()` が返すハンドルの操作は、
-/// このハンドルの操作と直列化される。
+/// `get_plane()` / `get_plane_at()` / `property_storage()` が返すハンドルは、
+/// このハンドルと同じ AMF オブジェクトを指す。
 #[derive(Debug)]
 pub struct Surface {
     ptr: *mut sys::AMFSurface,
@@ -734,8 +725,8 @@ struct ContextFuncs {
 
 /// `AMFContext` の RAII ラッパー
 ///
-/// `alloc_surface()` / `alloc_buffer()` が返すハンドルの操作は、このハンドルの
-/// 操作とは直列化されない。
+/// `alloc_surface()` / `alloc_buffer()` が返すハンドルは、このハンドルとは別の
+/// AMF オブジェクトである。
 pub struct Context {
     ptr: *mut sys::AMFContext,
     f: ContextFuncs,
@@ -771,20 +762,15 @@ impl Context {
         Ok(Self { ptr, f, state })
     }
 
-    /// 生ポインタから Context を作成する (Acquire なし)
+    /// 共有状態を指定して生ポインタから Context を作成する (Acquire なし)
     ///
     /// # Safety
     /// `ptr` は有効な `AMFContext` を指すこと。
-    pub unsafe fn from_raw(ptr: *mut sys::AMFContext) -> Result<Self, Error> {
-        unsafe { Self::from_raw_with_acquire(ptr, false, AmfObjectState::new()) }
-    }
-
-    /// 生ポインタから Acquire 付きで Context を作成する
-    ///
-    /// # Safety
-    /// `ptr` は有効な `AMFContext` を指すこと。
-    pub unsafe fn from_raw_acquired(ptr: *mut sys::AMFContext) -> Result<Self, Error> {
-        unsafe { Self::from_raw_with_acquire(ptr, true, AmfObjectState::new()) }
+    pub(crate) unsafe fn from_raw_with_state(
+        ptr: *mut sys::AMFContext,
+        state: Arc<AmfObjectState>,
+    ) -> Result<Self, Error> {
+        unsafe { Self::from_raw_with_acquire(ptr, false, state) }
     }
 
     /// 生ポインタを返す。
@@ -862,7 +848,7 @@ impl Context {
     ///
     /// # Safety
     /// `device` は有効な Vulkan デバイスを指すこと。
-    pub unsafe fn init_vulkan(&self, device: *mut std::ffi::c_void) -> Result<(), Error> {
+    pub(crate) unsafe fn init_vulkan(&self, device: *mut std::ffi::c_void) -> Result<(), Error> {
         let _guard = self.state.lock();
 
         let mut context1_ptr: *mut std::ffi::c_void = std::ptr::null_mut();
@@ -955,15 +941,19 @@ struct ComponentFuncs {
 
 /// `AMFComponent` の RAII ラッパー
 ///
-/// `AMFComponent` は AMF の仕様で thread-safe であり、自身のメソッドは複数スレッドから
-/// 並行に呼べる。`Component` 自身のメソッドはロックしない。
-/// `property_storage()` が返す `PropertyStorage` のプロパティ操作は、同じ `Component`
-/// から取得した他の `PropertyStorage` のプロパティ操作と直列化される。`Component` の
-/// メソッドと `PropertyStorage` の操作は直列化されない。
+/// # スレッド安全性について
+///
+/// `AMFComponent` は、ドキュメント上はスレッドセーフと記載されているが、実際はスレッドセーフではない。
+/// 少なくとも `AMFComponent::Init()` および `AMFComponent::ReInit()` では、グローバルなオブジェクトをロック無しで触れている。
+/// そのため [Component] はプロセス全体で共有のロックを保持し、[Component::init()] および [Component::re_init()] で
+/// グローバルなロックをすることでスレッド安全性を確保している。
 pub struct Component {
     ptr: *mut sys::AMFComponent,
     f: ComponentFuncs,
+    /// コンポーネント固有の状態
     state: Arc<AmfObjectState>,
+    /// プロセス全体で共有する状態
+    process_state: Arc<AmfObjectState>,
 }
 
 unsafe impl Send for Component {}
@@ -977,6 +967,7 @@ impl Component {
     unsafe fn from_raw_with_acquire(
         ptr: *mut sys::AMFComponent,
         acquire: bool,
+        process_state: Arc<AmfObjectState>,
     ) -> Result<Self, Error> {
         let state = AmfObjectState::new();
         let vtbl = unsafe { &*(*ptr).pVtbl };
@@ -996,23 +987,24 @@ impl Component {
             unsafe { (f.acquire)(ptr) };
         }
         state.inc();
-        Ok(Self { ptr, f, state })
+        process_state.inc();
+        Ok(Self {
+            ptr,
+            f,
+            state,
+            process_state,
+        })
     }
 
-    /// 生ポインタから Component を作成する (Acquire なし)
+    /// プロセス全体の状態を指定して生ポインタから Component を作成する (Acquire なし)
     ///
     /// # Safety
     /// `ptr` は有効な `AMFComponent` を指すこと。
-    pub unsafe fn from_raw(ptr: *mut sys::AMFComponent) -> Result<Self, Error> {
-        unsafe { Self::from_raw_with_acquire(ptr, false) }
-    }
-
-    /// 生ポインタから Acquire 付きで Component を作成する
-    ///
-    /// # Safety
-    /// `ptr` は有効な `AMFComponent` を指すこと。
-    pub unsafe fn from_raw_acquired(ptr: *mut sys::AMFComponent) -> Result<Self, Error> {
-        unsafe { Self::from_raw_with_acquire(ptr, true) }
+    pub(crate) unsafe fn from_raw_with_state(
+        ptr: *mut sys::AMFComponent,
+        process_state: Arc<AmfObjectState>,
+    ) -> Result<Self, Error> {
+        unsafe { Self::from_raw_with_acquire(ptr, false, process_state) }
     }
 
     /// 生ポインタを返す。
@@ -1034,11 +1026,13 @@ impl Component {
         width: sys::amf_int32,
         height: sys::amf_int32,
     ) -> sys::AMF_RESULT {
+        let _guard = self.process_state.lock();
         unsafe { (self.f.init)(self.ptr, format, width, height) }
     }
 
     /// コンポーネントを再初期化する (解像度変更)
     pub fn re_init(&self, width: sys::amf_int32, height: sys::amf_int32) -> sys::AMF_RESULT {
+        let _guard = self.process_state.lock();
         unsafe { (self.f.re_init)(self.ptr, width, height) }
     }
 
@@ -1098,10 +1092,12 @@ impl Clone for Component {
             (self.f.acquire)(self.ptr);
         }
         self.state.inc();
+        self.process_state.inc();
         Self {
             ptr: self.ptr,
             f: self.f,
             state: Arc::clone(&self.state),
+            process_state: Arc::clone(&self.process_state),
         }
     }
 }
@@ -1109,6 +1105,7 @@ impl Clone for Component {
 impl Drop for Component {
     fn drop(&mut self) {
         self.state.dec();
+        self.process_state.dec();
         if self.ptr.is_null() {
             return;
         }

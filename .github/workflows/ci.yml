@@ -56,7 +56,7 @@ jobs:
       # ツールチェーンは rust-toolchain.toml で MSRV に固定している
       - run: cargo build --workspace
       - run: cargo clippy --workspace --all-targets -- -D warnings
-      - run: cargo test --workspace -- --test-threads=1
+      - run: cargo test --workspace
 
   # docs.rs 向けビルド確認
   docs-rs:
