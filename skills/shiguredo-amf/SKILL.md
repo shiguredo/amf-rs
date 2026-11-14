@@ -395,13 +395,13 @@ HEVC の 10bit 入力には `HevcProfile::Main10` が必要である。`HevcProf
 | `Rgba` | Packed RGBA 8bit | 利用できる |
 | `Yuy2` | Packed YUV 4:2:2 8bit (YUY2) | 利用できる |
 | `Uyvy` | Packed YUV 4:2:2 8bit (UYVY) | GPU と AMF の実装に依存する |
-| `P010` | Semi-Planar YUV 4:2:0 10bit | GPU と AMF の実装に依存する。HEVC は `HevcProfile::Main10` が必須、AV1 は `Av1Profile::Main` で利用できる |
-| `P012` | Semi-Planar YUV 4:2:0 12bit (16bit 格納) | AMF が 8bit / 10bit 以外を扱えないため、初期化に失敗する |
-| `P016` | Semi-Planar YUV 4:2:0 16bit | AMF が 8bit / 10bit 以外を扱えないため、初期化に失敗する |
-| `Y210` | Packed YUV 4:2:2 10bit (16bit 格納) | GPU と AMF の実装に依存する |
+| `P010` | Semi-Planar YUV 4:2:0 10bit (16bit 格納、上位 10bit) | GPU と AMF の実装に依存する。HEVC は `HevcProfile::Main10` が必須、AV1 は `Av1Profile::Main` で利用できる |
+| `P012` | Semi-Planar YUV 4:2:0 12bit (16bit 格納、上位 12bit) | AMF が 8bit / 10bit 以外を扱えないため、初期化に失敗する |
+| `P016` | Semi-Planar YUV 4:2:0 16bit (16bit 格納、全ビット) | AMF が 8bit / 10bit 以外を扱えないため、初期化に失敗する |
+| `Y210` | Packed YUV 4:2:2 10bit (16bit ワードの上位 10bit) | GPU と AMF の実装に依存する |
 | `Ayuv` | Packed YUV 4:4:4 8bit | GPU と AMF の実装に依存する |
-| `Y410` | Packed YUV 4:4:4 10bit | GPU と AMF の実装に依存する |
-| `Y416` | Packed YUV 4:4:4 16bit | AMF が 8bit / 10bit 以外を扱えないため、初期化に失敗する |
+| `Y410` | Packed YUV 4:4:4 10bit (32bit ワード、下位から U (10bit) / Y (10bit) / V (10bit) / A (2bit)) | GPU と AMF の実装に依存する |
+| `Y416` | Packed YUV 4:4:4 16bit (16bit ワード、全ビット) | AMF が 8bit / 10bit 以外を扱えないため、初期化に失敗する |
 
 `FrameFormat::frame_size(width, height) -> Option<usize>` で各フォーマットのフレームバイト数を計算できる (オーバーフロー時は `None`)。
 

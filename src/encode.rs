@@ -40,19 +40,19 @@ pub enum FrameFormat {
     Yuy2,
     /// Packed YUV 4:2:2 8bit (UYVY)
     Uyvy,
-    /// Semi-Planar YUV 4:2:0 10bit
+    /// Semi-Planar YUV 4:2:0 10bit (16bit 格納、上位 10bit)
     P010,
-    /// Semi-Planar YUV 4:2:0 12bit (16bit 格納)
+    /// Semi-Planar YUV 4:2:0 12bit (16bit 格納、上位 12bit)
     P012,
-    /// Semi-Planar YUV 4:2:0 16bit
+    /// Semi-Planar YUV 4:2:0 16bit (16bit 格納、全ビット)
     P016,
-    /// Packed YUV 4:2:2 10bit (16bit 格納)
+    /// Packed YUV 4:2:2 10bit (16bit ワードの上位 10bit)
     Y210,
     /// Packed YUV 4:4:4 8bit
     Ayuv,
-    /// Packed YUV 4:4:4 10bit
+    /// Packed YUV 4:4:4 10bit (32bit ワード、下位から U (10bit) / Y (10bit) / V (10bit) / A (2bit))
     Y410,
-    /// Packed YUV 4:4:4 16bit
+    /// Packed YUV 4:4:4 16bit (16bit ワード、全ビット)
     Y416,
 }
 
@@ -78,11 +78,12 @@ impl FrameFormat {
         }
     }
 
-    /// `AMF_COLOR_BIT_DEPTH_ENUM` に設定する値を返す
+    /// このフレームフォーマットに対応する出力ビット深度を返す
     ///
-    /// AMF が 8bit / 10bit 以外のビット深度を表現できないため、P012 / P016 / Y416 は
-    /// `None` を返す。
-    fn color_bit_depth(self) -> Option<amf_int64> {
+    /// AMF が扱えない 12bit / 16bit のフォーマットでは `None` を返し、
+    /// AMF の既定 (8bit) に任せる。
+    fn output_color_bit_depth(self) -> Option<amf_int64> {
+        // AMF_COLOR_BIT_DEPTH_ENUM には 8bit と 10bit しかない
         match self {
             FrameFormat::Nv12
             | FrameFormat::Yv12
@@ -732,17 +733,30 @@ impl<H: EncodeHandler> Encoder<H> {
         // Profile
         if let Some(profile) = h264.profile {
             let profile_val: amf_int64 = match profile {
-                H264Profile::Baseline => 66,
-                H264Profile::Main => 77,
-                H264Profile::High => 100,
-                H264Profile::ConstrainedBaseline => 256,
-                H264Profile::ConstrainedHigh => 257,
+                H264Profile::Baseline => {
+                    sys::AMF_VIDEO_ENCODER_PROFILE_ENUM_AMF_VIDEO_ENCODER_PROFILE_BASELINE
+                        as amf_int64
+                }
+                H264Profile::Main => {
+                    sys::AMF_VIDEO_ENCODER_PROFILE_ENUM_AMF_VIDEO_ENCODER_PROFILE_MAIN as amf_int64
+                }
+                H264Profile::High => {
+                    sys::AMF_VIDEO_ENCODER_PROFILE_ENUM_AMF_VIDEO_ENCODER_PROFILE_HIGH as amf_int64
+                }
+                H264Profile::ConstrainedBaseline => {
+                    sys::AMF_VIDEO_ENCODER_PROFILE_ENUM_AMF_VIDEO_ENCODER_PROFILE_CONSTRAINED_BASELINE
+                        as amf_int64
+                }
+                H264Profile::ConstrainedHigh => {
+                    sys::AMF_VIDEO_ENCODER_PROFILE_ENUM_AMF_VIDEO_ENCODER_PROFILE_CONSTRAINED_HIGH
+                        as amf_int64
+                }
             };
             prop.set_property_int64(sys::str::AMF_VIDEO_ENCODER_PROFILE, profile_val)?;
         }
 
         // 出力ビットストリームのビット深度
-        if let Some(color_bit_depth) = config.frame_format.color_bit_depth() {
+        if let Some(color_bit_depth) = config.frame_format.output_color_bit_depth() {
             prop.set_property_int64(sys::str::AMF_VIDEO_ENCODER_COLOR_BIT_DEPTH, color_bit_depth)?;
         }
 
@@ -794,14 +808,20 @@ impl<H: EncodeHandler> Encoder<H> {
 
         if let Some(profile) = hevc.profile {
             let profile_val: amf_int64 = match profile {
-                HevcProfile::Main => 1,
-                HevcProfile::Main10 => 2,
+                HevcProfile::Main => {
+                    sys::AMF_VIDEO_ENCODER_HEVC_PROFILE_ENUM_AMF_VIDEO_ENCODER_HEVC_PROFILE_MAIN
+                        as amf_int64
+                }
+                HevcProfile::Main10 => {
+                    sys::AMF_VIDEO_ENCODER_HEVC_PROFILE_ENUM_AMF_VIDEO_ENCODER_HEVC_PROFILE_MAIN_10
+                        as amf_int64
+                }
             };
             prop.set_property_int64(sys::str::AMF_VIDEO_ENCODER_HEVC_PROFILE, profile_val)?;
         }
 
         // 出力ビットストリームのビット深度
-        if let Some(color_bit_depth) = config.frame_format.color_bit_depth() {
+        if let Some(color_bit_depth) = config.frame_format.output_color_bit_depth() {
             prop.set_property_int64(
                 sys::str::AMF_VIDEO_ENCODER_HEVC_COLOR_BIT_DEPTH,
                 color_bit_depth,
@@ -854,12 +874,23 @@ impl<H: EncodeHandler> Encoder<H> {
     fn set_av1_properties(
         prop: &PropertyStorage,
         config: &EncoderConfig,
-        _av1: &Av1EncoderConfig,
+        av1: &Av1EncoderConfig,
     ) -> Result<(), Error> {
         prop.set_property_int64(sys::str::AMF_VIDEO_ENCODER_AV1_USAGE, 0)?;
 
+        // Profile
+        if let Some(profile) = av1.profile {
+            let profile_val: amf_int64 = match profile {
+                Av1Profile::Main => {
+                    sys::AMF_VIDEO_ENCODER_AV1_PROFILE_ENUM_AMF_VIDEO_ENCODER_AV1_PROFILE_MAIN
+                        as amf_int64
+                }
+            };
+            prop.set_property_int64(sys::str::AMF_VIDEO_ENCODER_AV1_PROFILE, profile_val)?;
+        }
+
         // 出力ビットストリームのビット深度
-        if let Some(color_bit_depth) = config.frame_format.color_bit_depth() {
+        if let Some(color_bit_depth) = config.frame_format.output_color_bit_depth() {
             prop.set_property_int64(
                 sys::str::AMF_VIDEO_ENCODER_AV1_COLOR_BIT_DEPTH,
                 color_bit_depth,
