@@ -28,7 +28,7 @@ AMF ランタイムライブラリ (libamfrt64.so.1) は AMD GPU ドライバー
 - AMF によるハードウェアデコード (H.264 / H.265 / AV1)
 - AMF ランタイムライブラリの実行時動的ロード (ビルド時のリンク不要)
 - Vulkan バックエンドによる GPU 処理
-- エンコード入力フォーマット選択 (NV12 / YV12 / I420 / BGRA / ARGB / RGBA / YUY2 / UYVY / P010 / P012 / P016 / Y210 / AYUV / Y410 / Y416)
+- エンコード入力フォーマット選択 (AMD Radeon 780M では NV12 / YV12 / I420 / BGRA / ARGB / RGBA / YUY2 / P010 を確認済み。P010 は HEVC と AV1 で利用できる)
 - デコード出力は NV12 フォーマット
 - フレーム単位のエンコードオプション (IDR フレーム強制)
 - エンコード中の動的プロパティ再設定 (`reconfigure`)
@@ -42,6 +42,23 @@ AMF ランタイムライブラリ (libamfrt64.so.1) は AMD GPU ドライバー
 - AMD GPU ドライバー (AMF ランタイムライブラリを含む)
 - Vulkan ドライバー
 - ビルド時: git
+
+### 動作確認済み環境
+
+- AMD Ryzen 9 7940HS
+- AMD Radeon 780M Graphics (Phoenix1)
+- Ubuntu 26.04.1 LTS
+- AMF ランタイム 1.5.3.0 (AMF SDK 1.5.2)
+- Vulkan: RADV PHOENIX (Mesa 26.0.8)
+
+この環境で確認したエンコード入力フォーマットは次のとおりです。
+
+| フォーマット | 結果 |
+|---|---|
+| NV12 / YV12 / I420 / BGRA / ARGB / RGBA / YUY2 | 利用できる |
+| P010 | 利用できる (HEVC は `HevcProfile::Main10`、AV1 は `Av1Profile::Main` で確認) |
+| UYVY / AYUV / Y210 / Y410 | 利用できない |
+| P012 / P016 / Y416 | 利用できない |
 
 ## ビルド
 
@@ -235,23 +252,30 @@ cargo run -p amf-check -- --width 1280 --height 720
 
 ### エンコード入力フォーマット (`FrameFormat`)
 
-| フォーマット | `FrameFormat` | 説明 |
-|---|---|---|
-| NV12 | `FrameFormat::Nv12` | Semi-Planar YUV 4:2:0 8bit |
-| YV12 | `FrameFormat::Yv12` | Planar YUV 4:2:0 8bit (Y+V+U) |
-| I420 | `FrameFormat::I420` | Planar YUV 4:2:0 8bit (Y+U+V) |
-| BGRA | `FrameFormat::Bgra` | Packed BGRA 8bit |
-| ARGB | `FrameFormat::Argb` | Packed ARGB 8bit |
-| RGBA | `FrameFormat::Rgba` | Packed RGBA 8bit |
-| YUY2 | `FrameFormat::Yuy2` | Packed YUV 4:2:2 8bit |
-| UYVY | `FrameFormat::Uyvy` | Packed YUV 4:2:2 8bit |
-| P010 | `FrameFormat::P010` | Semi-Planar YUV 4:2:0 10bit |
-| P012 | `FrameFormat::P012` | Semi-Planar YUV 4:2:0 12bit (16bit 格納) |
-| P016 | `FrameFormat::P016` | Semi-Planar YUV 4:2:0 16bit |
-| Y210 | `FrameFormat::Y210` | Packed YUV 4:2:2 10bit (16bit 格納) |
-| AYUV | `FrameFormat::Ayuv` | Packed YUV 4:4:4 8bit |
-| Y410 | `FrameFormat::Y410` | Packed YUV 4:4:4 10bit |
-| Y416 | `FrameFormat::Y416` | Packed YUV 4:4:4 16bit |
+入力フォーマットのビット深度は `FrameFormat` ごとに決まります。
+H.264 は 8bit 入力のみ、HEVC と AV1 は 8bit と 10bit の入力に対応します。
+HEVC のプロファイルは `HevcProfile` で指定します。
+HEVC の 10bit 入力には `HevcProfile::Main10` が必要です。`HevcProfile::Main` またはプロファイル未指定 (既定の Main) との組み合わせは `Encoder::new` がエラーを返します。
+入力フォーマットとプロファイルの組み合わせを利用できるかは GPU と AMF の実装に依存し、利用できない場合は `Encoder::new` がエラーを返します。
+`HevcProfile::Main10` と 8bit 入力の組み合わせも、AMF が受け付ければ利用できます。
+
+| フォーマット | `FrameFormat` | 説明 | 利用条件 |
+|---|---|---|---|
+| NV12 | `FrameFormat::Nv12` | Semi-Planar YUV 4:2:0 8bit | 利用できる |
+| YV12 | `FrameFormat::Yv12` | Planar YUV 4:2:0 8bit (Y+V+U) | 利用できる |
+| I420 | `FrameFormat::I420` | Planar YUV 4:2:0 8bit (Y+U+V) | 利用できる |
+| BGRA | `FrameFormat::Bgra` | Packed BGRA 8bit | 利用できる |
+| ARGB | `FrameFormat::Argb` | Packed ARGB 8bit | 利用できる |
+| RGBA | `FrameFormat::Rgba` | Packed RGBA 8bit | 利用できる |
+| YUY2 | `FrameFormat::Yuy2` | Packed YUV 4:2:2 8bit | 利用できる |
+| UYVY | `FrameFormat::Uyvy` | Packed YUV 4:2:2 8bit | GPU と AMF の実装に依存する |
+| P010 | `FrameFormat::P010` | Semi-Planar YUV 4:2:0 10bit (16bit 格納、上位 10bit) | GPU と AMF の実装に依存する。HEVC は `HevcProfile::Main10` が必須、AV1 は `Av1Profile::Main` で利用できる |
+| P012 | `FrameFormat::P012` | Semi-Planar YUV 4:2:0 12bit (16bit 格納、上位 12bit) | AMF が 8bit / 10bit 以外を扱えないため、初期化に失敗する |
+| P016 | `FrameFormat::P016` | Semi-Planar YUV 4:2:0 16bit (16bit 格納、全ビット) | AMF が 8bit / 10bit 以外を扱えないため、初期化に失敗する |
+| Y210 | `FrameFormat::Y210` | Packed YUV 4:2:2 10bit (16bit ワードの上位 10bit) | GPU と AMF の実装に依存する |
+| AYUV | `FrameFormat::Ayuv` | Packed YUV 4:4:4 8bit | GPU と AMF の実装に依存する |
+| Y410 | `FrameFormat::Y410` | Packed YUV 4:4:4 10bit (32bit ワード、下位から U (10bit) / Y (10bit) / V (10bit) / A (2bit)) | GPU と AMF の実装に依存する |
+| Y416 | `FrameFormat::Y416` | Packed YUV 4:4:4 16bit (16bit ワード、全ビット) | AMF が 8bit / 10bit 以外を扱えないため、初期化に失敗する |
 
 ### デコード出力フォーマット
 
@@ -276,7 +300,7 @@ cargo run -p amf-check -- --width 1280 --height 720
 | プロファイル | `HevcProfile` |
 |------------|--------------|
 | Main       | `HevcProfile::Main` |
-| Main 10    | `HevcProfile::Main10` |
+| Main10     | `HevcProfile::Main10` |
 
 ### AV1 (`Av1Profile`)
 

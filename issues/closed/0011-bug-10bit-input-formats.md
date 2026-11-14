@@ -1,7 +1,7 @@
 # 10bit 系の入力フォーマットと Main10 プロファイルで初期化できるようにする
 
 - Created: 2026-11-10
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-11-14
 - Branch: feature/fix-10bit-input-formats
 - Polished: {YYYY-MM-DD}
 - Reporter: @melpon
@@ -36,3 +36,19 @@ README と `skills/shiguredo-amf/SKILL.md` は 15 種類の入力フォーマッ
 - README と `skills/shiguredo-amf/SKILL.md` の対応表が実態と一致する。
 - テストが追加され、`cargo test --workspace` が通る。
 - `CHANGES.md` の `## develop` に変更を追記する。
+
+## 解決方法
+
+- `FrameFormat::color_bit_depth` で入力フォーマットのビット深度を決め、`Encoder::new` で `AMF_VIDEO_ENCODER_COLOR_BIT_DEPTH` / `AMF_VIDEO_ENCODER_HEVC_COLOR_BIT_DEPTH` / `AMF_VIDEO_ENCODER_AV1_COLOR_BIT_DEPTH` を設定する
+- H.264 は 8bit 入力のみ、HEVC と AV1 は 8bit と 10bit の入力に対応する
+- 入力フォーマットとプロファイルの組み合わせは基本的に AMF に任せるが、HEVC の 10bit 入力と Main プロファイル (プロファイル未指定を含む) の組み合わせは、AMF が Main プロファイルに適合しない 10bit ストリームを生成するため、`Encoder::new` がエラーを返す
+- P012 / P016 / Y416 は AMF の `AMF_COLOR_BIT_DEPTH_ENUM` が扱えないため色深度を設定せず、AMF の `AMFComponent::Init` に任せる
+- UYVY / AYUV / Y210 / Y410 は GPU と AMF の実装に依存するフォーマットとして README と `skills/shiguredo-amf/SKILL.md` に明記する
+- `tests/test_encode.rs` に以下を追加する
+  - P010 + HEVC Main10 / P010 + AV1 の初期化とエンコード
+  - HEVC の 10bit 入力と Main / プロファイル未指定の組み合わせの拒否
+  - Y210 / Y410 の初期化。非対応の場合は `AMFComponent::Init` が返す `AMF_INVALID_FORMAT` を検証する
+- `cargo test --workspace` を実行し、実機 (shiguredo-amd-um790) で全テストが通ることを確認する
+
+当初の完了条件にあった「非対応の組み合わせは `AMF_INVALID_FORMAT` ではなく `Encoder::new` の明確なエラーにする」は採用しない。
+ただし、AMF が Main プロファイルのまま 10bit を出力する HEVC の組み合わせだけは、ライブラリ側で拒否する。
