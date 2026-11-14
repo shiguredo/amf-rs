@@ -1,7 +1,7 @@
 # Decoder の `AMF_REPEAT` 処理を修正し、複数フレームを含むバッファをデコードできるようにする
 
 - Created: 2026-11-10
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-11-14
 - Branch: feature/fix-decoder-amf-repeat
 - Polished: {YYYY-MM-DD}
 - Reporter: @melpon
@@ -34,3 +34,9 @@ AMF の仕様では、`AMFComponent::SubmitInput` が `AMF_REPEAT` を返した�
 - `AMF_REPEAT` の処理を検証するテストが追加される。
 - `Decoder::decode` の doc が実装に合っている。
 - `CHANGES.md` の `## develop` に `[FIX]` を追記する。
+
+## 対応しない理由
+
+複数フレームを含むバッファの対応を検討したが、実機では 2〜9 アクセスユニットを 1 バッファに連結しても `AMF_REPEAT` は返らず、AMF は `AMF_OK` で複数フレームを処理する。`AMF_REPEAT` は複数フレームの検出には使えず、返るかどうかは AMF 内部の処理可能量に依存する。
+
+そのため `SubmitInput(NULL)` を呼ぶだけでは複数フレームの `user_data` 対応付けを一意に定義できない。1 バッファ 1 フレームを API の前提とし、`AMF_REPEAT` が返された場合はエラーにする方針を採用したため、この issue は対応しない。
