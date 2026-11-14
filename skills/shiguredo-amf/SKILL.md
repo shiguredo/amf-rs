@@ -269,7 +269,7 @@ for frame in decoded.lock().unwrap().iter() {
 
 デコーダーは初期化時に解像度 `0x0` で AMF コンポーネントを Init するため、ビットストリームのシーケンスヘッダーから解像度が自動検出される。出力 `Surface` は内部で `convert(AMF_MEMORY_HOST)` 済みのため、`get_plane()` 経由でホストメモリから直接読み出せる。
 
-`decode()` には 1 フレーム分のビットストリームを格納した `Buffer` を渡す。B フレームを含むストリームでは出力順が入力順と異なるが、`decode()` に渡した `UserData` は対応する出力フレームに付く。`decode()` は入力 `Buffer` に設定した PTS を対応する出力 `Surface` に引き継ぐ。PTS を設定していない場合は 0 になる。B フレームを含むストリームでは出力 `Surface` の PTS も入力順には並ばない。
+`decode()` には 1 フレーム分のビットストリームを格納した `Buffer` を渡す。複数フレームを含むバッファは未対応で、`AMF_REPEAT` が返された場合はエラーになる。B フレームを含むストリームでは出力順が入力順と異なるが、`decode()` に渡した `UserData` は対応する出力フレームに付く。`decode()` は入力 `Buffer` に設定した PTS を対応する出力 `Surface` に引き継ぐ。PTS を設定していない場合は 0 になる。B フレームを含むストリームでは出力 `Surface` の PTS も入力順には並ばない。
 
 `Decoder::new` の第 1 引数には `Context` を渡す。同じ `Context` を Clone して `Encoder::new` にも渡すと、デコード結果の `Surface` をコピーせずにエンコードできる。
 
@@ -428,7 +428,7 @@ H.264 / HEVC / AV1 で AMF SDK 内部の enum 値順序が異なるが、`shigur
 - `AmfLibrary` はプロセスシングルトン (`LazyLock<AmfLibrary>`)。AMF ランタイムを遅延初期化し、`create_context()` で新しい `Context` を作成する。
 - `Context` は `AMFContext` の参照カウントを直接管理する Clone 可能なハンドルである。`Clone` は `AMFContext::Acquire`、`Drop` は `AMFContext::Release` を呼ぶ。最後の参照が解放されたときに AMFContext のデストラクタが `Terminate` を呼ぶ。
 - `Encoder<H>` / `Decoder<H>` は内部で `amf-encoder-worker` / `amf-decoder-worker` という名前のワーカースレッドを起動し、`mpsc::channel` で `Submit` / `Finish` コマンドを受け取る。
-- `encode()` / `decode()` はメインスレッドから `SubmitInput` を呼ぶ (必要に応じて `AMF_INPUT_FULL` / `AMF_REPEAT` / `AMF_DECODER_NO_FREE_SURFACES` で 1ms スリープしながら最大 100 回までリトライ)。どちらも投入に成功した後で `UserData` をワーカーへ送る。`decode()` は対応付け用 PTS と元の PTS も一緒に送る。
+- `encode()` はメインスレッドから `SubmitInput` を呼び、`AMF_INPUT_FULL` / `AMF_REPEAT` / `AMF_DECODER_NO_FREE_SURFACES` で 1ms スリープしながら最大 100 回までリトライする。`decode()` も `AMF_INPUT_FULL` / `AMF_DECODER_NO_FREE_SURFACES` ではリトライするが、`AMF_REPEAT` は複数フレームを含むバッファとしてエラーにする。どちらも投入に成功した後で `UserData` をワーカーへ送る。`decode()` は対応付け用 PTS と元の PTS も一緒に送る。
 - デコーダーのワーカーは、`decode()` が入力ごとに割り当てた PTS をキーに `UserData` を保持し、`QueryOutput` が返す `Surface` の PTS と一致した時点で `on_decoded` を呼ぶ。`Submit` コマンドの処理が出力の取得より遅れた場合は、`UserData` が登録されるまで出力を保持する。`finish()` で出力が得られなかった入力や、対応する入力がない出力はエラーとして通知する。`Finish` を受け取った後は入力フレームを受け付けない。`finish()` を呼び出した後に `decode()` を呼ぶとエラーを返す。
 - エンコーダーのワーカーは `pending` キューと `QueryOutput` の出力を FIFO で対応付け、対応が取れたところで `on_encoded` を呼ぶ。現行のエンコーダーは B フレームを生成しないため、この対応付けは投入順と一致する。
 - `finish()` は `Drain` を呼んだあと `Finish(sync_channel)` をワーカーに送り、ワーカーの完了まで待つ。

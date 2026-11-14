@@ -211,7 +211,7 @@ impl<H: DecodeHandler> Decoder<H> {
     /// `user_data` はデコード完了時にハンドラーへ渡される。
     ///
     /// `buffer` には 1 フレーム分のビットストリームを格納すること。複数フレームを
-    /// 含むバッファを渡した場合、2 フレーム目以降の出力でハンドラーにエラーが通知される。
+    /// 含むバッファを渡した場合の挙動は実装依存となる。
     ///
     /// `buffer` はこのデコーダーと同じ `Context` から確保したものでなければならない。
     /// 別の Context から確保した Buffer を渡した場合はエラーを返す。`buffer` が他の
@@ -259,69 +259,59 @@ impl<H: DecodeHandler> Decoder<H> {
         log::debug!("Decoder::decode");
 
         let max_retries = 100;
-        let mut submitted = false;
-        let mut result = AMF_RESULT::AMF_FAIL;
         for retry in 0..max_retries {
-            result = unsafe { self.component.submit_input(buffer.as_ptr() as *mut AMFData) };
+            let result = unsafe { self.component.submit_input(buffer.as_ptr() as *mut AMFData) };
 
             if retry > 0 && retry % 10 == 0 {
                 log::debug!("Decoder::SubmitInput: retry={retry}, result={result:?}");
             }
-            if result == AMF_RESULT::AMF_OK || result == AMF_RESULT::AMF_NEED_MORE_INPUT {
+            if matches!(result, AMF_RESULT::AMF_OK | AMF_RESULT::AMF_NEED_MORE_INPUT) {
                 log::debug!("Decoder::SubmitInput: accepted, result={result:?}");
-                submitted = true;
-                break;
+                // pts に対応する user_data の情報をワーカーに登録する
+                self.cmd_tx
+                    .as_ref()
+                    .expect("cmd_tx is available until Decoder is dropped")
+                    .send(WorkerCommand::Submit {
+                        pts,
+                        original_pts,
+                        user_data,
+                    })
+                    .map_err(|_| {
+                        Error::new_custom("Decoder::decode", "worker thread terminated")
+                    })?;
+                return Ok(());
             }
-            if result == AMF_RESULT::AMF_INPUT_FULL
-                || result == AMF_RESULT::AMF_DECODER_NO_FREE_SURFACES
-                || result == AMF_RESULT::AMF_REPEAT
-            {
-                std::thread::sleep(Duration::from_millis(1));
-                continue;
-            }
-            if result == AMF_RESULT::AMF_EOF {
-                submitted = true;
-                break;
-            }
-            break;
-        }
-        if !submitted {
-            if result == AMF_RESULT::AMF_INPUT_FULL
-                || result == AMF_RESULT::AMF_DECODER_NO_FREE_SURFACES
-                || result == AMF_RESULT::AMF_REPEAT
-            {
+            if result == AMF_RESULT::AMF_REPEAT {
+                // AMF_REPEAT はバッファに入っているフレーム数が多すぎて受理できなかったことを示す。
+                // この API は 1 バッファ 1 フレームを前提とするため、エラーにする。
                 return Err(Error::new_custom(
                     "Decoder::decode",
-                    "SubmitInput retry limit exceeded",
+                    "input buffer contains multiple frames; submit one frame per buffer",
                 ));
             }
-            return Error::check(result, "AMFComponent::SubmitInput");
+            if !matches!(
+                result,
+                AMF_RESULT::AMF_INPUT_FULL | AMF_RESULT::AMF_DECODER_NO_FREE_SURFACES
+            ) {
+                return Error::check(result, "AMFComponent::SubmitInput");
+            }
+            std::thread::sleep(Duration::from_millis(1));
         }
 
-        // pts に対応する user_data の情報をワーカーに登録する
-        self.cmd_tx
-            .as_ref()
-            .expect("cmd_tx is available until Decoder is dropped")
-            .send(WorkerCommand::Submit {
-                pts,
-                original_pts,
-                user_data,
-            })
-            .map_err(|_| Error::new_custom("Decoder::decode", "worker thread terminated"))?;
-
-        Ok(())
+        Err(Error::new_custom(
+            "Decoder::decode",
+            "SubmitInput retry limit exceeded",
+        ))
     }
 
     /// デコーダーをフラッシュして残りのフレームを処理する
     pub fn finish(&mut self) -> Result<(), Error> {
-        // 送信側を取り出して保持する。finish 中は `cmd_tx` を None にして
-        // decode と再 finish を拒否し、関数を抜けるときにチャネルを閉じる。
-        let Some(cmd_tx) = self.cmd_tx.take() else {
+        if self.cmd_tx.is_none() {
             return Err(Error::new_custom(
                 "Decoder::finish",
                 "decoder is already finished",
             ));
-        };
+        }
 
         log::debug!("Decoder::finish: calling Drain");
         let result = self.component.drain();
@@ -330,6 +320,12 @@ impl<H: DecodeHandler> Decoder<H> {
             Error::check(result, "AMFComponent::Drain")?;
         }
 
+        // Drain が成功してから `cmd_tx` を取り出す。finish 中は `cmd_tx` を None に
+        // して decode と再 finish を拒否し、関数を抜けるときにチャネルを閉じる。
+        let cmd_tx = self
+            .cmd_tx
+            .take()
+            .expect("cmd_tx must be set before finish");
         let (tx, rx) = mpsc::sync_channel(1);
         cmd_tx
             .send(WorkerCommand::Finish(tx))
@@ -442,8 +438,6 @@ fn handle_command<H: DecodeHandler>(
             original_pts,
             user_data,
         } => {
-            // PTS は `Decoder::decode` が入力ごとに一意に割り当てるため、登録の
-            // 重複はない。
             pending.insert(
                 pts,
                 PendingFrame {
@@ -451,14 +445,13 @@ fn handle_command<H: DecodeHandler>(
                     user_data,
                 },
             );
+            // Submit によって対応付けが変わったため、保持している出力を再確認する。
+            deliver_buffered(output_buffer, pending, handler);
         }
         WorkerCommand::Finish(tx) => {
             *finish = Some(tx);
         }
     }
-
-    // Submit によって対応付けが変わったため、保持している出力を再確認する。
-    deliver_buffered(output_buffer, pending, handler);
 }
 
 /// QueryOutput のポーリング結果
@@ -499,6 +492,18 @@ fn drain_output(
     }
 }
 
+/// 出力 `Surface` の PTS を入力時の値に戻し、`DecodedFrame` を構築する
+fn into_decoded_frame<H: DecodeHandler>(
+    surface: Surface,
+    frame: PendingFrame<H::UserData>,
+) -> DecodedFrame<H::UserData> {
+    surface.set_pts(frame.original_pts);
+    DecodedFrame {
+        surface,
+        user_data: frame.user_data,
+    }
+}
+
 /// 保持している出力を先頭から順に、対応する入力フレームが登録されていれば
 /// ハンドラーへ通知する
 ///
@@ -514,10 +519,8 @@ fn deliver_buffered<H: DecodeHandler>(
         match output_buffer.front() {
             None => return,
             Some(Err(_)) => {
-                let output = output_buffer
-                    .pop_front()
-                    .expect("front に対応する出力が存在する");
-                let error = output.expect_err("front はエラーの出力である");
+                let output = output_buffer.pop_front().expect("front output must exist");
+                let error = output.expect_err("front output must be an error");
                 handler.on_decoded(Err(error.into()));
             }
             Some(Ok((_, pts))) => {
@@ -525,15 +528,9 @@ fn deliver_buffered<H: DecodeHandler>(
                 let Some(frame) = pending.remove(&pts) else {
                     return;
                 };
-                let output = output_buffer
-                    .pop_front()
-                    .expect("front に対応する出力が存在する");
-                let (surface, _) = output.expect("front は成功した出力である");
-                surface.set_pts(frame.original_pts);
-                handler.on_decoded(Ok(DecodedFrame {
-                    surface,
-                    user_data: frame.user_data,
-                }));
+                let output = output_buffer.pop_front().expect("front output must exist");
+                let (surface, _) = output.expect("front output must be a success");
+                handler.on_decoded(Ok(into_decoded_frame::<H>(surface, frame)));
             }
         }
     }
@@ -551,11 +548,7 @@ fn flush_buffered_outputs<H: DecodeHandler>(
         match output {
             Ok((surface, pts)) => match pending.remove(&pts) {
                 Some(frame) => {
-                    surface.set_pts(frame.original_pts);
-                    handler.on_decoded(Ok(DecodedFrame {
-                        surface,
-                        user_data: frame.user_data,
-                    }));
+                    handler.on_decoded(Ok(into_decoded_frame::<H>(surface, frame)));
                 }
                 None => handler.on_decoded(Err(Error::new_custom(
                     "Decoder::worker",

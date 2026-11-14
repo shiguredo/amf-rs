@@ -169,6 +169,7 @@ for frame in decoded.lock().unwrap().iter() {
 ```
 
 `decode()` には 1 フレーム分のビットストリームを格納した `Buffer` を渡します。
+複数フレームを含むバッファは未対応で、`AMF_REPEAT` が返された場合はエラーになります。
 B フレームを含むストリームでは出力順が入力順と異なりますが、`decode()` に渡した
 `user_data` は対応する出力フレームに付きます。`decode()` は入力 `Buffer` に設定した
 PTS を対応する出力 `Surface` に引き継ぎます。PTS を設定していない場合は 0 になります。
