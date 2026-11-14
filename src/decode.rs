@@ -596,10 +596,10 @@ fn extract_frame(surface: *mut AMFSurface, context: &Context) -> Result<(Surface
     let pts = surface.get_pts();
 
     let result = surface.convert(AMF_MEMORY_TYPE::AMF_MEMORY_HOST);
-    if result != AMF_RESULT::AMF_OK {
+    if let Err(err) = result {
         return Err(Error::new_custom(
             "extract_frame",
-            &format!("Convert failed: {result:?}"),
+            &format!("Convert failed: {err}"),
         ));
     }
 

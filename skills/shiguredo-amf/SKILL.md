@@ -134,9 +134,9 @@ AMD GPU 向けハードウェアアクセラレーションによるビデオエ
 |----|------|-------------|
 | `Context` | `AMFContext` の参照カウントを管理する Clone 可能なハンドル | `alloc_surface(memory_type, format, width, height)`, `alloc_buffer(memory_type, size)`, `as_ptr()` |
 | `Component` | `AMFComponent` のラッパー | `init(format, width, height)`, `re_init(width, height)`, `terminate()`, `drain()`, `flush()`, `unsafe submit_input(*mut AMFData)`, `unsafe query_output(*mut *mut AMFData)`, `get_context()`, `context()`, `property_storage() -> Result<PropertyStorage, Error>` |
-| `Surface` | `AMFSurface` のラッパー | `context()`, `set_pts(amf_pts)`, `get_pts() -> amf_pts`, `set_duration(amf_pts)`, `get_plane(AMF_PLANE_TYPE) -> Result<Plane, Error>`, `get_plane_at(index)`, `convert(AMF_MEMORY_TYPE)`, `property_storage()`, `as_ptr()`, `into_raw()` |
+| `Surface` | `AMFSurface` のラッパー | `context()`, `set_pts(amf_pts)`, `get_pts() -> amf_pts`, `set_duration(amf_pts)`, `get_plane(AMF_PLANE_TYPE) -> Result<Plane<'_>, Error>`, `get_plane_at(index) -> Result<Plane<'_>, Error>`, `convert(AMF_MEMORY_TYPE) -> Result<(), Error>`, `property_storage()`, `as_ptr()`, `into_raw()` |
 | `Buffer` | `AMFBuffer` のラッパー | `context()`, `get_native() -> *mut c_void`, `get_size() -> amf_size`, `set_pts(amf_pts)`, `get_pts() -> amf_pts`, `get_duration() -> amf_pts`, `unsafe get_property(name_w, *mut AMFVariantStruct)`, `as_ptr()`, `into_raw()` |
-| `Plane` | `AMFPlane` のラッパー | `context()`, `get_native() -> *mut c_void`, `get_hpitch() -> amf_int32`, `get_vpitch() -> amf_int32`, `get_width() -> amf_int32`, `get_height() -> amf_int32`, `as_ptr()`, `into_raw()` |
+| `Plane<'a>` | `AMFPlane` の RAII ラッパー。取得元の `Surface` を借用する | `context()`, `get_native() -> *mut c_void`, `get_hpitch() -> amf_int32`, `get_vpitch() -> amf_int32`, `get_width() -> amf_int32`, `get_height() -> amf_int32`, `as_ptr()`, `into_raw()` |
 | `PropertyStorage` | `AMFPropertyStorage` のラッパー | `context()`, `set_property_int64(name, value)`, `set_property_size(name, width, height)`, `set_property_rate(name, num, den)`, `unsafe set_property(name_w, AMFVariantStruct)`, `as_ptr()`, `into_raw()` |
 
 `Context::alloc_surface` / `alloc_buffer` は `&self` に対して呼び出す。`Context` の `Clone` は
@@ -145,13 +145,23 @@ AMFContext が破棄され、そのデストラクタが `Terminate` を呼ぶ�
 実装しており、同じ AMFContext を指すかを比較できる。各ハンドルは `context()` で保持する
 `Context` を取得できる。
 `Surface` / `Buffer` / `Plane` / `PropertyStorage` / `Component` は `Clone` 実装で `Acquire` を呼び、
-`Drop` 実装で `Release` を呼ぶ。`Surface` / `Buffer` / `Plane` / `PropertyStorage` は
+`Drop` 実装で `Release` を呼ぶ。`Surface` / `Buffer` / `PropertyStorage` は
 `unsafe from_raw(ptr, Context)` (Acquire なし) と `unsafe from_raw_acquired(ptr, Context)` (Acquire 付き) の
-2 系統のコンストラクタを持つ。`Component` は `AmfLibrary` の内部でのみ作成し、公開の raw
+2 系統のコンストラクタを持つ。`Plane` は `unsafe from_raw(ptr, &Surface)` と
+`unsafe from_raw_acquired(ptr, &Surface)` を持ち、生ポインタが取得元の `Surface` のものであることを
+呼び出し元が保証する。`Component` は `AmfLibrary` の内部でのみ作成し、公開の raw
 コンストラクタを持たない。`into_raw()` は所有権を放棄して `Release` を呼ばずに生ポインタを返す。
-生ポインタを利用する間は、対応する `Context` の Clone を保持すること。
+生ポインタを利用する間は、対応する `Context` の Clone を保持すること。`Plane` の生ポインタは
+取得元の `Surface` が生存している間だけ有効なので、`Surface` も破棄しないこと。
 
-`Surface` / `Buffer` / `Plane` / `PropertyStorage` / `Component` は作成元の `Context` の Clone を保持するため、これらのハンドルが生きている限り `Context` は破棄されない。
+`Surface` / `Buffer` / `PropertyStorage` / `Component` は作成元の `Context` の Clone を保持するため、これらのハンドルが生きている限り `Context` は破棄されない。
+
+`Plane<'a>` は `Surface::get_plane` / `Surface::get_plane_at` が返す。複数の `Plane` を
+別スレッドで並行に使える (`Clone` / `Drop` / `context()` は thread-safe)。
+`Plane` の `context()` は取得元の `Surface` が保持する `Context` を返す。
+
+`Surface::convert` は `Plane` が生存している間はエラーを返す。`Surface` の `Clone` や
+`PropertyStorage` が存在するだけでは失敗しない。
 
 `Clone` したハンドルは同じ AMF オブジェクトを指す。コンポーネントに投入する `Surface` / `Buffer` は、
 投入前に他のハンドルを破棄する必要がある。`Encoder::encode` / `Decoder::decode` は、投入する
