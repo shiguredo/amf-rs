@@ -3,7 +3,7 @@
 //! AMD GPU を使ったハードウェアビデオデコードを提供する。
 //! H.264/AVC、H.265/HEVC、AV1 コーデックに対応する。
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::ptr;
 use std::sync::mpsc;
 use std::thread::JoinHandle;
@@ -12,7 +12,9 @@ use std::time::Duration;
 use crate::AmfLibrary;
 use crate::amf::{Buffer, Component, Context, Surface};
 use crate::error::Error;
-use crate::sys::{self, AMF_MEMORY_TYPE, AMF_RESULT, AMF_SURFACE_FORMAT, AMFData, AMFSurface};
+use crate::sys::{
+    self, AMF_MEMORY_TYPE, AMF_RESULT, AMF_SURFACE_FORMAT, AMFData, AMFSurface, amf_pts,
+};
 
 // ---------------------------------------------------------------------------
 // 公開型
@@ -102,8 +104,21 @@ where
 // ワーカースレッド用コマンド
 // ---------------------------------------------------------------------------
 
+/// 出力との対応付けが完了するまで保持する入力フレームの情報
+struct PendingFrame<T> {
+    /// 呼び出し元が入力 Buffer に設定した PTS
+    original_pts: amf_pts,
+    /// デコード完了時にハンドラーへ渡すユーザーデータ
+    user_data: T,
+}
+
 enum WorkerCommand<T> {
-    Submit(T),
+    /// 入力フレームの対応付け用 PTS、元の PTS、ユーザーデータを登録する
+    Submit {
+        pts: amf_pts,
+        original_pts: amf_pts,
+        user_data: T,
+    },
     Finish(mpsc::SyncSender<()>),
 }
 
@@ -117,6 +132,8 @@ pub struct Decoder<H: DecodeHandler> {
     context: Context,
     cmd_tx: Option<mpsc::Sender<WorkerCommand<H::UserData>>>,
     poll_thread: Option<JoinHandle<()>>,
+    /// 次に投入する入力フレームへ割り当てる PTS
+    next_pts: amf_pts,
 }
 
 impl<H: DecodeHandler> Decoder<H> {
@@ -133,6 +150,20 @@ impl<H: DecodeHandler> Decoder<H> {
         };
 
         let component = lib.create_component(&context, component_id)?;
+
+        // 入力 Buffer の PTS を出力 Surface へそのまま引き継ぐモードにする。
+        // AMF Video Decode API の AMF_TIMESTAMP_MODE の説明は資料によって異なるが、
+        // VideoDecoderUVD.h は既定の AMF_TS_PRESENTATION が入力のタイムスタンプを
+        // 保持すると説明している。実際の H.264/HEVC デコーダーでも
+        // AMF_TS_PRESENTATION は入力 PTS を出力 Surface へ引き継ぐ。一方
+        // AMF_TS_DECODE と AMF_TS_SORT は出力順にタイムスタンプを振り直すため、
+        // 入力と出力の対応付けには使えない。このデコーダーは PTS の一致で
+        // user_data を引き当てるため、AMF_TS_PRESENTATION を明示的に設定する。
+        let property_storage = component.property_storage()?;
+        property_storage.set_property_int64(
+            sys::str::AMF_TIMESTAMP_MODE,
+            i64::from(sys::AMF_TIMESTAMP_MODE_ENUM_AMF_TS_PRESENTATION),
+        )?;
 
         // デコーダーを初期化する (解像度は 0,0 でストリームから自動検出)
         let result = component.init(AMF_SURFACE_FORMAT::AMF_SURFACE_NV12, 0, 0);
@@ -157,6 +188,7 @@ impl<H: DecodeHandler> Decoder<H> {
             context,
             cmd_tx: Some(cmd_tx),
             poll_thread: Some(poll_thread),
+            next_pts: 1,
         })
     }
 
@@ -178,10 +210,20 @@ impl<H: DecodeHandler> Decoder<H> {
     ///
     /// `user_data` はデコード完了時にハンドラーへ渡される。
     ///
+    /// `buffer` には 1 フレーム分のビットストリームを格納すること。複数フレームを
+    /// 含むバッファを渡した場合の挙動は実装依存となる。
+    ///
     /// `buffer` はこのデコーダーと同じ `Context` から確保したものでなければならない。
     /// 別の Context から確保した Buffer を渡した場合はエラーを返す。`buffer` が他の
     /// ハンドルと共有されている場合もエラーを返す。
     pub fn decode(&mut self, buffer: Buffer, user_data: H::UserData) -> Result<(), Error> {
+        if self.cmd_tx.is_none() {
+            return Err(Error::new_custom(
+                "Decoder::decode",
+                "decoder is already finished",
+            ));
+        }
+
         // AMF は同じ Context に載ったオブジェクトの受け渡しを前提としているため、
         // 投入前に同じ Context のハンドルであることを確認する。
         if buffer.context() != self.context {
@@ -200,52 +242,77 @@ impl<H: DecodeHandler> Decoder<H> {
             ));
         }
 
+        // 呼び出し元が入力 Buffer に設定した PTS を保存する。AMF のデコーダーは
+        // 入力 PTS を出力 Surface へ引き継ぐため、対応付け用の ID で上書きする前に
+        // 元の値を取得しておき、通知前に出力 Surface へ戻す。
+        let original_pts = buffer.get_pts();
+
+        // 入力と出力の対応付けに使う PTS を割り当てる。提示時刻ではなく一意な ID と
+        // して扱うため、1 から単調増加させる。
+        let pts = self.next_pts;
+        self.next_pts = self
+            .next_pts
+            .checked_add(1)
+            .ok_or_else(|| Error::new_custom("Decoder::decode", "PTS counter overflowed"))?;
+        buffer.set_pts(pts);
+
         log::debug!("Decoder::decode");
 
         let max_retries = 100;
-        let mut submitted = false;
         for retry in 0..max_retries {
             let result = unsafe { self.component.submit_input(buffer.as_ptr() as *mut AMFData) };
 
             if retry > 0 && retry % 10 == 0 {
                 log::debug!("Decoder::SubmitInput: retry={retry}, result={result:?}");
             }
-            if result == AMF_RESULT::AMF_OK || result == AMF_RESULT::AMF_NEED_MORE_INPUT {
+            if matches!(result, AMF_RESULT::AMF_OK | AMF_RESULT::AMF_NEED_MORE_INPUT) {
                 log::debug!("Decoder::SubmitInput: accepted, result={result:?}");
-                submitted = true;
-                break;
+                // pts に対応する user_data の情報をワーカーに登録する
+                self.cmd_tx
+                    .as_ref()
+                    .expect("cmd_tx is available until Decoder is dropped")
+                    .send(WorkerCommand::Submit {
+                        pts,
+                        original_pts,
+                        user_data,
+                    })
+                    .map_err(|_| {
+                        Error::new_custom("Decoder::decode", "worker thread terminated")
+                    })?;
+                return Ok(());
             }
-            if result == AMF_RESULT::AMF_INPUT_FULL
-                || result == AMF_RESULT::AMF_DECODER_NO_FREE_SURFACES
-                || result == AMF_RESULT::AMF_REPEAT
-            {
-                std::thread::sleep(Duration::from_millis(1));
-                continue;
+            if result == AMF_RESULT::AMF_REPEAT {
+                // AMF_REPEAT はバッファに入っているフレーム数が多すぎて受理できなかったことを示す。
+                // この API は 1 バッファ 1 フレームを前提とするため、エラーにする。
+                return Err(Error::new_custom(
+                    "Decoder::decode",
+                    "input buffer contains multiple frames; submit one frame per buffer",
+                ));
             }
-            if result == AMF_RESULT::AMF_EOF {
-                submitted = true;
-                break;
+            if !matches!(
+                result,
+                AMF_RESULT::AMF_INPUT_FULL | AMF_RESULT::AMF_DECODER_NO_FREE_SURFACES
+            ) {
+                return Error::check(result, "AMFComponent::SubmitInput");
             }
-            return Error::check(result, "AMFComponent::SubmitInput");
-        }
-        if !submitted {
-            return Err(Error::new_custom(
-                "Decoder::decode",
-                "SubmitInput retry limit exceeded",
-            ));
+            std::thread::sleep(Duration::from_millis(1));
         }
 
-        self.cmd_tx
-            .as_ref()
-            .unwrap()
-            .send(WorkerCommand::Submit(user_data))
-            .map_err(|_| Error::new_custom("Decoder::decode", "worker thread terminated"))?;
-
-        Ok(())
+        Err(Error::new_custom(
+            "Decoder::decode",
+            "SubmitInput retry limit exceeded",
+        ))
     }
 
     /// デコーダーをフラッシュして残りのフレームを処理する
     pub fn finish(&mut self) -> Result<(), Error> {
+        if self.cmd_tx.is_none() {
+            return Err(Error::new_custom(
+                "Decoder::finish",
+                "decoder is already finished",
+            ));
+        }
+
         log::debug!("Decoder::finish: calling Drain");
         let result = self.component.drain();
         log::debug!("Decoder::finish: Drain result={result:?}");
@@ -253,15 +320,19 @@ impl<H: DecodeHandler> Decoder<H> {
             Error::check(result, "AMFComponent::Drain")?;
         }
 
+        // Drain が成功してから `cmd_tx` を取り出す。finish 中は `cmd_tx` を None に
+        // して decode と再 finish を拒否し、関数を抜けるときにチャネルを閉じる。
+        let cmd_tx = self
+            .cmd_tx
+            .take()
+            .expect("cmd_tx must be set before finish");
         let (tx, rx) = mpsc::sync_channel(1);
-        self.cmd_tx
-            .as_ref()
-            .unwrap()
+        cmd_tx
             .send(WorkerCommand::Finish(tx))
             .map_err(|_| Error::new_custom("Decoder::finish", "worker thread terminated"))?;
 
-        rx.recv_timeout(Duration::from_secs(5))
-            .map_err(|_| Error::new_custom("Decoder::finish", "Finish wait timed out"))?;
+        rx.recv()
+            .map_err(|_| Error::new_custom("Decoder::finish", "worker thread terminated"))?;
 
         Ok(())
     }
@@ -287,20 +358,39 @@ impl<H: DecodeHandler> Drop for Decoder<H> {
 
 /// ワーカースレッドのエントリポイント
 ///
-/// メインスレッドから `Submit(T)` コマンドを受け取り、AMFComponent::QueryOutput を
+/// メインスレッドから `Submit` コマンドを受け取り、AMFComponent::QueryOutput を
 /// ポーリングしてデコード済みフレームを取得し、ハンドラーを呼び出す。
 fn worker<H: DecodeHandler>(
     component: Component,
     mut handler: H,
     cmd_rx: mpsc::Receiver<WorkerCommand<H::UserData>>,
 ) {
-    let mut pending: VecDeque<H::UserData> = VecDeque::new();
-    let mut output_buffer: VecDeque<Result<Surface, crate::Error>> = VecDeque::new();
+    // 対応付け用 PTS から入力フレームの情報を引くための表。PTS は
+    // `Decoder::decode` が入力ごとに一意に割り当てるため、値の重複はない。
+    let mut pending: HashMap<amf_pts, PendingFrame<H::UserData>> = HashMap::new();
+    // Submit コマンドの処理が出力の取得より遅れた場合に備え、対応する user_data が
+    // 登録されるまで出力を保持する。
+    let mut output_buffer: VecDeque<Result<(Surface, amf_pts), Error>> = VecDeque::new();
     let mut finish: Option<mpsc::SyncSender<()>> = None;
 
     loop {
-        if finish.is_some() && pending.is_empty() {
-            break;
+        if finish.is_some() {
+            // Drain 後は、出力がすべて出るか AMF_EOF が返るまでポーリングする。
+            // pending と保持中の出力がともに空になった時点で、全入力に対応する
+            // 出力が揃っているため、その場合は EOF を待たずに完了してよい。
+            let status = drain_output(&mut output_buffer, &component);
+            deliver_buffered(&mut output_buffer, &mut pending, &mut handler);
+            if status == DrainStatus::Eof {
+                flush_buffered_outputs(&mut output_buffer, &mut pending, &mut handler);
+                report_unmatched_inputs(&mut pending, &mut handler);
+                break;
+            }
+            if pending.is_empty() && output_buffer.is_empty() {
+                break;
+            }
+
+            std::thread::sleep(Duration::from_millis(1));
+            continue;
         }
 
         let cmd = if pending.is_empty() {
@@ -312,21 +402,21 @@ fn worker<H: DecodeHandler>(
             match cmd_rx.recv_timeout(Duration::from_millis(1)) {
                 Ok(cmd) => cmd,
                 Err(mpsc::RecvTimeoutError::Timeout) => {
-                    drain_output(&mut output_buffer, &mut pending, &mut handler, &component);
+                    drain_output(&mut output_buffer, &component);
+                    deliver_buffered(&mut output_buffer, &mut pending, &mut handler);
                     continue;
                 }
                 Err(mpsc::RecvTimeoutError::Disconnected) => break,
             }
         };
 
-        match cmd {
-            WorkerCommand::Submit(t) => {
-                pending.push_back(t);
-            }
-            WorkerCommand::Finish(tx) => {
-                finish = Some(tx);
-            }
-        }
+        handle_command(
+            cmd,
+            &mut pending,
+            &mut output_buffer,
+            &mut handler,
+            &mut finish,
+        );
     }
 
     if let Some(tx) = finish {
@@ -334,13 +424,50 @@ fn worker<H: DecodeHandler>(
     }
 }
 
-/// QueryOutput からの出力をバッファに格納し、pending とマッチングしてハンドラーを呼び出す
-fn drain_output<H: DecodeHandler>(
-    output_buffer: &mut VecDeque<Result<Surface, crate::Error>>,
-    pending: &mut VecDeque<H::UserData>,
+/// ワーカーコマンドを処理する
+fn handle_command<H: DecodeHandler>(
+    cmd: WorkerCommand<H::UserData>,
+    pending: &mut HashMap<amf_pts, PendingFrame<H::UserData>>,
+    output_buffer: &mut VecDeque<Result<(Surface, amf_pts), Error>>,
     handler: &mut H,
-    component: &Component,
+    finish: &mut Option<mpsc::SyncSender<()>>,
 ) {
+    match cmd {
+        WorkerCommand::Submit {
+            pts,
+            original_pts,
+            user_data,
+        } => {
+            pending.insert(
+                pts,
+                PendingFrame {
+                    original_pts,
+                    user_data,
+                },
+            );
+            // Submit によって対応付けが変わったため、保持している出力を再確認する。
+            deliver_buffered(output_buffer, pending, handler);
+        }
+        WorkerCommand::Finish(tx) => {
+            *finish = Some(tx);
+        }
+    }
+}
+
+/// QueryOutput のポーリング結果
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DrainStatus {
+    /// 現在取得できる出力がない
+    Drained,
+    /// デコーダーが Drain を完了した
+    Eof,
+}
+
+/// QueryOutput から出力を取得し、user_data の対応付け待ちのバッファに追加する
+fn drain_output(
+    output_buffer: &mut VecDeque<Result<(Surface, amf_pts), Error>>,
+    component: &Component,
+) -> DrainStatus {
     let context = component.context();
     loop {
         let mut data: *mut AMFData = ptr::null_mut();
@@ -348,32 +475,103 @@ fn drain_output<H: DecodeHandler>(
         log::debug!("worker: QueryOutput result={result:?}");
         // AMF デコーダーは AMF_REPEAT でも有効なデータを返す場合があるため、
         // data が非 null であればフレームとして抽出する。
-        // エンコーダー側の drain_output では AMF_REPEAT で常に break するが、
-        // デコーダーとエンコーダーで AMF ランタイムの挙動が異なるため非対称になっている。
         if result == AMF_RESULT::AMF_REPEAT {
-            if !data.is_null() {
-                output_buffer.push_back(extract_frame(data as *mut AMFSurface, &context));
-                continue;
+            if data.is_null() {
+                return DrainStatus::Drained;
             }
-            break;
+            output_buffer.push_back(extract_frame(data as *mut AMFSurface, &context));
+            continue;
         }
         if result == AMF_RESULT::AMF_EOF {
-            break;
+            return DrainStatus::Eof;
         }
         if result != AMF_RESULT::AMF_OK || data.is_null() {
-            break;
+            return DrainStatus::Drained;
         }
         output_buffer.push_back(extract_frame(data as *mut AMFSurface, &context));
     }
+}
 
-    while !output_buffer.is_empty() && !pending.is_empty() {
-        let output = output_buffer.pop_front().unwrap();
-        let user_data = pending.pop_front().unwrap();
-        handler.on_decoded(
-            output
-                .map(|surface| DecodedFrame { surface, user_data })
-                .map_err(Into::into),
-        );
+/// 出力 `Surface` の PTS を入力時の値に戻し、`DecodedFrame` を構築する
+fn into_decoded_frame<H: DecodeHandler>(
+    surface: Surface,
+    frame: PendingFrame<H::UserData>,
+) -> DecodedFrame<H::UserData> {
+    surface.set_pts(frame.original_pts);
+    DecodedFrame {
+        surface,
+        user_data: frame.user_data,
+    }
+}
+
+/// 保持している出力を先頭から順に、対応する入力フレームが登録されていれば
+/// ハンドラーへ通知する
+///
+/// 先頭の出力に対応する入力フレームがまだ登録されていない場合は、その出力を保持した
+/// まま待機する。エラーの出力は対応する入力を必要としないため、その場で通知する。
+/// 通知する `Surface` の PTS は、入力時に設定された値へ戻す。
+fn deliver_buffered<H: DecodeHandler>(
+    output_buffer: &mut VecDeque<Result<(Surface, amf_pts), Error>>,
+    pending: &mut HashMap<amf_pts, PendingFrame<H::UserData>>,
+    handler: &mut H,
+) {
+    loop {
+        match output_buffer.front() {
+            None => return,
+            Some(Err(_)) => {
+                let output = output_buffer.pop_front().expect("front output must exist");
+                let error = output.expect_err("front output must be an error");
+                handler.on_decoded(Err(error.into()));
+            }
+            Some(Ok((_, pts))) => {
+                let pts = *pts;
+                let Some(frame) = pending.remove(&pts) else {
+                    return;
+                };
+                let output = output_buffer.pop_front().expect("front output must exist");
+                let (surface, _) = output.expect("front output must be a success");
+                handler.on_decoded(Ok(into_decoded_frame::<H>(surface, frame)));
+            }
+        }
+    }
+}
+
+/// Drain 完了時に残っている出力をすべてハンドラーへ通知する
+///
+/// 対応する入力がない出力はエラーとして通知する。
+fn flush_buffered_outputs<H: DecodeHandler>(
+    output_buffer: &mut VecDeque<Result<(Surface, amf_pts), Error>>,
+    pending: &mut HashMap<amf_pts, PendingFrame<H::UserData>>,
+    handler: &mut H,
+) {
+    while let Some(output) = output_buffer.pop_front() {
+        match output {
+            Ok((surface, pts)) => match pending.remove(&pts) {
+                Some(frame) => {
+                    handler.on_decoded(Ok(into_decoded_frame::<H>(surface, frame)));
+                }
+                None => handler.on_decoded(Err(Error::new_custom(
+                    "Decoder::worker",
+                    &format!("no submitted frame for output PTS {pts}"),
+                )
+                .into())),
+            },
+            Err(error) => handler.on_decoded(Err(error.into())),
+        }
+    }
+}
+
+/// 出力が得られなかった入力フレームをエラーとして通知する
+fn report_unmatched_inputs<H: DecodeHandler>(
+    pending: &mut HashMap<amf_pts, PendingFrame<H::UserData>>,
+    handler: &mut H,
+) {
+    for (pts, _) in pending.drain() {
+        handler.on_decoded(Err(Error::new_custom(
+            "Decoder::finish",
+            &format!("decoder did not output a frame for submitted PTS {pts}"),
+        )
+        .into()));
     }
 }
 
@@ -381,17 +579,21 @@ fn drain_output<H: DecodeHandler>(
 // フレーム抽出 (standalone)
 // ---------------------------------------------------------------------------
 
-/// AMFSurface を抽出して convert する
+/// AMFSurface を抽出して convert し、PTS と一緒に返す
 ///
 /// `context` には `surface` に対する [Context] を指定する。
 /// null ポインタや convert 失敗の場合は `Err` を返す。
-fn extract_frame(surface: *mut AMFSurface, context: &Context) -> Result<Surface, Error> {
+fn extract_frame(surface: *mut AMFSurface, context: &Context) -> Result<(Surface, amf_pts), Error> {
     if surface.is_null() {
         return Err(Error::new_custom("extract_frame", "surface is null"));
     }
 
     // デコーダーの出力 Surface は、デコーダーが作成された Context から確保されている
     let surface = unsafe { Surface::from_raw(surface, context.clone()) }?;
+
+    // Convert が PTS を保持するかに依存せず、メモリ種別を変換する前の Surface から
+    // 対応付け用の PTS を取得する。
+    let pts = surface.get_pts();
 
     let result = surface.convert(AMF_MEMORY_TYPE::AMF_MEMORY_HOST);
     if result != AMF_RESULT::AMF_OK {
@@ -401,5 +603,5 @@ fn extract_frame(surface: *mut AMFSurface, context: &Context) -> Result<Surface,
         ));
     }
 
-    Ok(surface)
+    Ok((surface, pts))
 }

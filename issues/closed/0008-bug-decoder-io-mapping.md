@@ -1,7 +1,7 @@
 # Decoder の `user_data` を PTS ベースで対応付ける
 
 - Created: 2026-11-10
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-11-14
 - Branch: feature/fix-decoder-io-mapping
 - Polished: {YYYY-MM-DD}
 - Reporter: @melpon
@@ -36,3 +36,21 @@
 - 対応するテストが追加され、既存のラウンドトリップテストが通る。
 - `Decoder::decode` の doc と `skills/shiguredo-amf/SKILL.md` の 1 対 1 の記述を実装に合わせる。
 - `CHANGES.md` の `## develop` に `[FIX]` を追記する。
+
+## 解決方法
+
+- `amf::Buffer` に `set_pts`、`amf::Surface` に `get_pts` を追加した。
+- `Decoder::new` で `AMF_TIMESTAMP_MODE` を `AMF_TS_PRESENTATION` に設定するようにした。
+  - 実機の H.264/HEVC デコーダーでは `AMF_TS_PRESENTATION` が入力 PTS を出力 Surface へ引き継ぐ。
+  - `AMF_TS_DECODE` と `AMF_TS_SORT` は出力順にタイムスタンプを振り直すため、対応付けには使えないことを実機で確認した。
+- `Decoder::decode` で入力 Buffer に 1 から始まる一意な PTS を割り当てるようにした。
+  - 呼び出し元が入力 Buffer に設定した PTS は保存し、対応する出力 Surface を通知する前に元の値へ戻す。
+- ワーカーの `pending` を PTS をキーにした `HashMap` に変更し、出力 Surface の PTS で `user_data` を引き当てるようにした。
+  - `Submit` コマンドの処理が入力の投入より遅れた場合に備え、対応する `user_data` が登録されるまで出力を保持する。
+  - 対応する入力がない出力と、出力が得られなかった入力はハンドラーにエラーとして通知する。
+- `finish` 後は入力フレームを受け付けず、`decode` を呼ぶとエラーを返す。
+- 1 バッファ 1 フレームを前提とし、複数フレームを含むバッファは `AMF_REPEAT` を検出してエラーを返す。
+- `finish` はワーカーの完了まで待つようにした。
+- B フレームを含む H.264/HEVC のビットストリームをテストデータとして追加し、`user_data` と PTS の対応、および出力順が入力順と異なることを検証するテストを追加した。
+- `Decoder::decode` の doc、`README.md`、`skills/shiguredo-amf/SKILL.md` を実装に合わせて更新した。
+- AMD GPU 実機で `cargo fmt --all -- --check`、`cargo clippy --workspace --all-targets -- -D warnings`、`cargo test --workspace -- --test-threads=1` を通した。

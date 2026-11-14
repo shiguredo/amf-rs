@@ -259,6 +259,7 @@ struct SurfaceFuncs {
     acquire: unsafe extern "C" fn(*mut sys::AMFSurface) -> sys::amf_long,
     release: unsafe extern "C" fn(*mut sys::AMFSurface) -> sys::amf_long,
     set_pts: unsafe extern "C" fn(*mut sys::AMFSurface, sys::amf_pts),
+    get_pts: unsafe extern "C" fn(*mut sys::AMFSurface) -> sys::amf_pts,
     set_duration: unsafe extern "C" fn(*mut sys::AMFSurface, sys::amf_pts),
     get_plane:
         unsafe extern "C" fn(*mut sys::AMFSurface, sys::AMF_PLANE_TYPE) -> *mut sys::AMFPlane,
@@ -297,6 +298,7 @@ impl Surface {
             acquire: require_vtbl_fn(vtbl.Acquire, "AMFSurface::Acquire")?,
             release: require_vtbl_fn(vtbl.Release, "AMFSurface::Release")?,
             set_pts: require_vtbl_fn(vtbl.SetPts, "AMFSurface::SetPts")?,
+            get_pts: require_vtbl_fn(vtbl.GetPts, "AMFSurface::GetPts")?,
             set_duration: require_vtbl_fn(vtbl.SetDuration, "AMFSurface::SetDuration")?,
             get_plane: require_vtbl_fn(vtbl.GetPlane, "AMFSurface::GetPlane")?,
             get_plane_at: require_vtbl_fn(vtbl.GetPlaneAt, "AMFSurface::GetPlaneAt")?,
@@ -355,10 +357,16 @@ impl Surface {
         ptr
     }
 
-    /// PTS を設定する
+    /// PTS (100 ナノ秒単位のタイムスタンプ) を設定する
     pub fn set_pts(&self, pts: sys::amf_pts) {
         let _guard = self.state.lock();
         unsafe { (self.f.set_pts)(self.ptr, pts) }
+    }
+
+    /// PTS (100 ナノ秒単位のタイムスタンプ) を取得する
+    pub fn get_pts(&self) -> sys::amf_pts {
+        let _guard = self.state.lock();
+        unsafe { (self.f.get_pts)(self.ptr) }
     }
 
     /// Duration を設定する
@@ -447,6 +455,7 @@ struct BufferFuncs {
     release: unsafe extern "C" fn(*mut sys::AMFBuffer) -> sys::amf_long,
     get_native: unsafe extern "C" fn(*mut sys::AMFBuffer) -> *mut std::ffi::c_void,
     get_size: unsafe extern "C" fn(*mut sys::AMFBuffer) -> sys::amf_size,
+    set_pts: unsafe extern "C" fn(*mut sys::AMFBuffer, sys::amf_pts),
     get_pts: unsafe extern "C" fn(*mut sys::AMFBuffer) -> sys::amf_pts,
     get_duration: unsafe extern "C" fn(*mut sys::AMFBuffer) -> sys::amf_pts,
     get_property: unsafe extern "C" fn(
@@ -485,6 +494,7 @@ impl Buffer {
             release: require_vtbl_fn(vtbl.Release, "AMFBuffer::Release")?,
             get_native: require_vtbl_fn(vtbl.GetNative, "AMFBuffer::GetNative")?,
             get_size: require_vtbl_fn(vtbl.GetSize, "AMFBuffer::GetSize")?,
+            set_pts: require_vtbl_fn(vtbl.SetPts, "AMFBuffer::SetPts")?,
             get_pts: require_vtbl_fn(vtbl.GetPts, "AMFBuffer::GetPts")?,
             get_duration: require_vtbl_fn(vtbl.GetDuration, "AMFBuffer::GetDuration")?,
             get_property: require_vtbl_fn(vtbl.GetProperty, "AMFBuffer::GetProperty")?,
@@ -554,7 +564,13 @@ impl Buffer {
         unsafe { (self.f.get_size)(self.ptr) }
     }
 
-    /// PTS を取得する
+    /// PTS (100 ナノ秒単位のタイムスタンプ) を設定する
+    pub fn set_pts(&self, pts: sys::amf_pts) {
+        let _guard = self.state.lock();
+        unsafe { (self.f.set_pts)(self.ptr, pts) }
+    }
+
+    /// PTS (100 ナノ秒単位のタイムスタンプ) を取得する
     pub fn get_pts(&self) -> sys::amf_pts {
         let _guard = self.state.lock();
         unsafe { (self.f.get_pts)(self.ptr) }
