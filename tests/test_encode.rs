@@ -33,6 +33,18 @@ fn hevc_main10() -> CodecConfig {
     })
 }
 
+/// テスト用の HEVC Main プロファイル設定を返す
+fn hevc_main() -> CodecConfig {
+    CodecConfig::Hevc(HevcEncoderConfig {
+        profile: Some(HevcProfile::Main),
+    })
+}
+
+/// テスト用の HEVC プロファイル未指定の設定を返す
+fn hevc_default_profile() -> CodecConfig {
+    CodecConfig::Hevc(HevcEncoderConfig { profile: None })
+}
+
 /// テスト用の AV1 Main プロファイル設定を返す
 fn av1_main() -> CodecConfig {
     CodecConfig::Av1(Av1EncoderConfig {
@@ -83,6 +95,43 @@ fn write_p010_surface(surface: &Surface, width: usize, height: usize, frame_inde
             unsafe {
                 *uv_native.add(row * uv_pitch + col) = 512 << 6;
             }
+        }
+    }
+}
+
+/// HEVC の 10bit 入力には Main10 プロファイルが必要なことを確認する
+///
+/// AMF は Main プロファイルのまま 10bit をエンコードできてしまい、
+/// Main プロファイルに適合しないストリームを生成するため、Encoder::new で拒否する。
+#[test]
+fn test_encoder_rejects_hevc_10bit_without_main10() {
+    let cases = [
+        ("HevcProfile::Main", "HevcProfile::Main with", hevc_main()),
+        (
+            "no profile",
+            "the default HEVC profile (Main)",
+            hevc_default_profile(),
+        ),
+    ];
+    for frame_format in [FrameFormat::P010, FrameFormat::Y210, FrameFormat::Y410] {
+        for (name, expected_profile, codec) in &cases {
+            let err = create_encoder(test_encoder_config(codec.clone(), frame_format))
+                .err()
+                .expect("10bit 入力と Main プロファイルなのにエンコーダーを作成できた");
+            assert_eq!(
+                err.status(),
+                None,
+                "{name} {frame_format:?}: AMF のエラーではなく Encoder::new のエラーであるべき: {err}"
+            );
+            let message = err.to_string();
+            assert!(
+                message.contains("HEVC 10-bit input requires HevcProfile::Main10"),
+                "{name} {frame_format:?}: 想定したエラーメッセージではない: {message}"
+            );
+            assert!(
+                message.contains(*expected_profile),
+                "{name} {frame_format:?}: プロファイルの説明が含まれていない: {message}"
+            );
         }
     }
 }

@@ -102,6 +102,14 @@ impl FrameFormat {
         }
     }
 
+    /// 10bit のフォーマットか
+    fn is_10bit(self) -> bool {
+        matches!(
+            self,
+            FrameFormat::P010 | FrameFormat::Y210 | FrameFormat::Y410
+        )
+    }
+
     /// 指定解像度でのフレームサイズ（バイト数）を計算する
     ///
     /// オーバーフローした場合は `None` を返す。
@@ -410,7 +418,6 @@ impl<H: EncodeHandler> Encoder<H> {
     ///
     /// 入力フォーマットとプロファイルの組み合わせを利用できるかは GPU と AMF の
     /// 実装に依存し、利用できない場合は初期化に失敗する。
-    /// [`HevcProfile::Main10`] と 8bit 入力の組み合わせも、AMF が受け付ければ利用できる。
     ///
     /// # Errors
     ///
@@ -454,6 +461,10 @@ impl<H: EncodeHandler> Encoder<H> {
                 ),
             ));
         }
+
+        // HEVC の Main プロファイルと 10bit 入力の組み合わせは、AMF が Main に
+        // 適合しない 10bit ストリームを生成するため、事前に拒否する。
+        Self::validate_hevc_bit_depth(&config)?;
 
         let lib = AmfLibrary::instance();
 
@@ -512,6 +523,33 @@ impl<H: EncodeHandler> Encoder<H> {
             cmd_tx: Some(cmd_tx),
             poll_thread: Some(poll_thread),
         })
+    }
+
+    /// HEVC の入力ビット深度とプロファイルの組み合わせを検証する
+    ///
+    /// AMF は HEVC の Main プロファイルと 10bit 入力の組み合わせをエラーにせず、
+    /// Main プロファイルに適合しない 10bit ストリームを生成する。この組み合わせだけは
+    /// ライブラリ側で拒否する。
+    fn validate_hevc_bit_depth(config: &EncoderConfig) -> Result<(), Error> {
+        let CodecConfig::Hevc(hevc) = &config.codec else {
+            return Ok(());
+        };
+        if !config.frame_format.is_10bit() {
+            return Ok(());
+        }
+
+        let profile = match hevc.profile {
+            Some(HevcProfile::Main10) => return Ok(()),
+            Some(HevcProfile::Main) => "HevcProfile::Main",
+            None => "the default HEVC profile (Main)",
+        };
+        Err(Error::new_custom(
+            "Encoder::new",
+            &format!(
+                "HEVC 10-bit input requires HevcProfile::Main10: {profile} with {:?} (set HevcProfile::Main10)",
+                config.frame_format
+            ),
+        ))
     }
 
     /// エンコーダーにプロパティを設定する

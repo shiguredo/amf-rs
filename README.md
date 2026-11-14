@@ -255,7 +255,8 @@ cargo run -p amf-check -- --width 1280 --height 720
 入力フォーマットのビット深度は `FrameFormat` ごとに決まります。
 H.264 は 8bit 入力のみ、HEVC と AV1 は 8bit と 10bit の入力に対応します。
 HEVC のプロファイルは `HevcProfile` で指定します。
-入力フォーマットとプロファイルの組み合わせを利用できるかは GPU と AMF の実装に依存し、利用できない場合は `Encoder::new` が AMF のエラーを返します。
+HEVC の 10bit 入力には `HevcProfile::Main10` が必要です。`HevcProfile::Main` またはプロファイル未指定 (既定の Main) との組み合わせは `Encoder::new` がエラーを返します。
+入力フォーマットとプロファイルの組み合わせを利用できるかは GPU と AMF の実装に依存し、利用できない場合は `Encoder::new` がエラーを返します。
 `HevcProfile::Main10` と 8bit 入力の組み合わせも、AMF が受け付ければ利用できます。
 
 | フォーマット | `FrameFormat` | 説明 | 利用条件 |
@@ -268,7 +269,7 @@ HEVC のプロファイルは `HevcProfile` で指定します。
 | RGBA | `FrameFormat::Rgba` | Packed RGBA 8bit | 利用できる |
 | YUY2 | `FrameFormat::Yuy2` | Packed YUV 4:2:2 8bit | 利用できる |
 | UYVY | `FrameFormat::Uyvy` | Packed YUV 4:2:2 8bit | GPU と AMF の実装に依存する |
-| P010 | `FrameFormat::P010` | Semi-Planar YUV 4:2:0 10bit | GPU と AMF の実装に依存する。HEVC は `HevcProfile::Main10`、AV1 は `Av1Profile::Main` で利用できる |
+| P010 | `FrameFormat::P010` | Semi-Planar YUV 4:2:0 10bit | GPU と AMF の実装に依存する。HEVC は `HevcProfile::Main10` が必須、AV1 は `Av1Profile::Main` で利用できる |
 | P012 | `FrameFormat::P012` | Semi-Planar YUV 4:2:0 12bit (16bit 格納) | AMF が 8bit / 10bit 以外を扱えないため、初期化に失敗する |
 | P016 | `FrameFormat::P016` | Semi-Planar YUV 4:2:0 16bit | AMF が 8bit / 10bit 以外を扱えないため、初期化に失敗する |
 | Y210 | `FrameFormat::Y210` | Packed YUV 4:2:2 10bit (16bit 格納) | GPU と AMF の実装に依存する |
