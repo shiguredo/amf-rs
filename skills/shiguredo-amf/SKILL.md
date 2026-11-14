@@ -12,7 +12,7 @@ AMD GPU 向けハードウェアアクセラレーションによるビデオエ
 - **AMD AMF (Advanced Media Framework)** ベースの H.264 / H.265 / AV1 ハードウェアエンコード・デコード
 - **AMF ランタイムライブラリ** (`libamfrt64.so.1`) を `dlopen` で動的にロード (ビルド時のリンク不要)
 - **Vulkan バックエンド**で GPU 処理を実行 (Linux x86_64)
-- **エンコード入力フォーマット選択**: NV12 / YV12 / I420 / BGRA / ARGB / RGBA / YUY2 / UYVY / P010 / P012 / P016 / Y210 / AYUV / Y410 / Y416
+- **エンコード入力フォーマット選択**: 8bit / 10bit (AMD Radeon 780M では NV12 / YV12 / I420 / BGRA / ARGB / RGBA / YUY2 / P010 を確認済み。P010 は HEVC と AV1 で利用できる)
 - **デコード出力**は NV12 フォーマット
 - **フレーム単位のエンコードオプション** (IDR フレーム強制)
 - **エンコード中の動的プロパティ再設定** (`Encoder::reconfigure`)
@@ -378,25 +378,36 @@ impl EncodeHandler for MyHandler {
 
 ## エンコーダー入力フォーマット (`FrameFormat`)
 
-| バリアント | 説明 |
-|---|---|
-| `Nv12` | Semi-Planar YUV 4:2:0 8bit |
-| `Yv12` | Planar YUV 4:2:0 8bit (Y+V+U) |
-| `I420` | Planar YUV 4:2:0 8bit (Y+U+V) |
-| `Bgra` | Packed BGRA 8bit |
-| `Argb` | Packed ARGB 8bit |
-| `Rgba` | Packed RGBA 8bit |
-| `Yuy2` | Packed YUV 4:2:2 8bit (YUY2) |
-| `Uyvy` | Packed YUV 4:2:2 8bit (UYVY) |
-| `P010` | Semi-Planar YUV 4:2:0 10bit |
-| `P012` | Semi-Planar YUV 4:2:0 12bit (16bit 格納) |
-| `P016` | Semi-Planar YUV 4:2:0 16bit |
-| `Y210` | Packed YUV 4:2:2 10bit (16bit 格納) |
-| `Ayuv` | Packed YUV 4:4:4 8bit |
-| `Y410` | Packed YUV 4:4:4 10bit |
-| `Y416` | Packed YUV 4:4:4 16bit |
+入力フォーマットのビット深度は `FrameFormat` ごとに決まる。
+H.264 は 8bit 入力のみ、HEVC と AV1 は 8bit と 10bit の入力に対応する。
+HEVC のプロファイルは `HevcProfile` で指定する。
+入力フォーマットとプロファイルの組み合わせを利用できるかは GPU と AMF の実装に依存し、利用できない場合は AMF が返すエラーになる。
+`HevcProfile::Main10` と 8bit 入力の組み合わせも、AMF が受け付ければ利用できる。
+
+| バリアント | 説明 | 利用条件 |
+|---|---|---|
+| `Nv12` | Semi-Planar YUV 4:2:0 8bit | 利用できる |
+| `Yv12` | Planar YUV 4:2:0 8bit (Y+V+U) | 利用できる |
+| `I420` | Planar YUV 4:2:0 8bit (Y+U+V) | 利用できる |
+| `Bgra` | Packed BGRA 8bit | 利用できる |
+| `Argb` | Packed ARGB 8bit | 利用できる |
+| `Rgba` | Packed RGBA 8bit | 利用できる |
+| `Yuy2` | Packed YUV 4:2:2 8bit (YUY2) | 利用できる |
+| `Uyvy` | Packed YUV 4:2:2 8bit (UYVY) | GPU と AMF の実装に依存する |
+| `P010` | Semi-Planar YUV 4:2:0 10bit | GPU と AMF の実装に依存する。HEVC は `HevcProfile::Main10`、AV1 は `Av1Profile::Main` で利用できる |
+| `P012` | Semi-Planar YUV 4:2:0 12bit (16bit 格納) | AMF が 8bit / 10bit 以外を扱えないため、初期化に失敗する |
+| `P016` | Semi-Planar YUV 4:2:0 16bit | AMF が 8bit / 10bit 以外を扱えないため、初期化に失敗する |
+| `Y210` | Packed YUV 4:2:2 10bit (16bit 格納) | GPU と AMF の実装に依存する |
+| `Ayuv` | Packed YUV 4:4:4 8bit | GPU と AMF の実装に依存する |
+| `Y410` | Packed YUV 4:4:4 10bit | GPU と AMF の実装に依存する |
+| `Y416` | Packed YUV 4:4:4 16bit | AMF が 8bit / 10bit 以外を扱えないため、初期化に失敗する |
 
 `FrameFormat::frame_size(width, height) -> Option<usize>` で各フォーマットのフレームバイト数を計算できる (オーバーフロー時は `None`)。
+
+AMD Radeon 780M Graphics (Phoenix1)、Ubuntu 26.04.1、AMF ランタイム 1.5.3.0 で確認した結果は次のとおり。
+
+- 利用できる: `Nv12` / `Yv12` / `I420` / `Bgra` / `Argb` / `Rgba` / `Yuy2` / `P010` (`P010` は HEVC / AV1)
+- 利用できない: `Uyvy` / `Ayuv` / `Y210` / `Y410` / `P012` / `P016` / `Y416`
 
 ## レート制御モード (`RateControlMode`)
 
@@ -422,6 +433,8 @@ H.264 / HEVC / AV1 で AMF SDK 内部の enum 値順序が異なるが、`shigur
 | `width > i32::MAX \|\| height > i32::MAX` | `invalid resolution: WxH (exceeds i32::MAX)` |
 | `width` または `height` が奇数 | `invalid resolution: WxH (must be even)` |
 | `framerate_num == 0 \|\| framerate_den == 0` | `invalid framerate: N/D (must be non-zero)` |
+
+入力フォーマットとプロファイルの組み合わせは `Encoder::new` では検証せず、AMF に任せる。
 
 ## スレッド設計
 

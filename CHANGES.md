@@ -34,6 +34,10 @@
   - @melpon
 - [FIX] `AmfLibrary` / `amf::Context` / `Component::init` の AMF 呼び出しがデータ競合し、複数スレッドから Encoder / Decoder を並列に初期化した際に SIGSEGV する問題を修正する
   - @melpon
+- [FIX] 10bit 系の入力フォーマットと HEVC Main10 でエンコーダーを初期化できるようにする
+  - 入力フォーマットに応じて 8bit / 10bit のエンコードを設定する
+  - AMF が対応しないフォーマットやプロファイルとの組み合わせは、AMF が返すエラーになる
+  - @melpon
 
 ### misc
 
