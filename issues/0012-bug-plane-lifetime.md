@@ -1,7 +1,7 @@
 # `Plane` の寿命を `Surface` に縛り、`Surface` 解放後の無効な `Plane` を防ぐ
 
 - Created: 2026-11-10
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-11-15
 - Branch: feature/fix-plane-lifetime
 - Polished: {YYYY-MM-DD}
 - Reporter: @melpon
@@ -34,3 +34,28 @@
 - 既存の `Surface` / `Plane` の利用箇所 (`tests/test_roundtrip.rs` のコピーヘルパーなど) が新しい API に追随する。
 - `cargo test --workspace` が通る。
 - `CHANGES.md` の `## develop` に後方互換性のない変更として追記する。
+
+## 解決方法
+
+- `amf::Plane<'a>` が取得元の `&'a Surface` を保持するようにした。`Surface::get_plane` / `Surface::get_plane_at` は `Plane<'_>` を返し、`Plane` が生存している間は `Surface` を移動・破棄できない。
+- `Plane::from_raw` / `Plane::from_raw_acquired` は `Context` ではなく `&Surface` を受け取り、取得元の `Surface` と状態を共有するようにした。
+- `Plane::get_native` の doc に、返されるポインタの有効期間が `Surface` に依存することを明記した。
+- 寿命と `Send` / `Sync` は `Plane<'a>` の型と impl から自明なため、`Plane` の公開 doc には重複して書かず、Safety コメントに根拠を残した。
+- `Plane` の `Send` / `Sync` は維持した。`Surface` が共有ロックで `Send + Sync` になっており、
+  `Plane` も同じロックを共有するため、`Plane` から `Send` を外す必要がない。
+- `Clone` / `Drop` / `context()` の参照カウント操作は、AMF Wiki の
+  "The default implementation of AMFInterface is thread-safe." に基づき、共有ロックの対象外で
+  あることを Safety コメントに明記した。
+- `Surface` に Plane ハンドル数専用の `Arc<AtomicUsize>` を追加し、`Surface` の `Clone` 間で共有するようにした。`AmfObjectState` は変更せず、`Buffer` / `Context` / `Component` / `PropertyStorage` には影響しない。
+- `Plane` の生成・`Clone` で `Surface` の Plane ハンドル数を増やし、drop で減らすようにした。
+- `Surface::convert` は共有ロック内で Plane ハンドル数を確認し、1 個でも生存していればエラーを返すようにした。`Surface` の `Clone` や `PropertyStorage` が存在するだけでは失敗しない。
+- `Surface::convert` の戻り値を `Result<(), Error>` に変更し、`src/decode.rs` の `extract_frame` を新しい戻り値に追随させた。
+- `tests/test_amf.rs` の `test_vulkan_surface_convert_after_context_dropped` で、複数の `Plane` が
+  生存している間は `convert` がエラーになり、drop 後は成功してプレーンを取り直せることを確認するようにした。
+- `test_convert_allows_surface_clone` で、`Surface` の `Clone` だけでは `convert` が失敗しないことも
+  確認するようにした。
+- `Plane` を保持したまま `Surface` を `Encoder::encode` に投入するテスト (`tests/test_roundtrip.rs` の `test_encode_rejects_surface_with_live_plane`) は、コンパイル時に `Surface` の移動が拒否されるようになったため削除した。
+- `src/amf.rs` の単体テストで、`Plane` の取得・`Clone`・`from_raw`・`from_raw_acquired` が `Surface` の状態を共有することと、drop すると共有状態が解消されることを確認するようにした。
+- `skills/shiguredo-amf/SKILL.md` の `Plane` の API 説明を更新した。
+- `CHANGES.md` の `## develop` に `[CHANGE]` を追記した。
+- AMD GPU 実機で `cargo fmt --all -- --check`、`cargo clippy --workspace --all-targets -- -D warnings`、`cargo test --workspace`、`DOCS_RS=1 cargo doc --no-deps` が通ることを確認した。
