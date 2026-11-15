@@ -55,6 +55,11 @@
 
 ### misc
 
+- [UPDATE] shiguredo-rust と AGENTS.md の規約に合わせて lint 抑制・`.unwrap()`・ログ出力・コメントを整理する
+  - `#[allow]` を `#[expect]` に置き換え、bindgen の生成コードを専用モジュールに閉じ込める
+  - `log` を `tracing` に置き換え、毎フレーム実行されるログを `trace` に下げる
+  - `.unwrap()` を `.expect("MESSAGE")` に置き換え、英語のコメントを日本語にする
+  - @melpon
 - [ADD] AMF ランタイムとコーデック対応状況を確認する `examples/amf-check` を追加する
   - @voluntas
 - [UPDATE] CI / Release の GitHub Actions ランナーに Ubuntu 26.04 を追加する

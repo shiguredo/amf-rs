@@ -4,20 +4,29 @@
 //! bindgen でヘッダーから自動生成された定義と、
 //! bindgen で生成できない補助定義 (プロパティ名定数、ヘルパー関数等) を含む。
 
-#![allow(non_camel_case_types)]
-#![allow(non_snake_case)]
-#![allow(non_upper_case_globals)]
-#![allow(dead_code)]
-#![allow(clippy::all)]
-
 // ビルド時に生成されるメタデータ
-include!(concat!(env!("OUT_DIR"), "/metadata.rs"));
+mod metadata {
+    include!(concat!(env!("OUT_DIR"), "/metadata.rs"));
+}
+pub use metadata::*;
 
 // bindgen で AMF ヘッダーから自動生成されたバインディング
-include!(concat!(env!("OUT_DIR"), "/bindings.rs"));
+mod bindings {
+    // 生成コードは C の命名規則をそのまま持つため、Rust の命名規則の lint に
+    // 適合しない。生成コードだけに lint の抑制を閉じ込め、手書きコードには
+    // 抑制を及ぼさない。
+    #![expect(non_camel_case_types)]
+    #![expect(non_snake_case)]
+    #![expect(non_upper_case_globals)]
+    include!(concat!(env!("OUT_DIR"), "/bindings.rs"));
+}
+pub use bindings::*;
 
 // ヘッダーのワイド文字列マクロから自動生成されたプロパティ名定数
 pub mod str {
+    // 定数名は AMF ヘッダーのマクロ名をそのまま使うため、大文字だけの
+    // 命名規則には従わない。
+    #![expect(non_upper_case_globals)]
     include!(concat!(env!("OUT_DIR"), "/properties.rs"));
 }
 
@@ -39,18 +48,19 @@ pub const AMF_DLL_NAME: &str = "libamfrt64.so.1";
 
 // ---------------------------------------------------------------------------
 // DLL エントリーポイント関数型
-// dl.rs の get<T> で直接使用するため Option でラップしない
+// ライブラリから取得できたことを前提に呼び出す関数ポインタの型のため、
+// Option でラップしない
 // ---------------------------------------------------------------------------
-pub type AMFInit_Fn =
-    unsafe extern "C" fn(version: amf_uint64, ppFactory: *mut *mut AMFFactory) -> AMF_RESULT;
-pub type AMFQueryVersion_Fn = unsafe extern "C" fn(pVersion: *mut amf_uint64) -> AMF_RESULT;
+pub type AmfInitFn =
+    unsafe extern "C" fn(version: amf_uint64, pp_factory: *mut *mut AMFFactory) -> AMF_RESULT;
+pub type AmfQueryVersionFn = unsafe extern "C" fn(p_version: *mut amf_uint64) -> AMF_RESULT;
 
 // ---------------------------------------------------------------------------
 // AMFContext1 の IID
-// AMF_DECLARE_IID マクロで定義されるが、bindgen では名前が異なる場合がある
+// AMF_DECLARE_IID マクロで定義されるが、bindgen は定数として生成しない
 // ---------------------------------------------------------------------------
 
-/// IID_AMFContext1: {d9e9f868-6220-44c6-a22f-7cd6dac68646}
+/// AMFContext1 の IID (IID_AMFContext1: {d9e9f868-6220-44c6-a22f-7cd6dac68646})
 pub const IID_AMF_CONTEXT1: AMFGuid = AMFGuid {
     data1: 0xd9e9f868,
     data2: 0x6220,

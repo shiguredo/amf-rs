@@ -185,7 +185,7 @@ fn generate_colorbar_nv12(width: usize, height: usize) -> Vec<u8> {
             let bar_index = x * 7 / width;
             let (r, g, b) = bars[bar_index];
 
-            // BT.601 RGB -> YCbCr
+            // BT.601 で RGB から YCbCr へ変換する
             let rf = r as f64;
             let gf = g as f64;
             let bf = b as f64;
@@ -239,7 +239,9 @@ fn encode(context: &Context, config: EncoderConfig, frames: &[Vec<u8>]) -> Vec<E
         context.clone(),
         config,
         FnEncodeHandler::<()>::new(move |result| {
-            r.lock().unwrap().push(result.unwrap());
+            r.lock()
+                .expect("エンコード結果を格納する Mutex のロックに失敗")
+                .push(result.expect("エンコード結果の取得に失敗"));
         }),
     )
     .expect("エンコーダーの作成に失敗");
@@ -260,7 +262,7 @@ fn encode(context: &Context, config: EncoderConfig, frames: &[Vec<u8>]) -> Vec<E
     Arc::try_unwrap(result)
         .expect("Arc の参照が残っている")
         .into_inner()
-        .unwrap()
+        .expect("エンコード結果を格納する Mutex がポイズンされている")
 }
 
 /// 強制キーフレームを含むシーケンスをエンコードする
@@ -280,7 +282,9 @@ fn encode_with_forced_keyframe(
         context.clone(),
         config,
         FnEncodeHandler::<()>::new(move |result| {
-            r.lock().unwrap().push(result.unwrap());
+            r.lock()
+                .expect("エンコード結果を格納する Mutex のロックに失敗")
+                .push(result.expect("エンコード結果の取得に失敗"));
         }),
     )
     .expect("エンコーダーの作成に失敗");
@@ -309,7 +313,7 @@ fn encode_with_forced_keyframe(
     Arc::try_unwrap(result)
         .expect("Arc の参照が残っている")
         .into_inner()
-        .unwrap()
+        .expect("エンコード結果を格納する Mutex がポイズンされている")
 }
 
 /// n 回目の IDR フレームのインデックスを返す（n は 1 始まり）
@@ -463,7 +467,9 @@ fn decode(
         context.clone(),
         config,
         FnDecodeHandler::<()>::new(move |result| {
-            r.lock().unwrap().push(result.unwrap());
+            r.lock()
+                .expect("デコード結果を格納する Mutex のロックに失敗")
+                .push(result.expect("デコード結果の取得に失敗"));
         }),
     )
     .expect("デコーダーの作成に失敗");
@@ -481,7 +487,7 @@ fn decode(
     Arc::try_unwrap(result)
         .expect("Arc の参照が残っている")
         .into_inner()
-        .unwrap()
+        .expect("デコード結果を格納する Mutex がポイズンされている")
 }
 
 /// エンコード→デコードのラウンドトリップを検証するヘルパー
@@ -567,7 +573,7 @@ fn roundtrip_colorbar(
     }
 }
 
-// --- H.264 ---
+// --- H.264 のテスト ---
 
 /// H.264 CBR カラーバーのラウンドトリップ（PSNR 検証）
 #[test]
@@ -639,7 +645,9 @@ fn test_roundtrip_h264_force_idr() {
         context.clone(),
         config,
         FnEncodeHandler::<()>::new(move |result| {
-            r.lock().unwrap().push(result.unwrap());
+            r.lock()
+                .expect("エンコード結果を格納する Mutex のロックに失敗")
+                .push(result.expect("エンコード結果の取得に失敗"));
         }),
     )
     .expect("エンコーダーの作成に失敗");
@@ -669,7 +677,7 @@ fn test_roundtrip_h264_force_idr() {
     let encoded_frames = Arc::try_unwrap(result)
         .expect("Arc の参照が残っている")
         .into_inner()
-        .unwrap();
+        .expect("エンコード結果を格納する Mutex がポイズンされている");
 
     let idr_count = encoded_frames
         .iter()
@@ -714,7 +722,7 @@ fn test_force_picture_type_h264_outputs_idr_and_sps_pps() {
     );
 }
 
-// --- H.265 ---
+// --- H.265 のテスト ---
 
 /// H.265 CBR カラーバーのラウンドトリップ（PSNR 検証）
 #[test]
@@ -787,7 +795,7 @@ fn test_force_picture_type_hevc_outputs_idr_and_vps_sps_pps() {
     );
 }
 
-// --- AV1 ---
+// --- AV1 のテスト ---
 
 /// AV1 CBR カラーバーのラウンドトリップ（PSNR 検証）
 #[test]
@@ -915,7 +923,9 @@ fn test_reconfigure_h264_runtime_change() {
         context.clone(),
         config,
         FnEncodeHandler::<()>::new(move |result| {
-            r.lock().unwrap().push(result.unwrap());
+            r.lock()
+                .expect("エンコード結果を格納する Mutex のロックに失敗")
+                .push(result.expect("エンコード結果の取得に失敗"));
         }),
     )
     .expect("エンコーダーの作成に失敗");
@@ -955,7 +965,7 @@ fn test_reconfigure_h264_runtime_change() {
     let encoded_frames = Arc::try_unwrap(result)
         .expect("Arc の参照が残っている")
         .into_inner()
-        .unwrap();
+        .expect("エンコード結果を格納する Mutex がポイズンされている");
     assert!(
         !encoded_frames.is_empty(),
         "エンコード済みフレームが生成されなかった"
@@ -989,7 +999,9 @@ fn test_reconfigure_hevc_ignores_qpb_and_gop() {
         context.clone(),
         config,
         FnEncodeHandler::<()>::new(move |result| {
-            r.lock().unwrap().push(result.unwrap());
+            r.lock()
+                .expect("エンコード結果を格納する Mutex のロックに失敗")
+                .push(result.expect("エンコード結果の取得に失敗"));
         }),
     )
     .expect("エンコーダーの作成に失敗");
@@ -1033,7 +1045,7 @@ fn test_reconfigure_hevc_ignores_qpb_and_gop() {
     let encoded_frames = Arc::try_unwrap(result)
         .expect("Arc の参照が残っている")
         .into_inner()
-        .unwrap();
+        .expect("エンコード結果を格納する Mutex がポイズンされている");
     assert!(
         !encoded_frames.is_empty(),
         "エンコード済みフレームが生成されなかった"
@@ -1067,7 +1079,9 @@ fn test_reconfigure_av1_qpb_and_gop() {
         context.clone(),
         config,
         FnEncodeHandler::<()>::new(move |result| {
-            r.lock().unwrap().push(result.unwrap());
+            r.lock()
+                .expect("エンコード結果を格納する Mutex のロックに失敗")
+                .push(result.expect("エンコード結果の取得に失敗"));
         }),
     )
     .expect("エンコーダーの作成に失敗");
@@ -1111,7 +1125,7 @@ fn test_reconfigure_av1_qpb_and_gop() {
     let encoded_frames = Arc::try_unwrap(result)
         .expect("Arc の参照が残っている")
         .into_inner()
-        .unwrap();
+        .expect("エンコード結果を格納する Mutex がポイズンされている");
     assert!(
         !encoded_frames.is_empty(),
         "エンコード済みフレームが生成されなかった"
@@ -1182,10 +1196,10 @@ fn generate_dummy_bgra(width: usize, height: usize, frame_index: usize) -> Vec<u
         for x in 0..width {
             let offset = (y * width + x) * 4;
             let v = ((x + y + frame_index * 7) % 256) as u8;
-            data[offset] = v; // B
-            data[offset + 1] = v; // G
-            data[offset + 2] = v; // R
-            data[offset + 3] = 255; // A
+            data[offset] = v; // 青 (B)
+            data[offset + 1] = v; // 緑 (G)
+            data[offset + 2] = v; // 赤 (R)
+            data[offset + 3] = 255; // アルファ (A)
         }
     }
     data
@@ -1198,10 +1212,10 @@ fn generate_dummy_argb(width: usize, height: usize, frame_index: usize) -> Vec<u
         for x in 0..width {
             let offset = (y * width + x) * 4;
             let v = ((x + y + frame_index * 7) % 256) as u8;
-            data[offset] = 255; // A
-            data[offset + 1] = v; // R
-            data[offset + 2] = v; // G
-            data[offset + 3] = v; // B
+            data[offset] = 255; // アルファ (A)
+            data[offset + 1] = v; // 赤 (R)
+            data[offset + 2] = v; // 緑 (G)
+            data[offset + 3] = v; // 青 (B)
         }
     }
     data
@@ -1214,10 +1228,10 @@ fn generate_dummy_rgba(width: usize, height: usize, frame_index: usize) -> Vec<u
         for x in 0..width {
             let offset = (y * width + x) * 4;
             let v = ((x + y + frame_index * 7) % 256) as u8;
-            data[offset] = v; // R
-            data[offset + 1] = v; // G
-            data[offset + 2] = v; // B
-            data[offset + 3] = 255; // A
+            data[offset] = v; // 赤 (R)
+            data[offset + 1] = v; // 緑 (G)
+            data[offset + 2] = v; // 青 (B)
+            data[offset + 3] = 255; // アルファ (A)
         }
     }
     data
@@ -1232,10 +1246,10 @@ fn generate_dummy_yuy2(width: usize, height: usize, frame_index: usize) -> Vec<u
         for x in (0..width).step_by(2) {
             let offset = (y * width + x) * 2;
             let v = ((x + y + frame_index * 7) % 256) as u8;
-            data[offset] = v; // Y0
-            data[offset + 1] = 128; // U
-            data[offset + 2] = v; // Y1
-            data[offset + 3] = 128; // V
+            data[offset] = v; // 輝度 Y0
+            data[offset + 1] = 128; // 色差 U
+            data[offset + 2] = v; // 輝度 Y1
+            data[offset + 3] = 128; // 色差 V
         }
     }
     data
@@ -1547,7 +1561,9 @@ fn test_user_data_delivered_in_submit_order() {
         context.clone(),
         config,
         FnEncodeHandler::<usize>::new(move |result| {
-            r.lock().unwrap().push(result.unwrap().into_parts().1);
+            r.lock()
+                .expect("エンコード結果を格納する Mutex のロックに失敗")
+                .push(result.expect("エンコード結果の取得に失敗").into_parts().1);
         }),
     )
     .expect("エンコーダーの作成に失敗");
@@ -1571,7 +1587,7 @@ fn test_user_data_delivered_in_submit_order() {
     let tags = Arc::try_unwrap(received)
         .expect("Arc の参照が残っている")
         .into_inner()
-        .unwrap();
+        .expect("エンコード結果を格納する Mutex がポイズンされている");
     assert_eq!(tags.len(), num_frames);
     assert_eq!(tags, (0..num_frames).collect::<Vec<_>>());
 }

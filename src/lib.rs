@@ -20,7 +20,7 @@ use std::sync::{Arc, LazyLock, MutexGuard};
 
 use amf::{AmfObjectState, Component, Context};
 use error::require_vtbl_fn;
-use sys::{AMF_DLL_NAME, AMF_FULL_VERSION, AMFFactory, AMFInit_Fn, AMFQueryVersion_Fn, amf_uint64};
+use sys::{AMF_DLL_NAME, AMF_FULL_VERSION, AMFFactory, AmfInitFn, AmfQueryVersionFn, amf_uint64};
 
 pub use codec_info::{
     Av1EncodingProfile, CodecInfo, DecodingInfo, EncodingInfo, EncodingProfiles,
@@ -63,6 +63,9 @@ struct AmfLibraryInner {
 /// [`AmfLibrary::instance()`] で取得する。
 pub struct AmfLibrary {
     /// プロセス全体で共有するロック
+    ///
+    /// AMF のインターフェースはほとんどがスレッドセーフではないため、
+    /// AMF ランタイムの Context 作成と Context / Component の操作を直列化する。
     state: Arc<AmfObjectState>,
     /// AMF ランタイムの状態
     ///
@@ -106,7 +109,7 @@ impl AmfLibrary {
                 )
             })?;
 
-            let amf_init: AMFInit_Fn = unsafe { lib.get(b"AMFInit") }.map_err(|e| {
+            let amf_init: AmfInitFn = unsafe { lib.get(b"AMFInit") }.map_err(|e| {
                 Error::new_custom(
                     "AmfLibrary::ensure_inner",
                     &format!("failed to find AMFInit: {e}"),
@@ -133,7 +136,7 @@ impl AmfLibrary {
     pub fn query_version(&self) -> Result<(u16, u16, u16, u16), Error> {
         let guard = self.state.lock();
         let inner = self.ensure_inner(&guard)?;
-        let amf_query_version: AMFQueryVersion_Fn = unsafe { inner.lib.get(b"AMFQueryVersion") }
+        let amf_query_version: AmfQueryVersionFn = unsafe { inner.lib.get(b"AMFQueryVersion") }
             .map_err(|e| {
                 Error::new_custom(
                     "AmfLibrary::query_version",

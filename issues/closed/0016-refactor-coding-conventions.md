@@ -1,7 +1,7 @@
 # shiguredo-rust / AGENTS.md の規約違反 (`#[allow]`、`.unwrap()`、`log`、英語コメント) を解消する
 
 - Created: 2026-11-10
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-11-16
 - Branch: feature/refactor-coding-conventions
 - Polished: {YYYY-MM-DD}
 - Reporter: @melpon
@@ -46,3 +46,15 @@ shiguredo-rust と AGENTS.md の規約に違反している箇所を解消する
 - `Mutex` の理由コメントがある。
 - `cargo clippy --workspace --all-targets -- -D warnings` と `cargo test --workspace` が通る。
 - `CHANGES.md` の `## develop` の `### misc` にリファクタリングとして追記する。
+
+## 解決方法
+
+- `src/sys.rs` のファイル全体の `#[allow]` を廃止し、bindgen の生成コードとプロパティ定数をそれぞれ専用モジュールに閉じ込めた。生成コードに必要な `non_camel_case_types` / `non_snake_case` / `non_upper_case_globals` だけを `#[expect]` で指定し、発火しなかった `dead_code` / `clippy::all` は削除した。
+- 手書きコードが lint に適合するよう、`AMFInit_Fn` / `AMFQueryVersion_Fn` を `AmfInitFn` / `AmfQueryVersionFn` に改名し、関数ポインタの引数名も Rust の命名規則に合わせた。
+- コーデックごとの動的プロパティ名を `DynamicPropertyNames` にまとめ、`clippy::too_many_arguments` の抑制を不要にした。
+- テストの `.unwrap()` を `.expect("MESSAGE")` に置き換え、日本語のメッセージを付けた。
+- `log` を `tracing` に置き換え、`Encoder::encode` / `Decoder::decode` / `QueryOutput` ポーリングの毎回のログを `trace` に、`finish` のログを `debug` にした。
+- `FrameFormat::frame_size` が `self` を受け取るようにした。
+- `AmfObjectState` の Mutex と `AmfLibrary::state` に、AMF のスレッドセーフでない操作をロックで直列化する理由を書いた。
+- 英語のコメントを日本語にし、他モジュールへの言及と未来の状態の説明を削除した。rustdoc の `# Safety` / `# Errors` / `# Panics` 見出しと `// SAFETY:` ラベルは Rust の共通フォーマットとして英語のまま残した。
+- `cargo fmt --all -- --check`、`cargo clippy --workspace --all-targets -- -D warnings`、`cargo test --workspace` が通ることを確認した。

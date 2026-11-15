@@ -42,7 +42,6 @@ pub(crate) enum QueryOutputKind {
 // 汎用コードで、QueryOutput の戻り値表には記載がない。
 // AMF_REPEAT + 非 null のデータは AMF デコーダーの実測挙動と、AMF サンプル実装が
 // ppData を優先して出力として扱うことに合わせる。
-// AMF のバージョン更新で仕様が変わる可能性がある。
 pub(crate) fn classify_query_output(result: AMF_RESULT, has_data: bool) -> QueryOutputKind {
     match result {
         AMF_RESULT::AMF_OK | AMF_RESULT::AMF_REPEAT => {

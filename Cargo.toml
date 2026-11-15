@@ -27,7 +27,7 @@ members = ["examples/amf-check"]
 
 [dependencies]
 # ログ出力
-log = "0.4"
+tracing = "0.1"
 
 [build-dependencies]
 # AMF SDK のヘッダーから FFI バインディングを生成する
