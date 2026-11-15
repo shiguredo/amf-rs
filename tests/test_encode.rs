@@ -1,5 +1,4 @@
 use std::sync::mpsc;
-use std::time::{Duration, Instant};
 
 use shiguredo_amf::amf::Surface;
 use shiguredo_amf::ffi::{AMF_PLANE_TYPE, AMF_RESULT};
@@ -65,18 +64,25 @@ fn create_encoder(config: EncoderConfig) -> Result<Encoder<FnEncodeHandler<()>>,
     Encoder::new(create_context(), config, FnEncodeHandler::<()>::new(|_| {}))
 }
 
-/// 入力を 1 つも投入せずに finish しても、待機せずに完了することを確認する
+/// 入力を 1 つも投入せずに finish した場合、通知がなく完了することを確認する
 #[test]
 fn test_encoder_finish_without_input() {
-    let mut encoder =
-        create_encoder(h264_cbr_test_encoder_config()).expect("エンコーダーの作成に失敗");
+    let (tx, rx) = mpsc::channel();
+    let mut encoder = Encoder::new(
+        create_context(),
+        h264_cbr_test_encoder_config(),
+        FnEncodeHandler::<()>::new(move |result| {
+            tx.send(result).expect("通知の送信に失敗");
+        }),
+    )
+    .expect("エンコーダーの作成に失敗");
 
-    let started = Instant::now();
     encoder.finish().expect("入力なしの finish に失敗");
+    drop(encoder);
+
     assert!(
-        started.elapsed() < Duration::from_secs(1),
-        "入力なしの finish に時間がかかりすぎた: {:?}",
-        started.elapsed()
+        rx.try_iter().next().is_none(),
+        "入力なしの finish で通知があった"
     );
 }
 

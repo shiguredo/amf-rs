@@ -113,6 +113,14 @@ struct PendingFrame<T> {
     user_data: T,
 }
 
+/// 出力 Surface の抽出エラー
+struct FrameError {
+    /// このエラーを通知する対象の入力 PTS。対応付けできない場合は None
+    pts: Option<amf_pts>,
+    /// ハンドラーへ通知するエラー
+    error: Error,
+}
+
 enum WorkerCommand<T> {
     /// 入力フレームの対応付け用 PTS、元の PTS、ユーザーデータを登録する
     Submit {
@@ -305,15 +313,12 @@ impl<H: DecodeHandler> Decoder<H> {
         ))
     }
 
-    /// デコーダーをフラッシュして残りのフレームを処理する
+    /// 残りのフレームを出力させ、ハンドラーへの通知が完了するまで待つ。
     ///
-    /// 残りのフレームをすべてハンドラーへ通知したあと、ワーカースレッドの完了まで
-    /// 待つ。タイムアウトは設けていないため、AMF が Drain 後に `AMF_EOF` を返さない
-    /// 場合は戻らない。
+    /// 処理中に発生したエラーはハンドラーへ通知される。ワーカーが既に終了している
+    /// 場合や Drain に失敗した場合は `Err` を返す。
     ///
-    /// `QueryOutput` が `AMF_OK` / `AMF_REPEAT` / `AMF_EOF` / `AMF_RESOLUTION_CHANGED` /
-    /// `AMF_RESOLUTION_UPDATED` 以外の結果を返した場合は、そのエラーがハンドラーへ
-    /// 通知され、ワーカーが終了する。ワーカーが既に終了している場合は `Err` を返す。
+    /// `finish` が成功した後に再度 `finish` を呼ぶと `Err` を返す。
     pub fn finish(&mut self) -> Result<(), Error> {
         if self.cmd_tx.is_none() {
             return Err(Error::new_custom(
@@ -379,7 +384,7 @@ fn worker<H: DecodeHandler>(
     let mut pending: HashMap<amf_pts, PendingFrame<H::UserData>> = HashMap::new();
     // Submit コマンドの処理が出力の取得より遅れた場合に備え、対応する user_data が
     // 登録されるまで出力を保持する。
-    let mut output_buffer: VecDeque<Result<(Surface, amf_pts), Error>> = VecDeque::new();
+    let mut output_buffer: VecDeque<Result<(Surface, amf_pts), FrameError>> = VecDeque::new();
     let mut finish: Option<mpsc::SyncSender<()>> = None;
 
     loop {
@@ -392,7 +397,7 @@ fn worker<H: DecodeHandler>(
                     deliver_buffered(&mut output_buffer, &mut pending, &mut handler);
                     if status == DrainStatus::Eof {
                         flush_buffered_outputs(&mut output_buffer, &mut pending, &mut handler);
-                        report_unmatched_inputs(&mut pending, &mut handler);
+                        report_unmatched_inputs(&mut pending, &mut handler, "Decoder::finish");
                         break;
                     }
                     if pending.is_empty() && output_buffer.is_empty() {
@@ -460,7 +465,7 @@ fn worker<H: DecodeHandler>(
 fn handle_command<H: DecodeHandler>(
     cmd: WorkerCommand<H::UserData>,
     pending: &mut HashMap<amf_pts, PendingFrame<H::UserData>>,
-    output_buffer: &mut VecDeque<Result<(Surface, amf_pts), Error>>,
+    output_buffer: &mut VecDeque<Result<(Surface, amf_pts), FrameError>>,
     handler: &mut H,
     finish: &mut Option<mpsc::SyncSender<()>>,
 ) {
@@ -486,12 +491,12 @@ fn handle_command<H: DecodeHandler>(
     }
 }
 
-/// QueryOutput から出力を取得し、user_data の対応付け待ちのバッファに追加する
+/// `QueryOutput` から取得できた出力を `output_buffer` に追加する。
 ///
-/// `AMF_EOF` を受け取った場合は [`DrainStatus::Eof`] を返す。`QueryOutput` が
-/// 終端エラーを返した場合は、そのエラーを返す。
+/// 取得できる出力がなくなった場合は [`DrainStatus::NotReady`]、ドレインが完了した
+/// 場合は [`DrainStatus::Eof`] を返す。終端エラーの場合は `Err` を返す。
 fn drain_output(
-    output_buffer: &mut VecDeque<Result<(Surface, amf_pts), Error>>,
+    output_buffer: &mut VecDeque<Result<(Surface, amf_pts), FrameError>>,
     component: &Component,
 ) -> Result<DrainStatus, Error> {
     let context = component.context();
@@ -499,12 +504,24 @@ fn drain_output(
         let mut data: *mut AMFData = ptr::null_mut();
         let result = unsafe { component.query_output(&mut data) };
         log::debug!("worker: QueryOutput result={result:?}");
-        match classify_query_output(result, !data.is_null()) {
+        let kind = classify_query_output(result, !data.is_null());
+        // QueryOutput が返した参照は呼び出し元が所有する。
+        if kind != QueryOutputKind::Output && !data.is_null() {
+            let vtbl = unsafe { &*(*data).pVtbl };
+            if let Some(release) = vtbl.Release {
+                unsafe { release(data) };
+            }
+        }
+        match kind {
             QueryOutputKind::Output => {
                 output_buffer.push_back(extract_frame(data as *mut AMFSurface, &context));
             }
-            QueryOutputKind::NoOutput => return Ok(DrainStatus::Drained),
-            QueryOutputKind::Eof => return Ok(DrainStatus::Eof),
+            QueryOutputKind::NoOutput => {
+                return Ok(DrainStatus::NotReady);
+            }
+            QueryOutputKind::Eof => {
+                return Ok(DrainStatus::Eof);
+            }
             QueryOutputKind::TerminalError => {
                 return Err(Error::from_amf(result, "AMFComponent::QueryOutput"));
             }
@@ -512,7 +529,7 @@ fn drain_output(
     }
 }
 
-/// 出力 `Surface` の PTS を入力時の値に戻し、`DecodedFrame` を構築する
+/// 入力時の PTS に戻した `Surface` と、対応するユーザーデータを組み合わせて返す。
 fn into_decoded_frame<H: DecodeHandler>(
     surface: Surface,
     frame: PendingFrame<H::UserData>,
@@ -524,14 +541,12 @@ fn into_decoded_frame<H: DecodeHandler>(
     }
 }
 
-/// 保持している出力を先頭から順に、対応する入力フレームが登録されていれば
-/// ハンドラーへ通知する
+/// 対応する入力がある出力を、出力順にハンドラーへ通知する。
 ///
-/// 先頭の出力に対応する入力フレームがまだ登録されていない場合は、その出力を保持した
-/// まま待機する。エラーの出力は対応する入力を必要としないため、その場で通知する。
-/// 通知する `Surface` の PTS は、入力時に設定された値へ戻す。
+/// 対応する入力がまだない出力は通知せずに保持する。出力の抽出エラーは `Err` として
+/// 通知する。通知する `Surface` の PTS は、入力時に設定された値へ戻す。
 fn deliver_buffered<H: DecodeHandler>(
-    output_buffer: &mut VecDeque<Result<(Surface, amf_pts), Error>>,
+    output_buffer: &mut VecDeque<Result<(Surface, amf_pts), FrameError>>,
     pending: &mut HashMap<amf_pts, PendingFrame<H::UserData>>,
     handler: &mut H,
 ) {
@@ -540,8 +555,15 @@ fn deliver_buffered<H: DecodeHandler>(
             None => return,
             Some(Err(_)) => {
                 let output = output_buffer.pop_front().expect("front output must exist");
-                let error = output.expect_err("front output must be an error");
-                handler.on_decoded(Err(error.into()));
+                let frame_error = match output {
+                    Err(error) => error,
+                    Ok(_) => unreachable!("front output must be an error"),
+                };
+                // エラーを通知した入力は、未対応入力として再通知しない。
+                if let Some(pts) = frame_error.pts {
+                    pending.remove(&pts);
+                }
+                handler.on_decoded(Err(frame_error.error.into()));
             }
             Some(Ok((_, pts))) => {
                 let pts = *pts;
@@ -549,18 +571,22 @@ fn deliver_buffered<H: DecodeHandler>(
                     return;
                 };
                 let output = output_buffer.pop_front().expect("front output must exist");
-                let (surface, _) = output.expect("front output must be a success");
+                let (surface, _) = match output {
+                    Ok(output) => output,
+                    Err(_) => unreachable!("front output must be a success"),
+                };
                 handler.on_decoded(Ok(into_decoded_frame::<H>(surface, frame)));
             }
         }
     }
 }
 
-/// Drain 完了時に残っている出力をすべてハンドラーへ通知する
+/// 保持している出力をすべてハンドラーへ通知する。
 ///
-/// 対応する入力がない出力はエラーとして通知する。
+/// 対応する入力がある出力は `Ok`、ない出力は `Err` として通知する。抽出エラーも
+/// `Err` として通知する。ドレイン完了時と終端エラー時に呼ぶ。
 fn flush_buffered_outputs<H: DecodeHandler>(
-    output_buffer: &mut VecDeque<Result<(Surface, amf_pts), Error>>,
+    output_buffer: &mut VecDeque<Result<(Surface, amf_pts), FrameError>>,
     pending: &mut HashMap<amf_pts, PendingFrame<H::UserData>>,
     handler: &mut H,
 ) {
@@ -572,67 +598,89 @@ fn flush_buffered_outputs<H: DecodeHandler>(
                 }
                 None => handler.on_decoded(Err(Error::new_custom(
                     "Decoder::worker",
-                    &format!("no submitted frame for output PTS {pts}"),
+                    &format!("no submitted frame for output with internal PTS {pts}"),
                 )
                 .into())),
             },
-            Err(error) => handler.on_decoded(Err(error.into())),
+            Err(frame_error) => {
+                // エラーを通知した入力は、未対応入力として再通知しない。
+                if let Some(pts) = frame_error.pts {
+                    pending.remove(&pts);
+                }
+                handler.on_decoded(Err(frame_error.error.into()));
+            }
         }
     }
 }
 
-/// 出力が得られなかった入力フレームをエラーとして通知する
+/// 出力が得られなかった入力を、`function` を発生元とする `Err` として通知する。
+///
+/// 通知順は入力順とする。
 fn report_unmatched_inputs<H: DecodeHandler>(
     pending: &mut HashMap<amf_pts, PendingFrame<H::UserData>>,
     handler: &mut H,
+    function: &'static str,
 ) {
-    for (pts, _) in pending.drain() {
+    let mut frames: Vec<_> = pending.drain().collect();
+    frames.sort_by_key(|(pts, _)| *pts);
+    for (_, frame) in frames {
         handler.on_decoded(Err(Error::new_custom(
-            "Decoder::finish",
-            &format!("decoder did not output a frame for submitted PTS {pts}"),
+            function,
+            &format!(
+                "decoder did not output a frame for submitted PTS {}",
+                frame.original_pts
+            ),
         )
         .into()));
     }
 }
 
-/// 終端エラーをハンドラーへ通知し、残りの入力を未処理として通知する
-///
-/// 取得済みの出力は対応する入力があれば `Ok` として通知する。対応する入力がない
-/// 出力と、出力が得られなかった入力は `Err` として通知する。最後に原因のエラーを
-/// 通知する。
+/// 終端エラー発生時に、保持している出力、原因のエラー、出力が得られなかった入力の
+/// 順にハンドラーへ通知する。
 fn notify_terminal_error<H: DecodeHandler>(
     error: Error,
-    output_buffer: &mut VecDeque<Result<(Surface, amf_pts), Error>>,
+    output_buffer: &mut VecDeque<Result<(Surface, amf_pts), FrameError>>,
     pending: &mut HashMap<amf_pts, PendingFrame<H::UserData>>,
     handler: &mut H,
 ) {
-    deliver_buffered(output_buffer, pending, handler);
     flush_buffered_outputs(output_buffer, pending, handler);
     handler.on_decoded(Err(error.into()));
-    report_unmatched_inputs(pending, handler);
+    report_unmatched_inputs(pending, handler, "Decoder::worker");
 }
 
 // ---------------------------------------------------------------------------
 // フレーム抽出 (standalone)
 // ---------------------------------------------------------------------------
 
-/// AMFSurface を抽出して convert し、PTS と一緒に返す
+/// デコード済みの `Surface` と、対応付けに使った PTS を返す。
 ///
 /// `context` には `surface` に対する [Context] を指定する。
-/// null ポインタや convert 失敗の場合は `Err` を返す。
-fn extract_frame(surface: *mut AMFSurface, context: &Context) -> Result<(Surface, amf_pts), Error> {
+/// `Surface` を返せない場合は `Err` を返す。
+fn extract_frame(
+    surface: *mut AMFSurface,
+    context: &Context,
+) -> Result<(Surface, amf_pts), FrameError> {
     if surface.is_null() {
-        return Err(Error::new_custom("extract_frame", "surface is null"));
+        return Err(FrameError {
+            pts: None,
+            error: Error::new_custom("extract_frame", "surface is null"),
+        });
     }
 
     // デコーダーの出力 Surface は、デコーダーが作成された Context から確保されている
-    let surface = unsafe { Surface::from_raw(surface, context.clone()) }?;
+    let surface = unsafe { Surface::from_raw(surface, context.clone()) }
+        .map_err(|error| FrameError { pts: None, error })?;
 
     // Convert が PTS を保持するかに依存せず、メモリ種別を変換する前の Surface から
     // 対応付け用の PTS を取得する。
     let pts = surface.get_pts();
 
-    surface.convert(AMF_MEMORY_TYPE::AMF_MEMORY_HOST)?;
+    surface
+        .convert(AMF_MEMORY_TYPE::AMF_MEMORY_HOST)
+        .map_err(|error| FrameError {
+            pts: Some(pts),
+            error,
+        })?;
 
     Ok((surface, pts))
 }

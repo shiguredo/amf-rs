@@ -1075,15 +1075,10 @@ impl<H: EncodeHandler> Encoder<H> {
         Ok(())
     }
 
-    /// エンコーダーをフラッシュして残りのフレームを処理する
+    /// 残りのフレームを出力させ、ハンドラーへの通知が完了するまで待つ。
     ///
-    /// 残りのフレームをすべてハンドラーへ通知したあと、ワーカースレッドの完了まで
-    /// 待つ。タイムアウトは設けていないため、AMF が Drain 後に `AMF_EOF` を返さない
-    /// 場合は戻らない。
-    ///
-    /// `QueryOutput` が `AMF_OK` / `AMF_REPEAT` / `AMF_EOF` / `AMF_RESOLUTION_CHANGED` /
-    /// `AMF_RESOLUTION_UPDATED` 以外の結果を返した場合は、そのエラーがハンドラーへ
-    /// 通知され、ワーカーが終了する。ワーカーが既に終了している場合は `Err` を返す。
+    /// 処理中に発生したエラーはハンドラーへ通知される。ワーカーが既に終了している
+    /// 場合や Drain に失敗した場合は `Err` を返す。
     pub fn finish(&mut self) -> Result<(), Error> {
         // Drain を呼び出して残りのフレームを出力させる
         let result = self.component.drain();
@@ -1138,7 +1133,7 @@ fn worker<H: EncodeHandler>(
     codec_config: CodecConfig,
 ) {
     let mut pending: VecDeque<H::UserData> = VecDeque::new();
-    let mut output_buffer: VecDeque<Result<(Buffer, PictureType), crate::Error>> = VecDeque::new();
+    let mut output_buffer: VecDeque<Result<(Buffer, PictureType), Error>> = VecDeque::new();
     let mut finish: Option<mpsc::SyncSender<()>> = None;
 
     loop {
@@ -1155,7 +1150,7 @@ fn worker<H: EncodeHandler>(
                 Ok(status) => {
                     if status == DrainStatus::Eof {
                         flush_buffered_outputs(&mut output_buffer, &mut handler);
-                        report_unmatched_inputs(&mut pending, &mut handler);
+                        report_unmatched_inputs(&mut pending, &mut handler, "Encoder::finish");
                         break;
                     }
                     if pending.is_empty() && output_buffer.is_empty() {
@@ -1221,12 +1216,14 @@ fn worker<H: EncodeHandler>(
     }
 }
 
-/// QueryOutput からの出力をバッファに格納し、pending とマッチングしてハンドラーを呼び出す
+/// `QueryOutput` から取得できた出力を投入順に対応する入力と組み合わせ、ハンドラーへ
+/// 通知する。
 ///
-/// `AMF_EOF` を受け取った場合は [`DrainStatus::Eof`] を返す。`QueryOutput` が
-/// 終端エラーを返した場合は、取得済みの出力を通知したあとでそのエラーを返す。
+/// 出力が尽きた場合は [`DrainStatus::NotReady`]、ドレインが完了した場合は
+/// [`DrainStatus::Eof`] を返す。終端エラーの場合は `Err` を返す。終端エラー時に
+/// 通知できなかった出力は保持する。
 fn drain_output<H: EncodeHandler>(
-    output_buffer: &mut VecDeque<Result<(Buffer, PictureType), crate::Error>>,
+    output_buffer: &mut VecDeque<Result<(Buffer, PictureType), Error>>,
     pending: &mut VecDeque<H::UserData>,
     handler: &mut H,
     component: &Component,
@@ -1237,12 +1234,24 @@ fn drain_output<H: EncodeHandler>(
         let mut data: *mut AMFData = ptr::null_mut();
         let result = unsafe { component.query_output(&mut data) };
         log::debug!("worker: QueryOutput result={result:?}");
-        match classify_query_output(result, !data.is_null()) {
+        let kind = classify_query_output(result, !data.is_null());
+        // QueryOutput が返した参照は呼び出し元が所有する。
+        if kind != QueryOutputKind::Output && !data.is_null() {
+            let vtbl = unsafe { &*(*data).pVtbl };
+            if let Some(release) = vtbl.Release {
+                unsafe { release(data) };
+            }
+        }
+        match kind {
             QueryOutputKind::Output => {
                 output_buffer.push_back(extract_encoded_output(data, codec_config, &context));
             }
-            QueryOutputKind::NoOutput => break DrainStatus::Drained,
-            QueryOutputKind::Eof => break DrainStatus::Eof,
+            QueryOutputKind::NoOutput => {
+                break DrainStatus::NotReady;
+            }
+            QueryOutputKind::Eof => {
+                break DrainStatus::Eof;
+            }
             QueryOutputKind::TerminalError => {
                 match_outputs(output_buffer, pending, handler);
                 return Err(Error::from_amf(result, "AMFComponent::QueryOutput"));
@@ -1254,7 +1263,7 @@ fn drain_output<H: EncodeHandler>(
     Ok(status)
 }
 
-/// バッファされた出力と pending を FIFO で対応付け、ハンドラーを呼び出す
+/// 取得済みの出力を投入順に対応する入力と組み合わせ、ハンドラーへ通知する。
 fn match_outputs<H: EncodeHandler>(
     output_buffer: &mut VecDeque<Result<(Buffer, PictureType), Error>>,
     pending: &mut VecDeque<H::UserData>,
@@ -1275,7 +1284,10 @@ fn match_outputs<H: EncodeHandler>(
     }
 }
 
-/// 対応する入力がない出力をエラーとして通知する
+/// 保持している出力をすべてハンドラーへ通知する。
+///
+/// 対応する入力がない出力は `Err` として通知する。ドレイン完了時と終端エラー時に
+/// 呼ぶ。
 fn flush_buffered_outputs<H: EncodeHandler>(
     output_buffer: &mut VecDeque<Result<(Buffer, PictureType), Error>>,
     handler: &mut H,
@@ -1292,21 +1304,23 @@ fn flush_buffered_outputs<H: EncodeHandler>(
     }
 }
 
-/// 出力が得られなかった入力をエラーとして通知する
-fn report_unmatched_inputs<H: EncodeHandler>(pending: &mut VecDeque<H::UserData>, handler: &mut H) {
+/// 出力が得られなかった入力を、`function` を発生元とする `Err` として通知する。
+fn report_unmatched_inputs<H: EncodeHandler>(
+    pending: &mut VecDeque<H::UserData>,
+    handler: &mut H,
+    function: &'static str,
+) {
     for _ in pending.drain(..) {
         handler.on_encoded(Err(Error::new_custom(
-            "Encoder::finish",
+            function,
             "encoder did not output a frame for submitted input",
         )
         .into()));
     }
 }
 
-/// 終端エラーをハンドラーへ通知し、残りの入力を未処理として通知する
-///
-/// 対応する入力がない出力を flush したあと、原因のエラーと、出力が得られなかった
-/// 入力を通知する。
+/// 終端エラー発生時に、保持している出力、原因のエラー、出力が得られなかった入力の
+/// 順にハンドラーへ通知する。
 fn notify_terminal_error<H: EncodeHandler>(
     error: Error,
     output_buffer: &mut VecDeque<Result<(Buffer, PictureType), Error>>,
@@ -1315,10 +1329,12 @@ fn notify_terminal_error<H: EncodeHandler>(
 ) {
     flush_buffered_outputs(output_buffer, handler);
     handler.on_encoded(Err(error.into()));
-    report_unmatched_inputs(pending, handler);
+    report_unmatched_inputs(pending, handler, "Encoder::worker");
 }
 
-/// AMFData から Buffer とピクチャタイプを抽出する
+/// 出力バッファとピクチャタイプを返す。
+///
+/// 出力バッファを返せない場合は `Err` を返す。
 fn extract_encoded_output(
     data: *mut AMFData,
     codec_config: &CodecConfig,

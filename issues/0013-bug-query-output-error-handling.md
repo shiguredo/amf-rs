@@ -31,7 +31,7 @@
 ## 設計方針
 
 - `QueryOutput` の結果を次のように分類する。判定は `AMF_OK` + null と非 OK を混ぜず、データの有無より先にステータスを見る。
-  - 出力あり: `AMF_OK` かつデータが非 null。デコーダーは `AMF_REPEAT` かつデータが非 null の場合も出力として扱う。
+  - 出力あり: `AMF_OK` または `AMF_REPEAT` でデータが非 null。`AMF_REPEAT` でデータを返す実装があるため、データがある場合は出力として扱う。エンコーダーも同じ分類を使う。
   - 進捗なし: `AMF_REPEAT` かつデータが null、または `AMF_OK` かつデータが null。出力なしとして継続する。
   - ドレイン完了: `AMF_EOF`。保持している出力を flush し、未マッチの入力を `Err` で通知してワーカーを終了する。
   - 終端エラー: 上記以外 (`AMF_RESOLUTION_CHANGED` / `AMF_RESOLUTION_UPDATED` を除く)。ハンドラーへ `Err` を通知し、残りの `pending` をすべて未処理として `Err` で通知してワーカーを終了する。`AMF_EOF` は待たない。
