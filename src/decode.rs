@@ -265,17 +265,17 @@ impl<H: DecodeHandler> Decoder<H> {
             .ok_or_else(|| Error::new_custom("Decoder::decode", "PTS counter overflowed"))?;
         buffer.set_pts(pts);
 
-        log::debug!("Decoder::decode");
+        tracing::trace!("Decoder::decode");
 
         let max_retries = 100;
         for retry in 0..max_retries {
             let result = unsafe { self.component.submit_input(buffer.as_ptr() as *mut AMFData) };
 
             if retry > 0 && retry % 10 == 0 {
-                log::debug!("Decoder::SubmitInput: retry={retry}, result={result:?}");
+                tracing::trace!("Decoder::SubmitInput: retry={retry}, result={result:?}");
             }
             if matches!(result, AMF_RESULT::AMF_OK | AMF_RESULT::AMF_NEED_MORE_INPUT) {
-                log::debug!("Decoder::SubmitInput: accepted, result={result:?}");
+                tracing::trace!("Decoder::SubmitInput: accepted, result={result:?}");
                 // pts に対応する user_data の情報をワーカーに登録する
                 self.cmd_tx
                     .as_ref()
@@ -327,9 +327,9 @@ impl<H: DecodeHandler> Decoder<H> {
             ));
         }
 
-        log::debug!("Decoder::finish: calling Drain");
+        tracing::debug!("Decoder::finish: calling Drain");
         let result = self.component.drain();
-        log::debug!("Decoder::finish: Drain result={result:?}");
+        tracing::debug!("Decoder::finish: Drain result={result:?}");
         if result != AMF_RESULT::AMF_OK && result != AMF_RESULT::AMF_INPUT_FULL {
             Error::check(result, "AMFComponent::Drain")?;
         }
@@ -352,7 +352,7 @@ impl<H: DecodeHandler> Decoder<H> {
     }
 }
 
-// Safety:
+// SAFETY:
 // Drop 内でのみ component を解放する。ワーカースレッドは Drop より先に停止させる。
 impl<H: DecodeHandler> Drop for Decoder<H> {
     fn drop(&mut self) {
@@ -503,7 +503,7 @@ fn drain_output(
     loop {
         let mut data: *mut AMFData = ptr::null_mut();
         let result = unsafe { component.query_output(&mut data) };
-        log::debug!("worker: QueryOutput result={result:?}");
+        tracing::trace!("worker: QueryOutput result={result:?}");
         let kind = classify_query_output(result, !data.is_null());
         // QueryOutput が返した参照は呼び出し元が所有する。
         if kind != QueryOutputKind::Output && !data.is_null() {

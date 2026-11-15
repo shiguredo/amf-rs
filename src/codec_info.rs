@@ -11,11 +11,11 @@ use crate::sys;
 /// コーデック種別
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VideoCodecType {
-    /// H.264 / AVC
+    /// H.264 / AVC コーデック
     H264,
-    /// H.265 / HEVC
+    /// H.265 / HEVC コーデック
     Hevc,
-    /// AV1
+    /// AV1 コーデック
     Av1,
 }
 
@@ -77,31 +77,31 @@ pub enum EncodingProfiles {
 /// H.264 エンコードプロファイル
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum H264EncodingProfile {
-    /// Baseline
+    /// Baseline プロファイル
     Baseline,
-    /// Constrained Baseline
+    /// Constrained Baseline プロファイル
     ConstrainedBaseline,
-    /// Main
+    /// Main プロファイル
     Main,
-    /// High
+    /// High プロファイル
     High,
-    /// Constrained High
+    /// Constrained High プロファイル
     ConstrainedHigh,
 }
 
 /// HEVC エンコードプロファイル
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HevcEncodingProfile {
-    /// Main
+    /// Main プロファイル
     Main,
-    /// Main10
+    /// Main10 プロファイル
     Main10,
 }
 
 /// AV1 エンコードプロファイル
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Av1EncodingProfile {
-    /// Main
+    /// Main プロファイル
     Main,
 }
 

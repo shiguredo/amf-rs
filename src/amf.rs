@@ -35,7 +35,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use crate::error::{Error, require_vtbl_fn};
 use crate::sys;
 
-// Safety: 各型の `Send` / `Sync` の根拠。
+// SAFETY: 各型の `Send` / `Sync` の根拠。
 // `AMFComponent` は thread-safe と明記されている (AMF API Reference §2.6.1)。
 // `AMFPropertyStorage` (§2.2.14.1)、`AMFData` (§2.3.1)、`AMFSurface` (§2.3.3.1) は
 // thread-safe ではなく、`AMFPlane` (§2.3.3.3) と `AMFContext` (§2.4.1) には記述がない。
@@ -48,7 +48,11 @@ use crate::sys;
 /// 同じ AMF オブジェクトを指すハンドルで共有する状態
 #[derive(Debug)]
 pub(crate) struct AmfObjectState {
-    /// スレッドセーフでない操作を直列化する Mutex
+    /// AMF オブジェクトのスレッドセーフでない操作を直列化する Mutex
+    ///
+    /// AMF のインターフェースはほとんどがスレッドセーフではない。同じオブジェクトへの
+    /// 同時操作はデータ競合になるため、同じオブジェクトを指すハンドル間でこのロックを
+    /// 共有し、操作を 1 つずつ実行する。
     mutex: Mutex<()>,
     /// この状態を共有するハンドルの数
     handles: AtomicUsize,
@@ -88,7 +92,7 @@ impl AmfObjectState {
 }
 
 // ---------------------------------------------------------------------------
-// PropertyStorage
+// PropertyStorage のラッパー
 // ---------------------------------------------------------------------------
 
 #[derive(Clone, Copy)]
@@ -255,7 +259,7 @@ impl Drop for PropertyStorage {
 }
 
 // ---------------------------------------------------------------------------
-// Surface
+// Surface のラッパー
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, Copy)]
@@ -488,7 +492,7 @@ impl Drop for Surface {
 }
 
 // ---------------------------------------------------------------------------
-// Buffer
+// Buffer のラッパー
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, Copy)]
@@ -667,7 +671,7 @@ impl Drop for Buffer {
 }
 
 // ---------------------------------------------------------------------------
-// Plane
+// Plane のラッパー
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, Copy)]
@@ -693,7 +697,7 @@ pub struct Plane<'a> {
     surface: &'a Surface,
 }
 
-// Safety: プレーンの情報を取得するメソッドは `Surface` と共有するロックで直列化され、
+// SAFETY: プレーンの情報を取得するメソッドは `Surface` と共有するロックで直列化され、
 // 参照カウント操作は AMFInterface が thread-safe であるため、複数スレッドから使える。
 unsafe impl<'a> Send for Plane<'a> {}
 unsafe impl<'a> Sync for Plane<'a> {}
@@ -845,7 +849,7 @@ impl Drop for Plane<'_> {
 }
 
 // ---------------------------------------------------------------------------
-// Context
+// Context のラッパー
 // ---------------------------------------------------------------------------
 
 #[derive(Clone, Copy)]
@@ -1062,7 +1066,7 @@ impl Drop for Context {
 }
 
 // ---------------------------------------------------------------------------
-// Component
+// Component のラッパー
 // ---------------------------------------------------------------------------
 
 #[derive(Clone, Copy)]
