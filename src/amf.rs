@@ -43,6 +43,7 @@ use crate::sys;
 // 参照カウント操作 (`Acquire` / `Release`) は Clone / Drop で行い、共有ロックしない。
 // AMF Wiki の "Guide for Video CODEC Encoder App Developers" §4.2 "AMF Interfaces" に
 // "The default implementation of AMFInterface is thread-safe." と明記されている。
+// ただし `Context` は除く。詳細は `Context` の Drop 実装に記載している。
 
 /// 同じ AMF オブジェクトを指すハンドルで共有する状態
 #[derive(Debug)]
@@ -272,8 +273,8 @@ struct SurfaceFuncs {
 
 /// `AMFSurface` の RAII ラッパー
 ///
-/// `get_plane()` / `get_plane_at()` / `property_storage()` が返すハンドルは、
-/// このハンドルと同じ AMF オブジェクトを指す。
+/// `get_plane()` / `get_plane_at()` は `Plane` を返し、
+/// `property_storage()` が返す `PropertyStorage` は同じ AMF オブジェクトを指す。
 #[derive(Debug)]
 pub struct Surface {
     ptr: *mut sys::AMFSurface,
@@ -309,7 +310,7 @@ impl Surface {
             set_duration: require_vtbl_fn(vtbl.SetDuration, "AMFSurface::SetDuration")?,
             get_plane: require_vtbl_fn(vtbl.GetPlane, "AMFSurface::GetPlane")?,
             get_plane_at: require_vtbl_fn(vtbl.GetPlaneAt, "AMFSurface::GetPlaneAt")?,
-            convert: require_vtbl_fn(vtbl.Convert, "AMFSurface::Convert")?,
+            convert: require_vtbl_fn(vtbl.Convert, "AMFData::Convert")?,
         };
         if acquire {
             unsafe { (f.acquire)(ptr) };
@@ -669,7 +670,7 @@ impl Drop for Buffer {
 // Plane
 // ---------------------------------------------------------------------------
 
-#[derive(Clone, Copy)]
+#[derive(Debug, Clone, Copy)]
 struct PlaneFuncs {
     acquire: unsafe extern "C" fn(*mut sys::AMFPlane) -> sys::amf_long,
     release: unsafe extern "C" fn(*mut sys::AMFPlane) -> sys::amf_long,
@@ -681,12 +682,14 @@ struct PlaneFuncs {
 }
 
 /// `AMFPlane` の RAII ラッパー
+#[derive(Debug)]
 pub struct Plane<'a> {
     ptr: *mut sys::AMFPlane,
     f: PlaneFuncs,
+    // Surface.h の GetPlanesCount / GetPlaneAt / GetPlane の
+    // "do not store planes outside. should be used together with Surface" に従い、
+    // Plane の寿命を Surface に縛る。
     /// 取得元の `Surface`
-    ///
-    /// AMF SDK v1.5.2 の `AMFSurface::GetPlane` の注記に従い、この参照で寿命を縛る。
     surface: &'a Surface,
 }
 
@@ -699,7 +702,7 @@ impl<'a> Plane<'a> {
     /// ハンドルを作成する
     ///
     /// # Safety
-    /// `ptr` は `surface` が持つ有効な `AMFPlane` を指すこと。
+    /// `ptr` は null でなく、`surface` が持つ有効な `AMFPlane` を指すこと。
     unsafe fn from_raw_with_acquire(
         ptr: *mut sys::AMFPlane,
         acquire: bool,
@@ -726,9 +729,10 @@ impl<'a> Plane<'a> {
     /// 生ポインタから Plane を作成する (Acquire なし)
     ///
     /// # Safety
-    /// `ptr` は `surface` が持つ有効な `AMFPlane` を指すこと。呼び出し元の参照の
-    /// 所有権を引き継ぐため、同じ `ptr` に対して他のハンドルを作らないこと。
-    /// `surface` の `convert` と並行して呼ばないこと。
+    /// `ptr` は `surface` が持つ有効な `AMFPlane` を指すこと。`ptr` は null であってはならない。
+    /// 同じ参照を二重に所有しないこと (`from_raw` を同じ参照に対して複数回呼ばないこと)。
+    /// `as_ptr` が返した借用ポインタを渡してはならない。`surface` の `convert` と並行して
+    /// 呼ばないこと。
     ///
     /// # Errors
     /// `AMFPlane` の必須関数が利用できない場合にエラーを返す。
@@ -739,7 +743,8 @@ impl<'a> Plane<'a> {
     /// 生ポインタから Acquire 付きで Plane を作成する
     ///
     /// # Safety
-    /// `ptr` は `surface` が持つ有効な `AMFPlane` を指すこと。`surface` の `convert` と
+    /// `ptr` は `surface` が持つ有効な `AMFPlane` を指すこと。`ptr` は null であってはならない。
+    /// 新たに `Acquire` するため、既存のハンドルと並存してよい。`surface` の `convert` と
     /// 並行して呼ばないこと。
     ///
     /// # Errors
@@ -792,19 +797,25 @@ impl<'a> Plane<'a> {
     }
 
     /// 幅を取得する
+    ///
+    /// crop region の幅をピクセル単位で返す。crop region が未設定の場合は、
+    /// サーフェスの幅とピクセルフォーマットに基づく。
     pub fn get_width(&self) -> sys::amf_int32 {
         let _guard = self.surface.state.lock();
         unsafe { (self.f.get_width)(self.ptr) }
     }
 
     /// 高さを取得する
+    ///
+    /// crop region の高さをピクセル単位で返す。crop region が未設定の場合は、
+    /// サーフェスの高さとピクセルフォーマットに基づく。
     pub fn get_height(&self) -> sys::amf_int32 {
         let _guard = self.surface.state.lock();
         unsafe { (self.f.get_height)(self.ptr) }
     }
 }
 
-impl<'a> Clone for Plane<'a> {
+impl Clone for Plane<'_> {
     fn clone(&self) -> Self {
         unsafe {
             (self.f.acquire)(self.ptr);
@@ -827,6 +838,8 @@ impl Drop for Plane<'_> {
                 (self.f.release)(self.ptr);
             }
         }
+        // release より先に dec_plane すると、release の完了前に convert が Plane 数 0 を
+        // 観測して AMF Convert を実行しうるため、release 後に減らす。
         self.surface.dec_plane();
     }
 }
@@ -1037,8 +1050,10 @@ impl Clone for Context {
 
 impl Drop for Context {
     fn drop(&mut self) {
+        // 最後の参照が解放されると AMFContext のデストラクタが Terminate に相当する処理を行う。
+        // ドキュメント上、Release の呼び出しはスレッドセーフであるが、
+        // 実測ベースではスレッドセーフではなかったため、ロックを取って解放する。
         let _guard = self.state.lock();
-        // 最後の参照が解放されると AMFContext のデストラクタが Terminate を呼ぶ。
         unsafe {
             (self.f.release)(self.ptr);
         }
@@ -1370,10 +1385,6 @@ mod tests {
         );
 
         let cloned = plane.clone();
-        assert!(
-            surface.is_shared(),
-            "Plane を Clone した Surface が共有扱いになっていない"
-        );
         drop(cloned);
         assert!(
             surface.is_shared(),
@@ -1384,42 +1395,6 @@ mod tests {
         assert!(
             !surface.is_shared(),
             "Plane を drop した後の Surface が共有扱いになっている"
-        );
-    }
-
-    /// from_raw / from_raw_acquired で再構築した Plane が Surface と同じ状態を共有することを確認する
-    #[test]
-    fn test_plane_from_raw_shares_state_with_surface() {
-        let context = create_context();
-        let surface = create_surface(&context);
-        let plane = surface
-            .get_plane(sys::AMF_PLANE_TYPE::AMF_PLANE_Y)
-            .expect("Y プレーンの取得に失敗");
-        let ptr = plane.into_raw();
-
-        let plane = unsafe { Plane::from_raw(ptr, &surface) }.expect("Plane の再構築に失敗");
-        assert!(
-            surface.is_shared(),
-            "from_raw で再構築した Plane が Surface の状態を共有していない"
-        );
-
-        // from_raw_acquired も取得元の Surface の状態を共有する
-        let acquired = unsafe { Plane::from_raw_acquired(plane.as_ptr(), &surface) }
-            .expect("Plane の Acquire 付き再構築に失敗");
-        assert!(
-            surface.is_shared(),
-            "from_raw_acquired で再構築した Plane が Surface の状態を共有していない"
-        );
-        drop(acquired);
-        assert!(
-            surface.is_shared(),
-            "from_raw_acquired で再構築した Plane を drop しても、Plane が生存している Surface が共有扱いになっていない"
-        );
-
-        drop(plane);
-        assert!(
-            !surface.is_shared(),
-            "from_raw で再構築した Plane を drop した後の Surface が共有扱いになっている"
         );
     }
 

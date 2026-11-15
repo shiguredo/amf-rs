@@ -156,8 +156,9 @@ AMFContext が破棄され、そのデストラクタが `Terminate` を呼ぶ�
 
 `Surface` / `Buffer` / `PropertyStorage` / `Component` は作成元の `Context` の Clone を保持するため、これらのハンドルが生きている限り `Context` は破棄されない。
 
-`Plane<'a>` は `Surface::get_plane` / `Surface::get_plane_at` が返す。複数の `Plane` を
-別スレッドで並行に使える (`Clone` / `Drop` / `context()` は thread-safe)。
+`Plane<'a>` は `Surface::get_plane` / `Surface::get_plane_at` が返す。`Plane` の情報を取得する
+メソッドはロックで直列化され、複数の `Plane` を別スレッドで並行に使える。`Clone` / `Drop` /
+`context()` の参照カウント操作は thread-safe で、ロックを取らない。
 `Plane` の `context()` は取得元の `Surface` が保持する `Context` を返す。
 
 `Surface::convert` は `Plane` が生存している間はエラーを返す。`Surface` の `Clone` や

@@ -60,6 +60,30 @@ fn h264_test_decoder_config() -> DecoderConfig {
     }
 }
 
+/// テスト用の HOST NV12 Surface を確保する
+fn create_nv12_host_surface(context: &Context) -> Surface {
+    context
+        .alloc_surface(
+            AMF_MEMORY_TYPE::AMF_MEMORY_HOST,
+            AMF_SURFACE_FORMAT::AMF_SURFACE_NV12,
+            320,
+            240,
+        )
+        .expect("Surface の確保に失敗")
+}
+
+/// Plane が生存している Surface の convert が拒否されることを確認する
+fn assert_convert_rejected(result: Result<(), shiguredo_amf::Error>) {
+    let err = match result {
+        Ok(()) => panic!("Plane が生存している Surface の convert が成功した"),
+        Err(err) => err,
+    };
+    assert!(
+        err.to_string().contains("planes are alive"),
+        "Plane 生存中のエラーではない: {err}"
+    );
+}
+
 /// NV12 のダミーフレームを Surface に書き込む
 ///
 /// Y プレーンは座標に応じたグラデーション、UV プレーンは 128 固定にする。
@@ -766,13 +790,101 @@ fn test_convert_allows_surface_clone() {
             240,
         )
         .expect("Vulkan Surface の確保に失敗");
-    let cloned = surface.clone();
+    let _cloned = surface.clone();
 
     surface
         .convert(AMF_MEMORY_TYPE::AMF_MEMORY_HOST)
         .expect("Surface の Clone だけの convert が失敗した");
+}
+
+/// Plane が 1 個だけ生存している場合でも convert が失敗することを確認する
+#[test]
+fn test_convert_rejects_single_plane() {
+    let context = helpers::create_context();
+    let surface = create_nv12_host_surface(&context);
+    let plane = surface
+        .get_plane(AMF_PLANE_TYPE::AMF_PLANE_Y)
+        .expect("Y プレーンの取得に失敗");
+
+    // Plane 数の境界 (1 個) でも convert が拒否される
+    assert_convert_rejected(surface.convert(AMF_MEMORY_TYPE::AMF_MEMORY_HOST));
+
+    drop(plane);
+    surface
+        .convert(AMF_MEMORY_TYPE::AMF_MEMORY_HOST)
+        .expect("Plane を drop した後に convert が失敗した");
+}
+
+/// Surface の Clone と Plane が共存している場合、clone 側の convert も失敗することを確認する
+#[test]
+fn test_convert_rejects_plane_from_surface_clone() {
+    let context = helpers::create_context();
+    let surface = create_nv12_host_surface(&context);
+    let other = surface.clone();
+    let plane = surface
+        .get_plane(AMF_PLANE_TYPE::AMF_PLANE_Y)
+        .expect("Y プレーンの取得に失敗");
+
+    // Plane のカウンタが Surface の Clone 間で共有されていることを確認する
+    assert_convert_rejected(other.convert(AMF_MEMORY_TYPE::AMF_MEMORY_HOST));
+
+    drop(plane);
+    other
+        .convert(AMF_MEMORY_TYPE::AMF_MEMORY_HOST)
+        .expect("Plane を drop した後に clone 側の convert が失敗した");
+}
+
+/// Plane を Clone した場合、元の Plane を drop しても Clone が生存している間は convert が失敗することを確認する
+#[test]
+fn test_convert_rejects_cloned_plane() {
+    let context = helpers::create_context();
+    let surface = create_nv12_host_surface(&context);
+    let plane = surface
+        .get_plane(AMF_PLANE_TYPE::AMF_PLANE_Y)
+        .expect("Y プレーンの取得に失敗");
+    let cloned = plane.clone();
+    drop(plane);
+
+    // Clone した Plane が生存している間は convert が拒否される
+    assert_convert_rejected(surface.convert(AMF_MEMORY_TYPE::AMF_MEMORY_HOST));
 
     drop(cloned);
+    surface
+        .convert(AMF_MEMORY_TYPE::AMF_MEMORY_HOST)
+        .expect("Clone を drop した後に convert が失敗した");
+}
+
+/// `get_plane_at` で取得した Plane でも convert が失敗することを確認する
+#[test]
+fn test_convert_rejects_plane_from_get_plane_at() {
+    let context = helpers::create_context();
+    let surface = create_nv12_host_surface(&context);
+    let plane = surface
+        .get_plane_at(0)
+        .expect("インデックス 0 のプレーンの取得に失敗");
+
+    assert_convert_rejected(surface.convert(AMF_MEMORY_TYPE::AMF_MEMORY_HOST));
+
+    drop(plane);
+    surface
+        .convert(AMF_MEMORY_TYPE::AMF_MEMORY_HOST)
+        .expect("Plane を drop した後に convert が失敗した");
+}
+
+/// `PropertyStorage` が存在するだけでは convert が失敗しないことを確認する
+#[test]
+fn test_convert_allows_property_storage() {
+    let context = helpers::create_context();
+    let surface = create_nv12_host_surface(&context);
+    let property_storage = surface
+        .property_storage()
+        .expect("PropertyStorage の取得に失敗");
+
+    surface
+        .convert(AMF_MEMORY_TYPE::AMF_MEMORY_HOST)
+        .expect("PropertyStorage だけの convert が失敗した");
+
+    drop(property_storage);
 }
 
 /// Encoder を破棄し、利用者が保持していた Context も破棄した後で Surface を利用できることを確認する
