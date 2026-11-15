@@ -41,6 +41,9 @@
 - `Plane::from_raw` / `Plane::from_raw_acquired` は `Context` ではなく `&Surface` を受け取り、取得元の `Surface` と状態を共有するようにした。
 - `Plane::get_native` の doc に、返されるポインタの有効期間が `Surface` に依存することを明記した。
 - 寿命と `Send` / `Sync` は `Plane<'a>` の型と impl から自明なため、`Plane` の公開 doc には重複して書かず、Safety コメントに根拠を残した。
+- `Plane::from_raw` / `from_raw_acquired` の Safety 条件を、null、所有権、`as_ptr` の借用、並行 `convert` の観点で明確化した。
+- `Plane::get_width` / `Plane::get_height` の doc を crop region の仕様に合わせた。
+- `Plane` に `Debug` を実装した。
 - `Plane` の `Send` / `Sync` は維持した。`Surface` が共有ロックで `Send + Sync` になっており、
   `Plane` も同じロックを共有するため、`Plane` から `Send` を外す必要がない。
 - `Clone` / `Drop` / `context()` の参照カウント操作は、AMF Wiki の
@@ -50,12 +53,14 @@
 - `Plane` の生成・`Clone` で `Surface` の Plane ハンドル数を増やし、drop で減らすようにした。
 - `Surface::convert` は共有ロック内で Plane ハンドル数を確認し、1 個でも生存していればエラーを返すようにした。`Surface` の `Clone` や `PropertyStorage` が存在するだけでは失敗しない。
 - `Surface::convert` の戻り値を `Result<(), Error>` に変更し、`src/decode.rs` の `extract_frame` を新しい戻り値に追随させた。
-- `tests/test_amf.rs` の `test_vulkan_surface_convert_after_context_dropped` で、複数の `Plane` が
-  生存している間は `convert` がエラーになり、drop 後は成功してプレーンを取り直せることを確認するようにした。
+- `tests/test_amf.rs` で、`Plane` が 1 個でも生存していれば `Surface::convert` がエラーになること、
+  `Surface` の `Clone` や `Plane` の `Clone` と Plane 数が共有されること、`get_plane_at` で取得した
+  `Plane` でもエラーになること、`Plane` の drop 後は成功することを確認するテストを追加した。
+- `PropertyStorage` が存在するだけでは `convert` が失敗しないことを確認するテストを追加した。
 - `test_convert_allows_surface_clone` で、`Surface` の `Clone` だけでは `convert` が失敗しないことも
   確認するようにした。
 - `Plane` を保持したまま `Surface` を `Encoder::encode` に投入するテスト (`tests/test_roundtrip.rs` の `test_encode_rejects_surface_with_live_plane`) は、コンパイル時に `Surface` の移動が拒否されるようになったため削除した。
-- `src/amf.rs` の単体テストで、`Plane` の取得・`Clone`・`from_raw`・`from_raw_acquired` が `Surface` の状態を共有することと、drop すると共有状態が解消されることを確認するようにした。
+- `src/amf.rs` の単体テストで、`Plane` の取得・`Clone` が `Surface` の状態を共有することと、drop すると共有状態が解消されることを確認するようにした。
 - `skills/shiguredo-amf/SKILL.md` の `Plane` の API 説明を更新した。
 - `CHANGES.md` の `## develop` に `[CHANGE]` を追記した。
 - AMD GPU 実機で `cargo fmt --all -- --check`、`cargo clippy --workspace --all-targets -- -D warnings`、`cargo test --workspace`、`DOCS_RS=1 cargo doc --no-deps` が通ることを確認した。
