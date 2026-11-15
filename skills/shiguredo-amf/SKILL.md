@@ -455,9 +455,9 @@ H.264 / HEVC / AV1 で AMF SDK 内部の enum 値順序が異なるが、`shigur
 - `Context` は `AMFContext` の参照カウントを直接管理する Clone 可能なハンドルである。`Clone` は `AMFContext::Acquire`、`Drop` は `AMFContext::Release` を呼ぶ。最後の参照が解放されたときに AMFContext のデストラクタが `Terminate` を呼ぶ。
 - `Encoder<H>` / `Decoder<H>` は内部で `amf-encoder-worker` / `amf-decoder-worker` という名前のワーカースレッドを起動し、`mpsc::channel` で `Submit` / `Finish` コマンドを受け取る。
 - `encode()` はメインスレッドから `SubmitInput` を呼び、`AMF_INPUT_FULL` / `AMF_REPEAT` / `AMF_DECODER_NO_FREE_SURFACES` で 1ms スリープしながら最大 100 回までリトライする。`decode()` も `AMF_INPUT_FULL` / `AMF_DECODER_NO_FREE_SURFACES` ではリトライするが、`AMF_REPEAT` は複数フレームを含むバッファとしてエラーにする。どちらも投入に成功した後で `UserData` をワーカーへ送る。`decode()` は対応付け用 PTS と元の PTS も一緒に送る。
-- デコーダーのワーカーは、`decode()` が入力ごとに割り当てた PTS をキーに `UserData` を保持し、`QueryOutput` が返す `Surface` の PTS と一致した時点で `on_decoded` を呼ぶ。`Submit` コマンドの処理が出力の取得より遅れた場合は、`UserData` が登録されるまで出力を保持する。`finish()` で出力が得られなかった入力や、対応する入力がない出力はエラーとして通知する。`Finish` を受け取った後は入力フレームを受け付けない。`finish()` を呼び出した後に `decode()` を呼ぶとエラーを返す。
-- エンコーダーのワーカーは `pending` キューと `QueryOutput` の出力を FIFO で対応付け、対応が取れたところで `on_encoded` を呼ぶ。現行のエンコーダーは B フレームを生成しないため、この対応付けは投入順と一致する。
-- `finish()` は `Drain` を呼んだあと `Finish(sync_channel)` をワーカーに送り、ワーカーの完了まで待つ。
+- デコーダーのワーカーは、`decode()` が入力ごとに割り当てた PTS をキーに `UserData` を保持し、`QueryOutput` が返す `Surface` の PTS と一致した時点で `on_decoded` を呼ぶ。`Submit` コマンドの処理が出力の取得より遅れた場合は、`UserData` が登録されるまで出力を保持する。`finish()` で出力が得られなかった入力や、対応する入力がない出力はエラーとして通知する。`QueryOutput` が終端エラーを返した場合は、そのエラーをハンドラーへ通知してワーカーを終了する。`Finish` を受け取った後は入力フレームを受け付けない。`finish()` を呼び出した後に `decode()` を呼ぶとエラーを返す。
+- エンコーダーのワーカーは `pending` キューと `QueryOutput` の出力を FIFO で対応付け、対応が取れたところで `on_encoded` を呼ぶ。現行のエンコーダーは B フレームを生成しないため、この対応付けは投入順と一致する。`QueryOutput` が終端エラーを返した場合は、そのエラーをハンドラーへ通知してワーカーを終了する。`finish()` では、対応する入力がない出力と、出力が得られなかった入力をエラーとして通知する。
+- `finish()` は `Drain` を呼んだあと `Finish(sync_channel)` をワーカーに送り、タイムアウトせずワーカーの完了まで待つ。
 - `Drop` 実装は `cmd_tx` を落としてワーカーを停止させ、`Component::terminate()` を呼んでから AMF オブジェクトを解放する。`Context` は保持している `Context` の Clone がなくなった時点で破棄される。
 
 ## 公開モジュール

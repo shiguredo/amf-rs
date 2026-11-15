@@ -12,6 +12,7 @@ use std::time::Duration;
 use crate::AmfLibrary;
 use crate::amf::{Buffer, Component, Context, Surface};
 use crate::error::Error;
+use crate::query_output::{DrainStatus, QueryOutputKind, classify_query_output};
 use crate::sys::{
     self, AMF_MEMORY_TYPE, AMF_RESULT, AMF_SURFACE_FORMAT, AMFData, AMFSurface, amf_pts,
 };
@@ -305,6 +306,14 @@ impl<H: DecodeHandler> Decoder<H> {
     }
 
     /// デコーダーをフラッシュして残りのフレームを処理する
+    ///
+    /// 残りのフレームをすべてハンドラーへ通知したあと、ワーカースレッドの完了まで
+    /// 待つ。タイムアウトは設けていないため、AMF が Drain 後に `AMF_EOF` を返さない
+    /// 場合は戻らない。
+    ///
+    /// `QueryOutput` が `AMF_OK` / `AMF_REPEAT` / `AMF_EOF` / `AMF_RESOLUTION_CHANGED` /
+    /// `AMF_RESOLUTION_UPDATED` 以外の結果を返した場合は、そのエラーがハンドラーへ
+    /// 通知され、ワーカーが終了する。ワーカーが既に終了している場合は `Err` を返す。
     pub fn finish(&mut self) -> Result<(), Error> {
         if self.cmd_tx.is_none() {
             return Err(Error::new_custom(
@@ -376,17 +385,26 @@ fn worker<H: DecodeHandler>(
     loop {
         if finish.is_some() {
             // Drain 後は、出力がすべて出るか AMF_EOF が返るまでポーリングする。
-            // pending と保持中の出力がともに空になった時点で、全入力に対応する
-            // 出力が揃っているため、その場合は EOF を待たずに完了してよい。
-            let status = drain_output(&mut output_buffer, &component);
-            deliver_buffered(&mut output_buffer, &mut pending, &mut handler);
-            if status == DrainStatus::Eof {
-                flush_buffered_outputs(&mut output_buffer, &mut pending, &mut handler);
-                report_unmatched_inputs(&mut pending, &mut handler);
-                break;
-            }
-            if pending.is_empty() && output_buffer.is_empty() {
-                break;
+            // pending と保持中の出力がともに空になった時点で、このワーカーが保持する
+            // 入出力はなくなっているため、その場合は EOF を待たずに完了してよい。
+            match drain_output(&mut output_buffer, &component) {
+                Ok(status) => {
+                    deliver_buffered(&mut output_buffer, &mut pending, &mut handler);
+                    if status == DrainStatus::Eof {
+                        flush_buffered_outputs(&mut output_buffer, &mut pending, &mut handler);
+                        report_unmatched_inputs(&mut pending, &mut handler);
+                        break;
+                    }
+                    if pending.is_empty() && output_buffer.is_empty() {
+                        break;
+                    }
+                }
+                Err(error) => {
+                    // 終端エラーでは AMF_EOF を待たず、取得済みの出力と残りの入力を
+                    // 通知してワーカーを終了する。
+                    notify_terminal_error(error, &mut output_buffer, &mut pending, &mut handler);
+                    break;
+                }
             }
 
             std::thread::sleep(Duration::from_millis(1));
@@ -402,8 +420,22 @@ fn worker<H: DecodeHandler>(
             match cmd_rx.recv_timeout(Duration::from_millis(1)) {
                 Ok(cmd) => cmd,
                 Err(mpsc::RecvTimeoutError::Timeout) => {
-                    drain_output(&mut output_buffer, &component);
-                    deliver_buffered(&mut output_buffer, &mut pending, &mut handler);
+                    match drain_output(&mut output_buffer, &component) {
+                        Ok(_) => {
+                            deliver_buffered(&mut output_buffer, &mut pending, &mut handler);
+                        }
+                        Err(error) => {
+                            // 通常のデコード中でも終端エラーは起き得るため、同じように
+                            // 取得済みの出力と残りの入力を通知して終了する。
+                            notify_terminal_error(
+                                error,
+                                &mut output_buffer,
+                                &mut pending,
+                                &mut handler,
+                            );
+                            break;
+                        }
+                    }
                     continue;
                 }
                 Err(mpsc::RecvTimeoutError::Disconnected) => break,
@@ -454,41 +486,29 @@ fn handle_command<H: DecodeHandler>(
     }
 }
 
-/// QueryOutput のポーリング結果
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum DrainStatus {
-    /// 現在取得できる出力がない
-    Drained,
-    /// デコーダーが Drain を完了した
-    Eof,
-}
-
 /// QueryOutput から出力を取得し、user_data の対応付け待ちのバッファに追加する
+///
+/// `AMF_EOF` を受け取った場合は [`DrainStatus::Eof`] を返す。`QueryOutput` が
+/// 終端エラーを返した場合は、そのエラーを返す。
 fn drain_output(
     output_buffer: &mut VecDeque<Result<(Surface, amf_pts), Error>>,
     component: &Component,
-) -> DrainStatus {
+) -> Result<DrainStatus, Error> {
     let context = component.context();
     loop {
         let mut data: *mut AMFData = ptr::null_mut();
         let result = unsafe { component.query_output(&mut data) };
         log::debug!("worker: QueryOutput result={result:?}");
-        // AMF デコーダーは AMF_REPEAT でも有効なデータを返す場合があるため、
-        // data が非 null であればフレームとして抽出する。
-        if result == AMF_RESULT::AMF_REPEAT {
-            if data.is_null() {
-                return DrainStatus::Drained;
+        match classify_query_output(result, !data.is_null()) {
+            QueryOutputKind::Output => {
+                output_buffer.push_back(extract_frame(data as *mut AMFSurface, &context));
             }
-            output_buffer.push_back(extract_frame(data as *mut AMFSurface, &context));
-            continue;
+            QueryOutputKind::NoOutput => return Ok(DrainStatus::Drained),
+            QueryOutputKind::Eof => return Ok(DrainStatus::Eof),
+            QueryOutputKind::TerminalError => {
+                return Err(Error::from_amf(result, "AMFComponent::QueryOutput"));
+            }
         }
-        if result == AMF_RESULT::AMF_EOF {
-            return DrainStatus::Eof;
-        }
-        if result != AMF_RESULT::AMF_OK || data.is_null() {
-            return DrainStatus::Drained;
-        }
-        output_buffer.push_back(extract_frame(data as *mut AMFSurface, &context));
     }
 }
 
@@ -573,6 +593,23 @@ fn report_unmatched_inputs<H: DecodeHandler>(
         )
         .into()));
     }
+}
+
+/// 終端エラーをハンドラーへ通知し、残りの入力を未処理として通知する
+///
+/// 取得済みの出力は対応する入力があれば `Ok` として通知する。対応する入力がない
+/// 出力と、出力が得られなかった入力は `Err` として通知する。最後に原因のエラーを
+/// 通知する。
+fn notify_terminal_error<H: DecodeHandler>(
+    error: Error,
+    output_buffer: &mut VecDeque<Result<(Surface, amf_pts), Error>>,
+    pending: &mut HashMap<amf_pts, PendingFrame<H::UserData>>,
+    handler: &mut H,
+) {
+    deliver_buffered(output_buffer, pending, handler);
+    flush_buffered_outputs(output_buffer, pending, handler);
+    handler.on_decoded(Err(error.into()));
+    report_unmatched_inputs(pending, handler);
 }
 
 // ---------------------------------------------------------------------------

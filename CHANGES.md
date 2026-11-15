@@ -47,6 +47,11 @@
   - @melpon
 - [FIX] AV1 エンコーダーで `Av1Profile` を指定してもプロファイルが設定されない問題を修正する
   - @melpon
+- [FIX] `QueryOutput` のエラーで `finish()` が待ち続ける問題を修正する
+  - `QueryOutput` の終端エラーをハンドラーへ通知し、ワーカーを終了する
+  - エンコーダーの `finish()` で未処理の出力と入力を通知する
+  - `finish()` のタイムアウトを削除し、ワーカーの完了まで待つ
+  - @melpon
 
 ### misc
 

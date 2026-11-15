@@ -12,6 +12,7 @@ use std::time::Duration;
 use crate::AmfLibrary;
 use crate::amf::{Buffer, Component, Context, PropertyStorage, Surface};
 use crate::error::Error;
+use crate::query_output::{DrainStatus, QueryOutputKind, classify_query_output};
 use crate::sys::{
     self, AMF_MEMORY_TYPE, AMF_RESULT, AMF_SECOND, AMF_SURFACE_FORMAT, AMFBuffer, AMFData,
     AMFVariantStruct, amf_int32, amf_int64, amf_pts,
@@ -1033,7 +1034,7 @@ impl<H: EncodeHandler> Encoder<H> {
         // ワーカースレッドに Submit コマンドを送信する
         self.cmd_tx
             .as_ref()
-            .unwrap()
+            .expect("cmd_tx must be set before encode")
             .send(WorkerCommand::Submit(user_data))
             .map_err(|_| Error::new_custom("Encoder::encode", "worker thread terminated"))?;
 
@@ -1075,6 +1076,14 @@ impl<H: EncodeHandler> Encoder<H> {
     }
 
     /// エンコーダーをフラッシュして残りのフレームを処理する
+    ///
+    /// 残りのフレームをすべてハンドラーへ通知したあと、ワーカースレッドの完了まで
+    /// 待つ。タイムアウトは設けていないため、AMF が Drain 後に `AMF_EOF` を返さない
+    /// 場合は戻らない。
+    ///
+    /// `QueryOutput` が `AMF_OK` / `AMF_REPEAT` / `AMF_EOF` / `AMF_RESOLUTION_CHANGED` /
+    /// `AMF_RESOLUTION_UPDATED` 以外の結果を返した場合は、そのエラーがハンドラーへ
+    /// 通知され、ワーカーが終了する。ワーカーが既に終了している場合は `Err` を返す。
     pub fn finish(&mut self) -> Result<(), Error> {
         // Drain を呼び出して残りのフレームを出力させる
         let result = self.component.drain();
@@ -1087,13 +1096,13 @@ impl<H: EncodeHandler> Encoder<H> {
         let (tx, rx) = mpsc::sync_channel(1);
         self.cmd_tx
             .as_ref()
-            .unwrap()
+            .expect("cmd_tx must be set before finish")
             .send(WorkerCommand::Finish(tx))
             .map_err(|_| Error::new_custom("Encoder::finish", "worker thread terminated"))?;
 
-        // 全 pending が処理されるのを待つ
-        rx.recv_timeout(Duration::from_secs(5))
-            .map_err(|_| Error::new_custom("Encoder::finish", "Finish wait timed out"))?;
+        // ワーカーの完了を待つ
+        rx.recv()
+            .map_err(|_| Error::new_custom("Encoder::finish", "worker thread terminated"))?;
 
         Ok(())
     }
@@ -1133,9 +1142,36 @@ fn worker<H: EncodeHandler>(
     let mut finish: Option<mpsc::SyncSender<()>> = None;
 
     loop {
-        // Finish がやってきていて、全てのデータが排出されたら終了する
-        if finish.is_some() && pending.is_empty() {
-            break;
+        if finish.is_some() {
+            // Drain 後は、AMF_EOF が返るか、保持している入出力がなくなるまで
+            // ポーリングする。
+            match drain_output(
+                &mut output_buffer,
+                &mut pending,
+                &mut handler,
+                &component,
+                &codec_config,
+            ) {
+                Ok(status) => {
+                    if status == DrainStatus::Eof {
+                        flush_buffered_outputs(&mut output_buffer, &mut handler);
+                        report_unmatched_inputs(&mut pending, &mut handler);
+                        break;
+                    }
+                    if pending.is_empty() && output_buffer.is_empty() {
+                        break;
+                    }
+                }
+                Err(error) => {
+                    // 終端エラーでは AMF_EOF を待たず、取得済みの出力と残りの入力を
+                    // 通知してワーカーを終了する。
+                    notify_terminal_error(error, &mut output_buffer, &mut pending, &mut handler);
+                    break;
+                }
+            }
+
+            std::thread::sleep(Duration::from_millis(1));
+            continue;
         }
 
         let cmd = if pending.is_empty() {
@@ -1147,13 +1183,23 @@ fn worker<H: EncodeHandler>(
             match cmd_rx.recv_timeout(Duration::from_millis(1)) {
                 Ok(cmd) => cmd,
                 Err(mpsc::RecvTimeoutError::Timeout) => {
-                    drain_output(
+                    if let Err(error) = drain_output(
                         &mut output_buffer,
                         &mut pending,
                         &mut handler,
                         &component,
                         &codec_config,
-                    );
+                    ) {
+                        // 通常のエンコード中でも終端エラーは起き得るため、同じように
+                        // 取得済みの出力と残りの入力を通知して終了する。
+                        notify_terminal_error(
+                            error,
+                            &mut output_buffer,
+                            &mut pending,
+                            &mut handler,
+                        );
+                        break;
+                    }
                     continue;
                 }
                 Err(mpsc::RecvTimeoutError::Disconnected) => break,
@@ -1176,32 +1222,47 @@ fn worker<H: EncodeHandler>(
 }
 
 /// QueryOutput からの出力をバッファに格納し、pending とマッチングしてハンドラーを呼び出す
+///
+/// `AMF_EOF` を受け取った場合は [`DrainStatus::Eof`] を返す。`QueryOutput` が
+/// 終端エラーを返した場合は、取得済みの出力を通知したあとでそのエラーを返す。
 fn drain_output<H: EncodeHandler>(
     output_buffer: &mut VecDeque<Result<(Buffer, PictureType), crate::Error>>,
     pending: &mut VecDeque<H::UserData>,
     handler: &mut H,
     component: &Component,
     codec_config: &CodecConfig,
-) {
+) -> Result<DrainStatus, Error> {
     let context = component.context();
-    // 出力をバッファに格納する
-    loop {
+    let status = loop {
         let mut data: *mut AMFData = ptr::null_mut();
         let result = unsafe { component.query_output(&mut data) };
         log::debug!("worker: QueryOutput result={result:?}");
-        if result == AMF_RESULT::AMF_REPEAT || result == AMF_RESULT::AMF_EOF {
-            break;
+        match classify_query_output(result, !data.is_null()) {
+            QueryOutputKind::Output => {
+                output_buffer.push_back(extract_encoded_output(data, codec_config, &context));
+            }
+            QueryOutputKind::NoOutput => break DrainStatus::Drained,
+            QueryOutputKind::Eof => break DrainStatus::Eof,
+            QueryOutputKind::TerminalError => {
+                match_outputs(output_buffer, pending, handler);
+                return Err(Error::from_amf(result, "AMFComponent::QueryOutput"));
+            }
         }
-        if result != AMF_RESULT::AMF_OK || data.is_null() {
-            break;
-        }
-        output_buffer.push_back(extract_encoded_output(data, codec_config, &context));
-    }
+    };
 
-    // バッファされた出力と pending をマッチングする
+    match_outputs(output_buffer, pending, handler);
+    Ok(status)
+}
+
+/// バッファされた出力と pending を FIFO で対応付け、ハンドラーを呼び出す
+fn match_outputs<H: EncodeHandler>(
+    output_buffer: &mut VecDeque<Result<(Buffer, PictureType), Error>>,
+    pending: &mut VecDeque<H::UserData>,
+    handler: &mut H,
+) {
     while !output_buffer.is_empty() && !pending.is_empty() {
-        let output = output_buffer.pop_front().unwrap();
-        let user_data = pending.pop_front().unwrap();
+        let output = output_buffer.pop_front().expect("front output must exist");
+        let user_data = pending.pop_front().expect("front pending must exist");
         handler.on_encoded(
             output
                 .map(|(buffer, picture_type)| EncodedFrame {
@@ -1212,6 +1273,49 @@ fn drain_output<H: EncodeHandler>(
                 .map_err(Into::into),
         );
     }
+}
+
+/// 対応する入力がない出力をエラーとして通知する
+fn flush_buffered_outputs<H: EncodeHandler>(
+    output_buffer: &mut VecDeque<Result<(Buffer, PictureType), Error>>,
+    handler: &mut H,
+) {
+    while let Some(output) = output_buffer.pop_front() {
+        match output {
+            Ok(_) => handler.on_encoded(Err(Error::new_custom(
+                "Encoder::worker",
+                "no submitted frame for encoded output",
+            )
+            .into())),
+            Err(error) => handler.on_encoded(Err(error.into())),
+        }
+    }
+}
+
+/// 出力が得られなかった入力をエラーとして通知する
+fn report_unmatched_inputs<H: EncodeHandler>(pending: &mut VecDeque<H::UserData>, handler: &mut H) {
+    for _ in pending.drain(..) {
+        handler.on_encoded(Err(Error::new_custom(
+            "Encoder::finish",
+            "encoder did not output a frame for submitted input",
+        )
+        .into()));
+    }
+}
+
+/// 終端エラーをハンドラーへ通知し、残りの入力を未処理として通知する
+///
+/// 対応する入力がない出力を flush したあと、原因のエラーと、出力が得られなかった
+/// 入力を通知する。
+fn notify_terminal_error<H: EncodeHandler>(
+    error: Error,
+    output_buffer: &mut VecDeque<Result<(Buffer, PictureType), Error>>,
+    pending: &mut VecDeque<H::UserData>,
+    handler: &mut H,
+) {
+    flush_buffered_outputs(output_buffer, handler);
+    handler.on_encoded(Err(error.into()));
+    report_unmatched_inputs(pending, handler);
 }
 
 /// AMFData から Buffer とピクチャタイプを抽出する

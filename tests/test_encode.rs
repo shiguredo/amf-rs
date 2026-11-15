@@ -1,4 +1,5 @@
 use std::sync::mpsc;
+use std::time::{Duration, Instant};
 
 use shiguredo_amf::amf::Surface;
 use shiguredo_amf::ffi::{AMF_PLANE_TYPE, AMF_RESULT};
@@ -10,7 +11,7 @@ use shiguredo_amf::{
 
 pub mod helpers;
 
-use helpers::create_context;
+use helpers::{create_context, h264_cbr_test_encoder_config};
 
 /// ReconfigureParams::default() が全項目未指定であることを確認する
 #[test]
@@ -62,6 +63,21 @@ fn test_encoder_config(codec: CodecConfig, frame_format: FrameFormat) -> Encoder
 /// 指定した設定でエンコーダーを作成する
 fn create_encoder(config: EncoderConfig) -> Result<Encoder<FnEncodeHandler<()>>, Error> {
     Encoder::new(create_context(), config, FnEncodeHandler::<()>::new(|_| {}))
+}
+
+/// 入力を 1 つも投入せずに finish しても、待機せずに完了することを確認する
+#[test]
+fn test_encoder_finish_without_input() {
+    let mut encoder =
+        create_encoder(h264_cbr_test_encoder_config()).expect("エンコーダーの作成に失敗");
+
+    let started = Instant::now();
+    encoder.finish().expect("入力なしの finish に失敗");
+    assert!(
+        started.elapsed() < Duration::from_secs(1),
+        "入力なしの finish に時間がかかりすぎた: {:?}",
+        started.elapsed()
+    );
 }
 
 /// P010 のフレームデータを Surface に書き込む
