@@ -1,8 +1,8 @@
 # README / SKILL.md のコード例をコンパイル可能な形に修正する
 
 - Created: 2026-11-10
-- Completed: {YYYY-MM-DD}
-- Branch: feature/fix-code-examples
+- Completed: 2026-11-16
+- Branch: develop
 - Polished: {YYYY-MM-DD}
 - Reporter: @melpon
 
@@ -34,3 +34,16 @@ README と `skills/shiguredo-amf/SKILL.md` のコード例が実際にはコン�
 - 例が doctest または `examples/` で検証される。
 - `SKILL.md` の誤記 3 件 (クロージャ、`instance()`、`finish()`) が修正されている。
 - `cargo test --doc` と `cargo test --workspace` が通る。
+
+## 解決方法
+
+- ドキュメント修正のため `develop` ブランチで直接対応した
+- `README.md` と `skills/shiguredo-amf/SKILL.md` のエンコード例 / デコード例を `FnEncodeHandler::new` / `FnDecodeHandler::new` でクロージャを包む形に修正した
+- クロージャの引数を `Result<EncodedFrame<T>, E>` / `Result<DecodedFrame<T>, E>` に修正し、ハンドラーへ通知されるエラーを処理する例にした
+- 結果の受け取りを `Arc<Mutex<Vec<_>>>` から `mpsc::channel` に変更し、`finish()` 後に `try_iter()` で回収する例にした
+- `SKILL.md` の `AmfLibrary::create_context()` を `AmfLibrary::instance().create_context()` に修正した
+- `SKILL.md` の `AmfLibrary::instance()` が `dlopen` を行うという記述を、初回の `query_version()` / `create_context()` / `create_component()` 呼び出しで行うという記述に修正した
+- `SKILL.md` の `finish()` の保証に関する記述は、タイムアウトが廃止されて現在の実装と一致していたため変更していない
+- `cargo fmt --all -- --check`、`cargo clippy --workspace --all-targets -- -D warnings`、`prek run --all-files` が通ることを確認した
+- README のコード例を doctest または `examples/` で検証する対応は行っていない。`cargo test --doc` の対象に README は含まれておらず、README の例はコンパイル検証されていない
+- AMD GPU が無い環境のため `cargo test --workspace` の実機テストは実行していない
