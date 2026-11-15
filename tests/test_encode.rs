@@ -10,7 +10,7 @@ use shiguredo_amf::{
 
 pub mod helpers;
 
-use helpers::create_context;
+use helpers::{create_context, h264_cbr_test_encoder_config};
 
 /// ReconfigureParams::default() が全項目未指定であることを確認する
 #[test]
@@ -62,6 +62,28 @@ fn test_encoder_config(codec: CodecConfig, frame_format: FrameFormat) -> Encoder
 /// 指定した設定でエンコーダーを作成する
 fn create_encoder(config: EncoderConfig) -> Result<Encoder<FnEncodeHandler<()>>, Error> {
     Encoder::new(create_context(), config, FnEncodeHandler::<()>::new(|_| {}))
+}
+
+/// 入力を 1 つも投入せずに finish した場合、通知がなく完了することを確認する
+#[test]
+fn test_encoder_finish_without_input() {
+    let (tx, rx) = mpsc::channel();
+    let mut encoder = Encoder::new(
+        create_context(),
+        h264_cbr_test_encoder_config(),
+        FnEncodeHandler::<()>::new(move |result| {
+            tx.send(result).expect("通知の送信に失敗");
+        }),
+    )
+    .expect("エンコーダーの作成に失敗");
+
+    encoder.finish().expect("入力なしの finish に失敗");
+    drop(encoder);
+
+    assert!(
+        rx.try_iter().next().is_none(),
+        "入力なしの finish で通知があった"
+    );
 }
 
 /// P010 のフレームデータを Surface に書き込む

@@ -243,7 +243,7 @@ fn assert_user_data_follows_pts(
     user_data_order
 }
 
-/// 入力を 1 つも投入せずに finish しても、待機せずに完了することを確認する
+/// 入力を 1 つも投入せずに finish した場合、通知がなく完了することを確認する
 #[test]
 fn test_decoder_finish_without_input() {
     let context = create_context();
@@ -265,13 +265,7 @@ fn test_decoder_finish_without_input() {
     .expect("デコーダーの作成に失敗");
 
     // Drain 後に出力がない状態でも、ワーカーは EOF または出力なしを検出して完了する。
-    let started = Instant::now();
     decoder.finish().expect("入力なしの finish に失敗");
-    assert!(
-        started.elapsed() < Duration::from_secs(1),
-        "入力なしの finish に時間がかかりすぎた: {:?}",
-        started.elapsed()
-    );
     drop(decoder);
 
     let results = Arc::try_unwrap(results)
@@ -516,6 +510,8 @@ fn test_decode_reports_input_without_output() {
             parameter_sets.len(),
         );
     }
+    // 利用者が設定した PTS が、未対応入力のエラーメッセージに使われることを確認する。
+    buffer.set_pts(100_000);
     decoder.decode(buffer, 0).expect("SPS/PPS だけの投入に失敗");
 
     decoder.finish().expect("finish に失敗");
@@ -532,7 +528,7 @@ fn test_decode_reports_input_without_output() {
         .expect("結果が存在しない")
         .expect_err("出力のない入力が成功として通知された");
     assert!(
-        error.to_string().contains("did not output a frame"),
+        error.to_string().contains("submitted PTS 100000"),
         "未対応入力のエラーメッセージが想定と異なる: {error}"
     );
 }

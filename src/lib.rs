@@ -10,6 +10,7 @@ mod decode;
 mod dl;
 mod encode;
 mod error;
+mod query_output;
 mod sys;
 
 use std::cell::UnsafeCell;

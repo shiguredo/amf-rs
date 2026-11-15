@@ -1,7 +1,7 @@
 # `QueryOutput` のエラーと `finish` 時の未マッチ出力を通知する
 
 - Created: 2026-11-10
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-11-16
 - Branch: feature/fix-query-output-error-handling
 - Polished: {YYYY-MM-DD}
 - Refreshed: 2026-11-15
@@ -31,7 +31,7 @@
 ## 設計方針
 
 - `QueryOutput` の結果を次のように分類する。判定は `AMF_OK` + null と非 OK を混ぜず、データの有無より先にステータスを見る。
-  - 出力あり: `AMF_OK` かつデータが非 null。デコーダーは `AMF_REPEAT` かつデータが非 null の場合も出力として扱う。
+  - 出力あり: `AMF_OK` または `AMF_REPEAT` でデータが非 null。`AMF_REPEAT` でデータを返す実装があるため、データがある場合は出力として扱う。エンコーダーも同じ分類を使う。
   - 進捗なし: `AMF_REPEAT` かつデータが null、または `AMF_OK` かつデータが null。出力なしとして継続する。
   - ドレイン完了: `AMF_EOF`。保持している出力を flush し、未マッチの入力を `Err` で通知してワーカーを終了する。
   - 終端エラー: 上記以外 (`AMF_RESOLUTION_CHANGED` / `AMF_RESOLUTION_UPDATED` を除く)。ハンドラーへ `Err` を通知し、残りの `pending` をすべて未処理として `Err` で通知してワーカーを終了する。`AMF_EOF` は待たない。
@@ -57,3 +57,12 @@
 - `QueryOutput` の結果分類の単体テストが追加される。
 - `cargo test --workspace` が通る。
 - `CHANGES.md` の `## develop` に `[FIX]` を追記する。
+
+## 解決方法
+
+- `QueryOutput` の結果を `src/query_output.rs` の `classify_query_output` で分類し、`AMF_OK` / `AMF_REPEAT` / `AMF_EOF` / 解像度変化 / 終端エラーを区別するようにした。
+- エンコーダーとデコーダーのワーカーは、終端エラーをハンドラーへ `Err` として通知し、取得済みの出力と未処理の入力を通知して終了するようにした。
+- エンコーダーの `finish()` は 5 秒タイムアウトをやめ、`Drain` 後に残りの出力と未処理の入力を通知してワーカーの完了まで待つようにした。デコーダーの `finish()` も同じ待ち方に揃えた。
+- 出力として扱わない `QueryOutput` のデータは解放し、エンコーダーでも `AMF_REPEAT` + 非 null のデータを出力として扱うようにした。
+- デコーダーの抽出エラーは対応する入力の PTS を保持し、未対応入力の通知順を入力順にした。同じ入力へのエラー二重通知も防ぐ。
+- `QueryOutput` の分類テストと `CHANGES.md` の `[FIX]` を追加し、`Encoder::finish` / `Decoder::finish` の doc を現在の契約に更新した。

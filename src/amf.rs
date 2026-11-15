@@ -1224,7 +1224,9 @@ impl Component {
     /// 出力データを問い合わせる
     ///
     /// # Safety
-    /// `pp_data` は有効な `*mut *mut AMFData` を指すこと。
+    /// `pp_data` は有効な `*mut *mut AMFData` を指すこと。`*pp_data` が非 null に
+    /// なった場合、AMF の参照カウントモデルに従い、呼び出し元がその参照を
+    /// `Release` すること。
     pub unsafe fn query_output(&self, pp_data: *mut *mut sys::AMFData) -> sys::AMF_RESULT {
         unsafe { (self.f.query_output)(self.ptr, pp_data) }
     }
