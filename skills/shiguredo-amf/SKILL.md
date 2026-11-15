@@ -52,7 +52,7 @@ AMD GPU 向けハードウェアアクセラレーションによるビデオエ
 
 `Encoder` / `Decoder` は内部でワーカースレッドを起動し、`encode()` / `decode()` で投入したフレームの結果は `EncodeHandler::on_encoded` / `DecodeHandler::on_decoded` に非同期で通知される。`finish()` は残りのフレームをハンドラーが受け取り終わるまで待機する。
 
-`AmfLibrary::create_context()` は呼び出しごとに新しい `Context` を作成する。
+`AmfLibrary::instance().create_context()` は呼び出しごとに新しい `Context` を作成する。
 同じ `Context` を Clone して Encoder と Decoder に渡すと、Decoder の `on_decoded` で受け取った
 `Surface` をそのまま Encoder の `encode()` に投入できる。別の `Context` を渡すこともできるが、
 `Surface` / `Buffer` は同じ Context のコンポーネントにしか投入できない。
@@ -197,11 +197,11 @@ AMFContext が破棄され、そのデストラクタが `Terminate` を呼ぶ�
 ### エンコード
 
 ```rust
-use std::sync::{Arc, Mutex};
+use std::sync::mpsc;
 
 use shiguredo_amf::{
-    AmfLibrary, CodecConfig, EncodeOptions, EncodedFrame, Encoder, EncoderConfig, FrameFormat,
-    H264EncoderConfig, H264Profile, RateControlMode, ReconfigureParams, frame_type,
+    AmfLibrary, CodecConfig, EncodeOptions, EncodedFrame, Encoder, EncoderConfig, FnEncodeHandler,
+    FrameFormat, H264EncoderConfig, H264Profile, RateControlMode, frame_type,
 };
 
 let context = AmfLibrary::instance().create_context()?;
@@ -220,11 +220,19 @@ let mut config = EncoderConfig::new(
 config.target_kbps = Some(5_000);
 
 // クロージャをハンドラーにラップする
-let encoded = Arc::new(Mutex::new(Vec::new()));
-let e = encoded.clone();
-let mut encoder = Encoder::new(context.clone(), config, move |frame: EncodedFrame<()>| {
-    e.lock().unwrap().push(frame);
-})?;
+let (frame_tx, frame_rx) = mpsc::channel();
+let mut encoder = Encoder::new(
+    context.clone(),
+    config,
+    FnEncodeHandler::new(
+        move |result: Result<EncodedFrame<()>, shiguredo_amf::Error>| match result {
+            Ok(frame) => {
+                let _ = frame_tx.send(frame);
+            }
+            Err(e) => eprintln!("encode error: {e}"),
+        },
+    ),
+)?;
 
 // Surface を確保してフレームデータをコピーし、エンコードする
 let surface = encoder.alloc_surface()?;
@@ -235,32 +243,47 @@ encoder.encode(surface, &options, ())?;
 // 残りのフレームをすべて取得する (Drain → ワーカー完了待ち)
 encoder.finish()?;
 
-for frame in encoded.lock().unwrap().iter() {
+for frame in frame_rx.try_iter() {
     println!("encoded bytes: {}", frame.buffer().get_size());
     println!("pts: {}", frame.buffer().get_pts());
     println!("picture type: {:?}", frame.picture_type());
 }
 ```
 
-`Encoder::new` に渡すクロージャは `FnMut(Result<EncodedFrame<T>, E>) + Send + 'static` であれば暗黙的に `FnEncodeHandler` 相当として扱える。`UserData` 型 (上記の `()` の位置) はフレーム単位の任意ユーザーデータで、`encode()` で渡した値が `EncodedFrame::user_data()` から取り出せる。
+`Encoder::new` に渡すクロージャは `FnEncodeHandler::new` でラップする。クロージャの引数は `Result<EncodedFrame<T>, E>` で、エラーもワーカースレッドから通知される。ハンドラーはワーカースレッドで呼ばれるため、結果は `mpsc::channel` の `Sender` でメインスレッドへ送る。`E` の既定値は `shiguredo_amf::Error` である。`UserData` 型 (上記の `()` の位置) はフレーム単位の任意ユーザーデータで、`encode()` で渡した値が `EncodedFrame::user_data()` から取り出せる。
 
-`Encoder::new` の第 1 引数には `AmfLibrary::create_context()` で作成した `Context` を渡す。同じ `Context` を Clone して共有する `Decoder` の出力 `Surface` を、そのまま `encode()` に投入できる。
+`Encoder::new` の第 1 引数には `AmfLibrary::instance().create_context()` で作成した `Context` を渡す。同じ `Context` を Clone して共有する `Decoder` の出力 `Surface` を、そのまま `encode()` に投入できる。
 
 ### デコード
 
 ```rust
-use std::sync::{Arc, Mutex};
+use std::sync::mpsc;
 
-use shiguredo_amf::{AmfLibrary, DecodedFrame, Decoder, DecoderCodec, DecoderConfig};
+use shiguredo_amf::{
+    AmfLibrary, DecodedFrame, Decoder, DecoderCodec, DecoderConfig, FnDecodeHandler,
+};
 
 let context = AmfLibrary::instance().create_context()?;
 
 let config = DecoderConfig { codec: DecoderCodec::H264 };
-let decoded = Arc::new(Mutex::new(Vec::new()));
-let d = decoded.clone();
-let mut decoder = Decoder::new(context.clone(), config, move |frame: DecodedFrame<()>| {
-    d.lock().unwrap().push(frame);
-})?;
+
+// クロージャをハンドラーにラップする
+let (frame_tx, frame_rx) = mpsc::channel();
+let mut decoder = Decoder::new(
+    context.clone(),
+    config,
+    FnDecodeHandler::new(
+        move |result: Result<DecodedFrame<()>, shiguredo_amf::Error>| match result {
+            Ok(frame) => {
+                let _ = frame_tx.send(frame);
+            }
+            Err(e) => eprintln!("decode error: {e}"),
+        },
+    ),
+)?;
+
+// 1 フレーム分のビットストリームを読み込む
+let bitstream_data = std::fs::read("input.h264")?;
 
 // Buffer を確保してビットストリームデータをコピーし、デコードする
 let buffer = decoder.alloc_buffer(bitstream_data.len())?;
@@ -269,10 +292,10 @@ decoder.decode(buffer, ())?;
 
 // 残りのフレームをすべて取得する (Drain → ワーカー完了待ち)
 decoder.finish()?;
-drop(decoder);
 
-for frame in decoded.lock().unwrap().iter() {
-    let y_plane = frame.surface()
+for frame in frame_rx.try_iter() {
+    let y_plane = frame
+        .surface()
         .get_plane(shiguredo_amf::ffi::AMF_PLANE_TYPE::AMF_PLANE_Y)?;
     println!("decoded: {}x{}", y_plane.get_width(), y_plane.get_height());
 }
@@ -351,7 +374,7 @@ let (major, minor, release, build) = lib.query_version()?;
 println!("AMF runtime: {major}.{minor}.{release}.{build}");
 ```
 
-`AmfLibrary::instance()` は `LazyLock` によるプロセスシングルトン。初回呼び出し時に `libamfrt64.so.1` を `dlopen` してファクトリを取得する。
+`AmfLibrary::instance()` は `LazyLock` によるプロセスシングルトンを返す。`libamfrt64.so.1` の `dlopen` とファクトリの取得は、初めて `query_version()` / `create_context()` / `create_component()` を呼び出したときに行われる。
 
 ### カスタムハンドラートレイトの実装
 

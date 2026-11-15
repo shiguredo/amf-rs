@@ -81,11 +81,11 @@ DOCS_RS=1 cargo doc --no-deps
 ### エンコード
 
 ```rust
-use std::sync::{Arc, Mutex};
+use std::sync::mpsc;
 
 use shiguredo_amf::{
-    AmfLibrary, CodecConfig, EncodeOptions, EncodedFrame, Encoder, EncoderConfig, FrameFormat,
-    H264EncoderConfig, H264Profile, RateControlMode, ReconfigureParams, frame_type,
+    AmfLibrary, CodecConfig, EncodeOptions, EncodedFrame, Encoder, EncoderConfig, FnEncodeHandler,
+    FrameFormat, H264EncoderConfig, H264Profile, RateControlMode, ReconfigureParams, frame_type,
 };
 
 let context = AmfLibrary::instance().create_context()?;
@@ -94,20 +94,29 @@ let mut config = EncoderConfig::new(
     CodecConfig::H264(H264EncoderConfig {
         profile: Some(H264Profile::High),
     }),
-    1920,                    // width
-    1080,                    // height
+    1920, // width
+    1080, // height
     FrameFormat::Nv12,
-    30,                      // framerate_num
-    1,                       // framerate_den
+    30, // framerate_num
+    1,  // framerate_den
     RateControlMode::Cbr,
 );
 config.target_kbps = Some(5_000);
 
-let encoded = Arc::new(Mutex::new(Vec::new()));
-let e = encoded.clone();
-let mut encoder = Encoder::new(context.clone(), config, move |frame: EncodedFrame<()>| {
-    e.lock().unwrap().push(frame);
-})?;
+// エンコード結果はワーカースレッドからチャネルで受け取る
+let (frame_tx, frame_rx) = mpsc::channel();
+let mut encoder = Encoder::new(
+    context.clone(),
+    config,
+    FnEncodeHandler::new(
+        move |result: Result<EncodedFrame<()>, shiguredo_amf::Error>| match result {
+            Ok(frame) => {
+                let _ = frame_tx.send(frame);
+            }
+            Err(e) => eprintln!("encode error: {e}"),
+        },
+    ),
+)?;
 
 // エンコード中に動的プロパティを再設定
 encoder.reconfigure(ReconfigureParams {
@@ -135,12 +144,14 @@ encoder.encode(surface, &EncodeOptions {
 encoder.finish()?;
 
 // エンコード済みフレームを確認
-for encoded in encoded.lock().unwrap().iter() {
-    println!("encoded bytes: {}", encoded.buffer().get_size());
-    println!("pts: {}", encoded.buffer().get_pts());
-    println!("picture type: {:?}", encoded.picture_type());
+for frame in frame_rx.try_iter() {
+    println!("encoded bytes: {}", frame.buffer().get_size());
+    println!("pts: {}", frame.buffer().get_pts());
+    println!("picture type: {:?}", frame.picture_type());
 }
 ```
+
+エンコード結果は `FnEncodeHandler::new` で包んだクロージャに `Result<EncodedFrame<T>, E>` として通知されます。ハンドラーはワーカースレッドで呼ばれるため、結果は `mpsc::channel` の `Sender` でメインスレッドへ送ります。`E` の既定値は `shiguredo_amf::Error` です。`T` には `encode()` に渡したユーザーデータの型を指定します。
 
 `reconfigure` で変更できる項目は codec ごとに異なります。
 
@@ -153,20 +164,35 @@ for encoded in encoded.lock().unwrap().iter() {
 ### デコード
 
 ```rust
-use std::sync::{Arc, Mutex};
+use std::sync::mpsc;
 
-use shiguredo_amf::{AmfLibrary, DecodedFrame, Decoder, DecoderCodec, DecoderConfig};
+use shiguredo_amf::{
+    AmfLibrary, DecodedFrame, Decoder, DecoderCodec, DecoderConfig, FnDecodeHandler,
+};
 
 let context = AmfLibrary::instance().create_context()?;
 
 let config = DecoderConfig {
     codec: DecoderCodec::H264,
 };
-let decoded = Arc::new(Mutex::new(Vec::new()));
-let d = decoded.clone();
-let mut decoder = Decoder::new(context.clone(), config, move |frame: DecodedFrame<()>| {
-    d.lock().unwrap().push(frame);
-})?;
+
+// デコード結果はワーカースレッドからチャネルで受け取る
+let (frame_tx, frame_rx) = mpsc::channel();
+let mut decoder = Decoder::new(
+    context.clone(),
+    config,
+    FnDecodeHandler::new(
+        move |result: Result<DecodedFrame<()>, shiguredo_amf::Error>| match result {
+            Ok(frame) => {
+                let _ = frame_tx.send(frame);
+            }
+            Err(e) => eprintln!("decode error: {e}"),
+        },
+    ),
+)?;
+
+// 1 フレーム分の H.264 ビットストリームを読み込む
+let bitstream_data = std::fs::read("input.h264")?;
 
 // Buffer を確保してビットストリームデータをコピーし、デコードする
 let buffer = decoder.alloc_buffer(bitstream_data.len())?;
@@ -176,11 +202,12 @@ decoder.decode(buffer, ())?;
 
 // 残りのフレームをすべて取得する
 decoder.finish()?;
-drop(decoder);
 
 // デコード済みフレームを確認
-for frame in decoded.lock().unwrap().iter() {
-    let y_plane = frame.surface().get_plane(shiguredo_amf::ffi::AMF_PLANE_TYPE::AMF_PLANE_Y).unwrap();
+for frame in frame_rx.try_iter() {
+    let y_plane = frame
+        .surface()
+        .get_plane(shiguredo_amf::ffi::AMF_PLANE_TYPE::AMF_PLANE_Y)?;
     println!("decoded: {}x{}", y_plane.get_width(), y_plane.get_height());
 }
 ```
