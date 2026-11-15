@@ -1617,37 +1617,6 @@ fn test_encode_rejects_surface_with_cloned_handle() {
     encoder.finish().expect("finish に失敗");
 }
 
-/// Plane を保持したままの Surface のエンコードが拒否されることを確認する
-#[test]
-fn test_encode_rejects_surface_with_live_plane() {
-    let context = create_context();
-    let mut encoder = Encoder::new(
-        context.clone(),
-        h264_cbr_test_encoder_config(),
-        FnEncodeHandler::<()>::new(|_| {}),
-    )
-    .expect("エンコーダーの作成に失敗");
-
-    let width = 320;
-    let height = 240;
-    let data = generate_dummy_nv12(width, height, 0);
-    let options = EncodeOptions::default();
-
-    let surface = encoder.alloc_surface().expect("Surface の確保に失敗");
-    copy_nv12_to_surface(&surface, &data, width, height);
-    let plane = surface
-        .get_plane(AMF_PLANE_TYPE::AMF_PLANE_Y)
-        .expect("Y プレーンの取得に失敗");
-
-    let result = encoder.encode(surface, &options, ());
-    let err = result.expect_err("Plane が残っている Surface のエンコードは失敗するはず");
-    assert!(
-        err.to_string().contains("shared with other handles"),
-        "共有ハンドル拒否のエラーではない: {err}"
-    );
-    drop(plane);
-}
-
 /// PropertyStorage を保持したままの Surface のエンコードが拒否されることを確認する
 #[test]
 fn test_encode_rejects_surface_with_live_property_storage() {

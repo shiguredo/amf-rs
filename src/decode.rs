@@ -595,13 +595,7 @@ fn extract_frame(surface: *mut AMFSurface, context: &Context) -> Result<(Surface
     // 対応付け用の PTS を取得する。
     let pts = surface.get_pts();
 
-    let result = surface.convert(AMF_MEMORY_TYPE::AMF_MEMORY_HOST);
-    if result != AMF_RESULT::AMF_OK {
-        return Err(Error::new_custom(
-            "extract_frame",
-            &format!("Convert failed: {result:?}"),
-        ));
-    }
+    surface.convert(AMF_MEMORY_TYPE::AMF_MEMORY_HOST)?;
 
     Ok((surface, pts))
 }

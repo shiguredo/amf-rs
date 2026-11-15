@@ -11,6 +11,12 @@
 
 ## develop
 
+- [CHANGE] `amf::Plane` の寿命を取得元の `Surface` に縛るように変更する
+  - `Plane<'a>` は `Surface` を借用し、`Surface` を drop した後の `Plane` の利用はコンパイルエラーになる
+  - `Plane::from_raw` / `Plane::from_raw_acquired` は `Context` ではなく `&Surface` を受け取る
+  - `Surface::convert` は `Plane` が生存している間はエラーを返すように変更する
+  - `Surface::convert` の戻り値を `Result<(), Error>` に変更する
+  - @melpon
 - [CHANGE] 最小サポート Rust バージョン (MSRV) を 1.88 から 1.95 に上げる
   - @voluntas
 - [CHANGE] `amf::Context` 周りの整理
