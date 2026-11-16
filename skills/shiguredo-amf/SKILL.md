@@ -111,20 +111,20 @@ AMD GPU 向けハードウェアアクセラレーションによるビデオエ
 
 ハンドラーが `Send + 'static` を要求するのは、ワーカースレッドへ所有権を移して呼び出すため。`UserData` は `encode()` / `decode()` に渡したフレームと 1:1 で対応する。`decode()` は B フレームによる出力順の入れ替えがあっても、入力したフレームに対応する出力へ `UserData` を付ける。
 
-### `frame_type` モジュール (vpl-rs 互換)
+### `frame_type` モジュール
 
 `EncodeOptions::frame_type` に指定するビットフラグ。AMF SDK 内部の picture type enum とは独立した値で、`Encoder::encode` 内で AMF の `force_picture_type` 等のプロパティに変換される。
 
 | 定数 | 値 | 説明 |
 |------|----|------|
 | `UNKNOWN` | `0` | 自動 (フラグなし) |
-| `I` | `0x0001` | I フレーム |
-| `P` | `0x0002` | P フレーム |
-| `B` | `0x0004` | B フレーム |
+| `I` | `0x0001` | I フレーム (H.264 / H.265 は I、AV1 は INTRA_ONLY) |
+| `P` | `0x0002` | P フレーム (AV1 では無視される) |
+| `B` | `0x0004` | B フレーム (無視される) |
 | `IDR` | `0x0020` | IDR フレーム (キーフレーム) |
-| `REF` | `0x0040` | 参照フレーム |
+| `REF` | `0x0040` | 参照フレーム (無視される) |
 
-現状の `Encoder::encode` は `frame_type & IDR != 0` のときに IDR を強制する。`I` / `P` / `B` / `REF` は vpl-rs と共通インターフェースを保つための定義で、現バージョンでは未使用。
+`Encoder::encode` は `IDR` / `I` / `P` を `IDR`、`I`、`P` の順に優先して 1 つ使用する。`B` / `REF`、AV1 の `P`、未定義のビットは無視する。先頭フレームと GOP の境界では、エンコーダーが IDR を優先するため `I` と `P` の指定が反映されない場合がある。
 
 ## AMF オブジェクトラッパー (`amf` モジュール)
 
@@ -329,7 +329,7 @@ encoder.reconfigure(ReconfigureParams {
 
 `framerate_num` と `framerate_den` は必ず同時に指定する。片方だけ指定すると `Err` を返す。`None` の項目はそのまま維持される。
 
-### IDR フレーム強制
+### フレームタイプの強制
 
 ```rust
 use shiguredo_amf::{EncodeOptions, frame_type};
@@ -337,7 +337,7 @@ use shiguredo_amf::{EncodeOptions, frame_type};
 let surface = encoder.alloc_surface()?;
 // ...
 encoder.encode(surface, &EncodeOptions {
-    frame_type: frame_type::IDR | frame_type::I | frame_type::REF,
+    frame_type: frame_type::IDR,
 }, ())?;
 ```
 

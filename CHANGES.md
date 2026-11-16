@@ -56,6 +56,10 @@
   - エンコーダーの `finish()` で、対応する入力がない出力と、出力が得られなかった入力を通知する
   - エンコーダーの `finish()` の 5 秒タイムアウトを削除し、ワーカーの完了まで待つ
   - @melpon
+- [FIX] `EncodeOptions::frame_type` で指定した `I` / `P` が無視される問題を修正する
+  - `IDR` / `I` / `P` を `IDR`、`I`、`P` の順に優先して AMF の強制ピクチャタイプに対応付ける
+  - `B` / `REF`、AV1 の `P`、未定義のビットは無視する
+  - @melpon
 - [FIX] AV1 の `qpb` が初期化時に反映されない問題を修正する
   - @melpon
 - [FIX] AV1 の `PictureType` 判定で `INTRA_ONLY` を `P` と誤報告する問題を修正する
