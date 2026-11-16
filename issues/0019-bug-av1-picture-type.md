@@ -1,7 +1,7 @@
 # AV1 の `PictureType` 判定で `INTRA_ONLY` を P と誤報告しないようにする
 
 - Created: 2026-11-10
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-11-16
 - Branch: feature/fix-av1-picture-type
 - Polished: {YYYY-MM-DD}
 - Reporter: @melpon
@@ -33,3 +33,13 @@ H.264 と HEVC の判定には未知値のフォールバック (`PictureType::U
 - マッピングのテストが追加される。
 - `cargo test --workspace` が通る。
 - `CHANGES.md` の `## develop` に `[FIX]` を追記する。
+
+## 解決方法
+
+- `src/encode.rs` の `picture_type_from_output_value` で、AV1 の `AMF_VIDEO_ENCODER_AV1_OUTPUT_FRAME_TYPE_ENUM` の全値をマッピングした。`KEY` を `PictureType::Idr`、`INTRA_ONLY` を `PictureType::I`、`INTER` を `PictureType::P`、`SWITCH` / `SHOW_EXISTING` と未知の値を `PictureType::Unknown` にする。
+- H.264 / HEVC / AV1 の出力種別値は、bindgen が生成した定数から作るローカル定数を使うようにした。
+- `tests/test_roundtrip.rs` の `test_av1_picture_types` で、実際の AMF を使って先頭フレームが `Idr`、後続の `INTER` フレームが `P` になることを検証した。
+- `src/encode.rs` の `test_picture_type_from_output_value_av1_edge_cases` で、公開 API では生成を制御できない `INTRA_ONLY` / `SWITCH` / `SHOW_EXISTING` と未知の値を検証した。
+- `AMFVariantStruct` の型確認は、CODEBASE.md の「AMF が返すメタデータは仕様どおり信頼し、健全性の検証をしない」に従い行っていない。AMF の仕様で出力フレーム種別のプロパティは `amf_int64` と定義されているため、そのまま `int64Value` を読む。
+- `CHANGES.md` の `## develop` に `[FIX]` を追記した。
+- `cargo fmt --all -- --check`、`cargo clippy --workspace --all-targets -- -D warnings`、`cargo test --workspace` が AMD GPU 環境で通ることを確認した。
