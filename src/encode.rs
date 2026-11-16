@@ -330,8 +330,8 @@ impl EncoderConfig {
 pub struct EncodeOptions {
     /// 強制するフレームタイプ
     ///
-    /// [`frame_type`] のビットフラグを指定する。0 の場合はフレームタイプを
-    /// 強制しない。
+    /// [`frame_type`] の定数をビット OR で指定する。`frame_type::UNKNOWN` の場合は
+    /// 強制しない。指定した値の扱いは [`frame_type`] モジュールを参照すること。
     pub frame_type: u16,
 }
 
@@ -398,9 +398,13 @@ impl<T> EncodedFrame<T> {
 // ---------------------------------------------------------------------------
 /// 強制するフレームタイプを表すビットフラグ
 ///
-/// [`EncodeOptions::frame_type`] に指定する。現在有効なのは [`IDR`](frame_type::IDR)
-/// だけで、[`crate::Encoder::encode`] はこのフラグが立っている場合にキーフレームを
-/// 強制する。ほかのフラグは [`crate::Encoder::encode`] の挙動を変えない。
+/// [`EncodeOptions::frame_type`] に指定する。AMF のピクチャタイプ enum とは
+/// 独立したビットフラグである。`IDR` / `I` / `P` が指定された場合は `IDR`、`I`、
+/// `P` の順に優先して 1 つを AMF の強制ピクチャタイプへ変換する。
+///
+/// `B` と `REF`、未定義のビット、利用するコーデックが対応しないフラグは無視する。
+/// 先頭フレームと GOP の境界では、エンコーダーが IDR を優先するため `I` と `P`
+/// の指定が反映されない場合がある。
 pub mod frame_type {
     /// フレームタイプを強制しない
     pub const UNKNOWN: u16 = 0;
@@ -411,6 +415,9 @@ pub mod frame_type {
     /// B フレーム
     pub const B: u16 = 0x0004;
     /// IDR フレーム
+    ///
+    /// キーフレームを強制し、H.264 は SPS / PPS、HEVC は VPS / SPS / PPS、
+    /// AV1 はシーケンスヘッダーを出力に含める。
     pub const IDR: u16 = 0x0020;
     /// 参照フレーム
     pub const REF: u16 = 0x0040;
@@ -1078,6 +1085,11 @@ impl<H: EncodeHandler> Encoder<H> {
     /// `surface` はこのエンコーダーと同じ `Context` から確保したものでなければ
     /// ならない。別の Context から確保した Surface を渡した場合はエラーを返す。
     /// `surface` が他のハンドルと共有されている場合もエラーを返す。
+    ///
+    /// # Errors
+    ///
+    /// `surface` の状態が操作に適していない場合、または AMF への入力に失敗した
+    /// 場合にエラーを返す。
     pub fn encode(
         &mut self,
         surface: Surface,
@@ -1108,9 +1120,7 @@ impl<H: EncodeHandler> Encoder<H> {
         surface.set_pts(pts);
 
         // フレームタイプの強制
-        if options.frame_type & frame_type::IDR != 0 {
-            self.force_picture_type(&surface)?;
-        }
+        self.force_picture_type(&surface, options.frame_type)?;
 
         tracing::trace!("Encoder::encode: SubmitInput");
         // SubmitInput (INPUT_FULL の場合はリトライする)
@@ -1155,35 +1165,89 @@ impl<H: EncodeHandler> Encoder<H> {
         Ok(())
     }
 
-    /// IDR フレームを強制する
-    fn force_picture_type(&self, surface: &Surface) -> Result<(), Error> {
+    /// `frame_type` の指定から優先度の最も高い 1 つを返す
+    ///
+    /// `IDR`、`I`、`P` の順に優先する。該当するフラグがない場合は `None` を返す。
+    fn resolve_frame_type(frame_type_value: u16) -> Option<u16> {
+        if frame_type_value & frame_type::IDR != 0 {
+            Some(frame_type::IDR)
+        } else if frame_type_value & frame_type::I != 0 {
+            Some(frame_type::I)
+        } else if frame_type_value & frame_type::P != 0 {
+            Some(frame_type::P)
+        } else {
+            None
+        }
+    }
+
+    /// 指定されたフレームタイプを AMF に強制する
+    fn force_picture_type(&self, surface: &Surface, frame_type_value: u16) -> Result<(), Error> {
+        let Some(resolved) = Self::resolve_frame_type(frame_type_value) else {
+            return Ok(());
+        };
+
+        // AV1 には P を強制する値がない。
+        if resolved == frame_type::P && matches!(&self.codec_config, CodecConfig::Av1(_)) {
+            return Ok(());
+        }
+
         let prop = surface.property_storage()?;
         match &self.codec_config {
             CodecConfig::H264(_) => {
-                prop.set_property_int64(
-                    sys::str::AMF_VIDEO_ENCODER_FORCE_PICTURE_TYPE,
-                    sys::AMF_VIDEO_ENCODER_PICTURE_TYPE_ENUM_AMF_VIDEO_ENCODER_PICTURE_TYPE_IDR
+                let value: amf_int64 = match resolved {
+                    frame_type::IDR => {
+                        sys::AMF_VIDEO_ENCODER_PICTURE_TYPE_ENUM_AMF_VIDEO_ENCODER_PICTURE_TYPE_IDR
+                            .into()
+                    }
+                    frame_type::I => {
+                        sys::AMF_VIDEO_ENCODER_PICTURE_TYPE_ENUM_AMF_VIDEO_ENCODER_PICTURE_TYPE_I
+                            .into()
+                    }
+                    _ => sys::AMF_VIDEO_ENCODER_PICTURE_TYPE_ENUM_AMF_VIDEO_ENCODER_PICTURE_TYPE_P
                         .into(),
-                )?;
-                prop.set_property_int64(sys::str::AMF_VIDEO_ENCODER_INSERT_SPS, 1)?;
-                prop.set_property_int64(sys::str::AMF_VIDEO_ENCODER_INSERT_PPS, 1)?;
+                };
+                prop.set_property_int64(sys::str::AMF_VIDEO_ENCODER_FORCE_PICTURE_TYPE, value)?;
+                if resolved == frame_type::IDR {
+                    prop.set_property_int64(sys::str::AMF_VIDEO_ENCODER_INSERT_SPS, 1)?;
+                    prop.set_property_int64(sys::str::AMF_VIDEO_ENCODER_INSERT_PPS, 1)?;
+                }
             }
             CodecConfig::Hevc(_) => {
+                let value: amf_int64 = match resolved {
+                    frame_type::IDR => {
+                        sys::AMF_VIDEO_ENCODER_HEVC_PICTURE_TYPE_ENUM_AMF_VIDEO_ENCODER_HEVC_PICTURE_TYPE_IDR.into()
+                    }
+                    frame_type::I => {
+                        sys::AMF_VIDEO_ENCODER_HEVC_PICTURE_TYPE_ENUM_AMF_VIDEO_ENCODER_HEVC_PICTURE_TYPE_I.into()
+                    }
+                    _ => {
+                        sys::AMF_VIDEO_ENCODER_HEVC_PICTURE_TYPE_ENUM_AMF_VIDEO_ENCODER_HEVC_PICTURE_TYPE_P.into()
+                    }
+                };
                 prop.set_property_int64(
                     sys::str::AMF_VIDEO_ENCODER_HEVC_FORCE_PICTURE_TYPE,
-                    sys::AMF_VIDEO_ENCODER_HEVC_PICTURE_TYPE_ENUM_AMF_VIDEO_ENCODER_HEVC_PICTURE_TYPE_IDR.into(),
+                    value,
                 )?;
-                prop.set_property_int64(sys::str::AMF_VIDEO_ENCODER_HEVC_INSERT_HEADER, 1)?;
+                if resolved == frame_type::IDR {
+                    prop.set_property_int64(sys::str::AMF_VIDEO_ENCODER_HEVC_INSERT_HEADER, 1)?;
+                }
             }
             CodecConfig::Av1(_) => {
-                prop.set_property_int64(
-                    sys::str::AMF_VIDEO_ENCODER_AV1_FORCE_FRAME_TYPE,
-                    sys::AMF_VIDEO_ENCODER_AV1_FORCE_FRAME_TYPE_ENUM_AMF_VIDEO_ENCODER_AV1_FORCE_FRAME_TYPE_KEY.into(),
-                )?;
-                prop.set_property_int64(
-                    sys::str::AMF_VIDEO_ENCODER_AV1_FORCE_INSERT_SEQUENCE_HEADER,
-                    1,
-                )?;
+                let value: amf_int64 = match resolved {
+                    frame_type::IDR => {
+                        sys::AMF_VIDEO_ENCODER_AV1_FORCE_FRAME_TYPE_ENUM_AMF_VIDEO_ENCODER_AV1_FORCE_FRAME_TYPE_KEY.into()
+                    }
+                    _ => {
+                        sys::AMF_VIDEO_ENCODER_AV1_FORCE_FRAME_TYPE_ENUM_AMF_VIDEO_ENCODER_AV1_FORCE_FRAME_TYPE_INTRA_ONLY.into()
+                    }
+                };
+                prop.set_property_int64(sys::str::AMF_VIDEO_ENCODER_AV1_FORCE_FRAME_TYPE, value)?;
+                if resolved == frame_type::IDR {
+                    prop.set_property_int64(
+                        sys::str::AMF_VIDEO_ENCODER_AV1_FORCE_INSERT_SEQUENCE_HEADER,
+                        1,
+                    )?;
+                }
             }
         }
         Ok(())

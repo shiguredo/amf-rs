@@ -137,7 +137,7 @@ encoder.encode(surface, &options, ())?;
 let surface = encoder.alloc_surface()?;
 // ...
 encoder.encode(surface, &EncodeOptions {
-    frame_type: frame_type::IDR | frame_type::I | frame_type::REF,
+    frame_type: frame_type::IDR,
 }, ())?;
 
 // 残りのフレームをすべて取得する
@@ -160,6 +160,13 @@ for frame in frame_rx.try_iter() {
 - AV1: `framerate_num` / `framerate_den` / `target_kbps` / `max_kbps` / `qpi` / `qpp` / `qpb` / `gop_pic_size`
 
 H.265 で `qpb` / `gop_pic_size` を指定するとエラーになります。`framerate_num` と `framerate_den` は必ず同時に指定してください。
+
+`EncodeOptions::frame_type` で強制できるフレームタイプはコーデックによって異なります。
+
+- H.264 / H.265: `IDR` / `I` / `P`
+- AV1: `IDR` / `I`
+
+`B` と `REF`、AV1 の `P`、未定義のビットは無視します。複数指定した場合は `IDR`、`I`、`P` の順に優先して 1 つだけ使用します。先頭フレームと GOP の境界では、エンコーダーが IDR を優先するため `I` と `P` の指定が反映されない場合があります。
 
 ### デコード
 

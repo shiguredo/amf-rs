@@ -265,12 +265,13 @@ fn encode(context: &Context, config: EncoderConfig, frames: &[Vec<u8>]) -> Vec<E
         .expect("エンコード結果を格納する Mutex がポイズンされている")
 }
 
-/// 強制キーフレームを含むシーケンスをエンコードする
-fn encode_with_forced_keyframe(
+/// フレームごとに指定したフレームタイプでエンコードし、出力を返す
+///
+/// `frame_types` の長さだけフレームを投入する。
+fn encode_with_frame_types(
     context: &Context,
     config: EncoderConfig,
-    force_at: usize,
-    num_frames: usize,
+    frame_types: &[u16],
 ) -> Vec<EncodedFrame<()>> {
     let width = config.width as usize;
     let height = config.height as usize;
@@ -289,22 +290,12 @@ fn encode_with_forced_keyframe(
     )
     .expect("エンコーダーの作成に失敗");
 
-    for i in 0..num_frames {
+    for (i, &frame_type) in frame_types.iter().enumerate() {
         let frame = generate_dummy_nv12(width, height, i);
         let surface = encoder.alloc_surface().expect("Surface の確保に失敗");
         copy_frame_to_surface(&surface, &frame, format, width, height);
-
-        let options = if i == force_at {
-            EncodeOptions {
-                frame_type: frame_type::IDR | frame_type::I | frame_type::REF,
-            }
-        } else {
-            EncodeOptions {
-                frame_type: frame_type::UNKNOWN,
-            }
-        };
         encoder
-            .encode(surface, &options, ())
+            .encode(surface, &EncodeOptions { frame_type }, ())
             .expect("エンコードに失敗");
     }
     encoder.finish().expect("finish に失敗");
@@ -314,6 +305,18 @@ fn encode_with_forced_keyframe(
         .expect("Arc の参照が残っている")
         .into_inner()
         .expect("エンコード結果を格納する Mutex がポイズンされている")
+}
+
+/// 強制キーフレームを含むシーケンスをエンコードする
+fn encode_with_forced_keyframe(
+    context: &Context,
+    config: EncoderConfig,
+    force_at: usize,
+    num_frames: usize,
+) -> Vec<EncodedFrame<()>> {
+    let mut frame_types = vec![frame_type::UNKNOWN; num_frames];
+    frame_types[force_at] = frame_type::IDR | frame_type::I | frame_type::REF;
+    encode_with_frame_types(context, config, &frame_types)
 }
 
 /// n 回目の IDR フレームのインデックスを返す（n は 1 始まり）
@@ -659,7 +662,7 @@ fn test_roundtrip_h264_force_idr() {
 
         let options = if i == 10 {
             EncodeOptions {
-                frame_type: frame_type::IDR | frame_type::I | frame_type::REF,
+                frame_type: frame_type::IDR | frame_type::I,
             }
         } else {
             EncodeOptions {
@@ -719,6 +722,100 @@ fn test_force_picture_type_h264_outputs_idr_and_sps_pps() {
     assert!(
         h264_contains_sps_pps(buffer_to_slice(forced_idr.buffer())),
         "強制 H.264 IDR フレームに SPS と PPS が含まれていること"
+    );
+}
+
+/// H.264 で I と P を強制すると出力のピクチャタイプが指定どおりになることを確認する
+#[test]
+fn test_force_picture_type_h264_i_and_p() {
+    let mut config = EncoderConfig::new(
+        CodecConfig::H264(H264EncoderConfig {
+            profile: Some(H264Profile::High),
+        }),
+        320,
+        240,
+        FrameFormat::Nv12,
+        30,
+        1,
+        RateControlMode::Cbr,
+    );
+    config.target_kbps = Some(1000);
+    config.gop_pic_size = Some(300);
+
+    let mut frame_types = vec![frame_type::UNKNOWN; 10];
+    frame_types[5] = frame_type::I;
+    frame_types[7] = frame_type::P;
+
+    let encoded_frames = encode_with_frame_types(&create_context(), config, &frame_types);
+    assert_eq!(
+        encoded_frames.len(),
+        frame_types.len(),
+        "入力したフレーム数と出力フレーム数が一致すること"
+    );
+    assert_eq!(
+        encoded_frames[5].picture_type(),
+        PictureType::I,
+        "I を強制したフレームのピクチャタイプが I であること"
+    );
+    assert_eq!(
+        encoded_frames[7].picture_type(),
+        PictureType::P,
+        "P を強制したフレームのピクチャタイプが P であること"
+    );
+}
+
+/// 複数のフレームタイプを指定した場合の優先順位と、未対応フラグが無視されることを確認する
+#[test]
+fn test_force_picture_type_priority_and_ignored_flags() {
+    let mut config = EncoderConfig::new(
+        CodecConfig::H264(H264EncoderConfig {
+            profile: Some(H264Profile::High),
+        }),
+        320,
+        240,
+        FrameFormat::Nv12,
+        30,
+        1,
+        RateControlMode::Cbr,
+    );
+    config.target_kbps = Some(1000);
+    config.gop_pic_size = Some(300);
+
+    let mut frame_types = vec![frame_type::UNKNOWN; 12];
+    // IDR が最優先される
+    frame_types[2] = frame_type::IDR | frame_type::I | frame_type::P;
+    // IDR がなければ I が優先される
+    frame_types[4] = frame_type::I | frame_type::P;
+    // I がなければ P が使われる
+    frame_types[6] = frame_type::P | frame_type::B | frame_type::REF;
+    // 強制に使えるフラグがない場合は何も強制しない
+    frame_types[8] = frame_type::B | frame_type::REF | 0x8000;
+
+    let encoded_frames = encode_with_frame_types(&create_context(), config, &frame_types);
+    assert_eq!(
+        encoded_frames.len(),
+        frame_types.len(),
+        "入力したフレーム数と出力フレーム数が一致すること"
+    );
+    assert_eq!(
+        encoded_frames[2].picture_type(),
+        PictureType::Idr,
+        "IDR が指定された場合は IDR が優先されること"
+    );
+    assert_eq!(
+        encoded_frames[4].picture_type(),
+        PictureType::I,
+        "IDR がなく I が指定された場合は I が優先されること"
+    );
+    assert_eq!(
+        encoded_frames[6].picture_type(),
+        PictureType::P,
+        "I がなく P が指定された場合は P が使われること"
+    );
+    assert_eq!(
+        encoded_frames[8].picture_type(),
+        PictureType::P,
+        "強制に使えるフラグがない場合は自然なピクチャタイプになること"
     );
 }
 
@@ -791,6 +888,45 @@ fn test_force_picture_type_hevc_outputs_idr_and_vps_sps_pps() {
     assert!(
         hevc_contains_vps_sps_pps(buffer_to_slice(forced_idr.buffer())),
         "強制 HEVC IDR フレームに VPS, SPS, PPS が含まれていること"
+    );
+}
+
+/// HEVC で I と P を強制すると出力のピクチャタイプが指定どおりになることを確認する
+#[test]
+fn test_force_picture_type_hevc_i_and_p() {
+    let mut config = EncoderConfig::new(
+        CodecConfig::Hevc(HevcEncoderConfig {
+            profile: Some(HevcProfile::Main),
+        }),
+        320,
+        240,
+        FrameFormat::Nv12,
+        30,
+        1,
+        RateControlMode::Cbr,
+    );
+    config.target_kbps = Some(1000);
+    config.gop_pic_size = Some(300);
+
+    let mut frame_types = vec![frame_type::UNKNOWN; 10];
+    frame_types[5] = frame_type::I;
+    frame_types[7] = frame_type::P;
+
+    let encoded_frames = encode_with_frame_types(&create_context(), config, &frame_types);
+    assert_eq!(
+        encoded_frames.len(),
+        frame_types.len(),
+        "入力したフレーム数と出力フレーム数が一致すること"
+    );
+    assert_eq!(
+        encoded_frames[5].picture_type(),
+        PictureType::I,
+        "I を強制したフレームのピクチャタイプが I であること"
+    );
+    assert_eq!(
+        encoded_frames[7].picture_type(),
+        PictureType::P,
+        "P を強制したフレームのピクチャタイプが P であること"
     );
 }
 
@@ -904,6 +1040,78 @@ fn test_force_picture_type_av1_outputs_keyframe_and_sequence_header() {
     assert!(
         av1_contains_sequence_header_obu(buffer_to_slice(forced_key.buffer())),
         "強制 AV1 キーフレームにシーケンスヘッダー OBU が含まれていること"
+    );
+}
+
+/// AV1 で I を強制すると出力のピクチャタイプが I になることを確認する
+#[test]
+fn test_force_picture_type_av1_i() {
+    let mut config = EncoderConfig::new(
+        CodecConfig::Av1(Av1EncoderConfig {
+            profile: Some(Av1Profile::Main),
+        }),
+        320,
+        240,
+        FrameFormat::Nv12,
+        30,
+        1,
+        RateControlMode::Cbr,
+    );
+    config.target_kbps = Some(1000);
+    config.gop_pic_size = Some(300);
+
+    let mut frame_types = vec![frame_type::UNKNOWN; 10];
+    frame_types[5] = frame_type::I;
+
+    let encoded_frames = encode_with_frame_types(&create_context(), config, &frame_types);
+    assert_eq!(
+        encoded_frames.len(),
+        frame_types.len(),
+        "入力したフレーム数と出力フレーム数が一致すること"
+    );
+    assert_eq!(
+        encoded_frames[5].picture_type(),
+        PictureType::I,
+        "I を強制したフレームのピクチャタイプが I であること"
+    );
+}
+
+/// AV1 では P が無視され、I が指定されていれば I が強制されることを確認する
+#[test]
+fn test_force_picture_type_av1_ignores_p() {
+    let mut config = EncoderConfig::new(
+        CodecConfig::Av1(Av1EncoderConfig {
+            profile: Some(Av1Profile::Main),
+        }),
+        320,
+        240,
+        FrameFormat::Nv12,
+        30,
+        1,
+        RateControlMode::Cbr,
+    );
+    config.target_kbps = Some(1000);
+    config.gop_pic_size = Some(300);
+
+    let mut frame_types = vec![frame_type::UNKNOWN; 10];
+    frame_types[3] = frame_type::P;
+    frame_types[5] = frame_type::P | frame_type::I;
+
+    let encoded_frames = encode_with_frame_types(&create_context(), config, &frame_types);
+    assert_eq!(
+        encoded_frames.len(),
+        frame_types.len(),
+        "入力したフレーム数と出力フレーム数が一致すること"
+    );
+    assert_eq!(
+        encoded_frames[3].picture_type(),
+        PictureType::P,
+        "AV1 で P を指定しても強制されず自然なピクチャタイプになること"
+    );
+    assert_eq!(
+        encoded_frames[5].picture_type(),
+        PictureType::I,
+        "P と I を指定した場合は I が優先されること"
     );
 }
 
