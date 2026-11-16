@@ -1,7 +1,7 @@
 # エンコーダー / デコーダーのケーパビリティ照会 API を追加する
 
 - Created: 2026-11-10
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-11-17
 - Branch: feature/add-capability-query
 - Polished: {YYYY-MM-DD}
 - Reporter: @melpon
@@ -38,3 +38,11 @@
 - `GetCaps` の値が初期化成功を保証しないことが doc に書かれている。
 - 実機テストが追加され、`cargo test --workspace` が通る。
 - `CHANGES.md` の `## develop` に `[ADD]` を追記する。
+
+## 解決方法
+
+0022 で `supported_codecs` が `AMFCaps` / `AMFIOCaps` の情報を `CodecInfo` として返すようにした。解像度、フォーマット、メモリタイプ、インターレース対応、アクセラレーション種別、全プロパティが含まれる。
+
+`query_encoder_caps` / `query_decoder_caps` は追加しない。`supported_codecs` の結果を codec で絞れば同じ情報が得られるためである。追加プロパティも `properties` から確認でき、typed accessor は設けない。
+
+`Component::get_caps`、`Caps`、`IoCaps` の内部実装は 0022 で行う。
