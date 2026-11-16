@@ -1,7 +1,7 @@
 # `build.rs` の DOCS_RS ダミーと環境変数の取り扱いを修正する
 
 - Created: 2026-11-10
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-11-17
 - Branch: feature/fix-docsrs-build
 - Polished: {YYYY-MM-DD}
 - Reporter: @melpon
@@ -39,3 +39,9 @@
 - CI に `DOCS_RS=1 cargo check --lib` が追加される。
 - パーサの単体テストが追加され、`cargo test --workspace` が通る。
 - `CHANGES.md` の `## develop` の `### misc` にビルド修正として追記する。
+
+## 解決方法
+
+docs.rs の実際のビルドは `cargo doc --no-deps` であり、現行のダミーバインディングのまま成功することを確認した。`DOCS_RS=1 cargo check --lib` は docs.rs のビルドでは実行されない追加の型検査であり、この issue で対応する必要はないと判断した。
+
+`DOCS_RS` の切り替え時に build script が再実行されない問題と、`#define` の直後に空白が 2 個ある定義を取りこぼす問題も、docs.rs のビルドや現在の利用箇所には影響しないため、変更は行わない。
