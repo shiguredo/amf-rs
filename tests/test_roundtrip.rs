@@ -838,6 +838,46 @@ fn test_roundtrip_av1_cqp() {
     roundtrip_colorbar(config, DecoderCodec::Av1, 10, 25.0);
 }
 
+/// AV1 で先頭フレームがキーフレーム、後続の INTER フレームが P と通知されることを確認する
+#[test]
+fn test_av1_picture_types() {
+    let mut config = EncoderConfig::new(
+        CodecConfig::Av1(Av1EncoderConfig {
+            profile: Some(Av1Profile::Main),
+        }),
+        320,
+        240,
+        FrameFormat::Nv12,
+        30,
+        1,
+        RateControlMode::Cbr,
+    );
+    config.target_kbps = Some(1000);
+    config.gop_pic_size = Some(300);
+
+    let frames: Vec<Vec<u8>> = (0..5).map(|i| generate_dummy_nv12(320, 240, i)).collect();
+    let encoded_frames = encode(&create_context(), config, &frames);
+    assert_eq!(
+        encoded_frames.len(),
+        frames.len(),
+        "入力したフレーム数と出力フレーム数が一致すること"
+    );
+
+    let first_frame = encoded_frames.first().expect("先頭フレームの取得に失敗");
+    assert_eq!(
+        first_frame.picture_type(),
+        PictureType::Idr,
+        "先頭フレームはキーフレームなので Idr になること"
+    );
+    for (i, frame) in encoded_frames.iter().enumerate().skip(1) {
+        assert_eq!(
+            frame.picture_type(),
+            PictureType::P,
+            "フレーム {i} は INTER なので P になること"
+        );
+    }
+}
+
 /// AV1 で force_picture_type 指定時にキーフレームと Sequence Header が出力されることを確認する
 #[test]
 fn test_force_picture_type_av1_outputs_keyframe_and_sequence_header() {
