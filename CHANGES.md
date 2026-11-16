@@ -58,6 +58,10 @@
   - @melpon
 - [FIX] AV1 の `qpb` が初期化時に反映されない問題を修正する
   - @melpon
+- [FIX] AV1 の `PictureType` 判定で `INTRA_ONLY` を `P` と誤報告する問題を修正する
+  - `KEY` / `INTRA_ONLY` / `INTER` を `Idr` / `I` / `P` に対応付ける
+  - `SWITCH` / `SHOW_EXISTING` と未知の値は `Unknown` にする
+  - @melpon
 
 ### misc
 

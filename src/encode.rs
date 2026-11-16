@@ -1501,25 +1501,128 @@ fn get_output_picture_type(
         ));
     }
 
+    // AMF の出力フレーム種別は amf_int64 のプロパティとして定義されている。
     let type_val = unsafe { var.__bindgen_anon_1.int64Value };
-    let picture_type = match codec_config {
-        CodecConfig::H264(_) => match type_val {
-            0 => PictureType::Idr,
-            1 => PictureType::I,
-            2 => PictureType::P,
-            3 => PictureType::B,
+    Ok(picture_type_from_output_value(codec_config, type_val))
+}
+
+/// コーデックごとの出力フレーム種別値を [`PictureType`] に変換する
+///
+/// 出力フレーム種別の値は、AMF の出力データ型または出力フレーム種別の enum で
+/// 定義される。enum に定義されていない値は [`PictureType::Unknown`] を返す。
+fn picture_type_from_output_value(codec_config: &CodecConfig, value: amf_int64) -> PictureType {
+    // AMF_VIDEO_ENCODER_OUTPUT_DATA_TYPE_ENUM の値
+    const H264_IDR: amf_int64 =
+        sys::AMF_VIDEO_ENCODER_OUTPUT_DATA_TYPE_ENUM_AMF_VIDEO_ENCODER_OUTPUT_DATA_TYPE_IDR
+            as amf_int64;
+    const H264_I: amf_int64 =
+        sys::AMF_VIDEO_ENCODER_OUTPUT_DATA_TYPE_ENUM_AMF_VIDEO_ENCODER_OUTPUT_DATA_TYPE_I
+            as amf_int64;
+    const H264_P: amf_int64 =
+        sys::AMF_VIDEO_ENCODER_OUTPUT_DATA_TYPE_ENUM_AMF_VIDEO_ENCODER_OUTPUT_DATA_TYPE_P
+            as amf_int64;
+    const H264_B: amf_int64 =
+        sys::AMF_VIDEO_ENCODER_OUTPUT_DATA_TYPE_ENUM_AMF_VIDEO_ENCODER_OUTPUT_DATA_TYPE_B
+            as amf_int64;
+
+    // AMF_VIDEO_ENCODER_HEVC_OUTPUT_DATA_TYPE_ENUM の値
+    const HEVC_IDR: amf_int64 =
+        sys::AMF_VIDEO_ENCODER_HEVC_OUTPUT_DATA_TYPE_ENUM_AMF_VIDEO_ENCODER_HEVC_OUTPUT_DATA_TYPE_IDR
+            as amf_int64;
+    const HEVC_I: amf_int64 =
+        sys::AMF_VIDEO_ENCODER_HEVC_OUTPUT_DATA_TYPE_ENUM_AMF_VIDEO_ENCODER_HEVC_OUTPUT_DATA_TYPE_I
+            as amf_int64;
+    const HEVC_P: amf_int64 =
+        sys::AMF_VIDEO_ENCODER_HEVC_OUTPUT_DATA_TYPE_ENUM_AMF_VIDEO_ENCODER_HEVC_OUTPUT_DATA_TYPE_P
+            as amf_int64;
+
+    // AMF_VIDEO_ENCODER_AV1_OUTPUT_FRAME_TYPE_ENUM の値
+    const AV1_KEY: amf_int64 =
+        sys::AMF_VIDEO_ENCODER_AV1_OUTPUT_FRAME_TYPE_ENUM_AMF_VIDEO_ENCODER_AV1_OUTPUT_FRAME_TYPE_KEY
+            as amf_int64;
+    const AV1_INTRA_ONLY: amf_int64 =
+        sys::AMF_VIDEO_ENCODER_AV1_OUTPUT_FRAME_TYPE_ENUM_AMF_VIDEO_ENCODER_AV1_OUTPUT_FRAME_TYPE_INTRA_ONLY
+            as amf_int64;
+    const AV1_INTER: amf_int64 =
+        sys::AMF_VIDEO_ENCODER_AV1_OUTPUT_FRAME_TYPE_ENUM_AMF_VIDEO_ENCODER_AV1_OUTPUT_FRAME_TYPE_INTER
+            as amf_int64;
+    const AV1_SWITCH: amf_int64 =
+        sys::AMF_VIDEO_ENCODER_AV1_OUTPUT_FRAME_TYPE_ENUM_AMF_VIDEO_ENCODER_AV1_OUTPUT_FRAME_TYPE_SWITCH
+            as amf_int64;
+    const AV1_SHOW_EXISTING: amf_int64 =
+        sys::AMF_VIDEO_ENCODER_AV1_OUTPUT_FRAME_TYPE_ENUM_AMF_VIDEO_ENCODER_AV1_OUTPUT_FRAME_TYPE_SHOW_EXISTING
+            as amf_int64;
+
+    match codec_config {
+        CodecConfig::H264(_) => match value {
+            H264_IDR => PictureType::Idr,
+            H264_I => PictureType::I,
+            H264_P => PictureType::P,
+            H264_B => PictureType::B,
             _ => PictureType::Unknown,
         },
-        CodecConfig::Hevc(_) => match type_val {
-            0 => PictureType::Idr,
-            1 => PictureType::I,
-            2 => PictureType::P,
+        CodecConfig::Hevc(_) => match value {
+            HEVC_IDR => PictureType::Idr,
+            HEVC_I => PictureType::I,
+            HEVC_P => PictureType::P,
             _ => PictureType::Unknown,
         },
-        CodecConfig::Av1(_) => match type_val {
-            0 => PictureType::Idr, // キーフレーム
-            _ => PictureType::P,
+        CodecConfig::Av1(_) => match value {
+            AV1_KEY => PictureType::Idr,
+            AV1_INTRA_ONLY => PictureType::I,
+            AV1_INTER => PictureType::P,
+            // SWITCH はストリームの切り替え、SHOW_EXISTING は既存フレームの
+            // 再表示に使うフレームであり、IDR / I / P / B のいずれにも対応しないため
+            // Unknown にする。
+            AV1_SWITCH | AV1_SHOW_EXISTING => PictureType::Unknown,
+            _ => PictureType::Unknown,
         },
-    };
-    Ok(picture_type)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// テスト用の AV1 コーデック設定を返す
+    fn av1_codec() -> CodecConfig {
+        CodecConfig::Av1(Av1EncoderConfig {
+            profile: Some(Av1Profile::Main),
+        })
+    }
+
+    /// AV1 の出力フレーム種別のうち再現できない値を変換できることを確認する
+    ///
+    /// `INTRA_ONLY` / `SWITCH` / `SHOW_EXISTING` と未知の値は、このライブラリの
+    /// 公開 API で生成を制御できないため、変換処理を直接検証する。
+    /// `KEY` と `INTER` は実機テストで検証する。
+    #[test]
+    fn test_picture_type_from_output_value_av1_edge_cases() {
+        let codec = av1_codec();
+        assert_eq!(
+            picture_type_from_output_value(&codec, 1),
+            PictureType::I,
+            "INTRA_ONLY は I に変換されること"
+        );
+        assert_eq!(
+            picture_type_from_output_value(&codec, 3),
+            PictureType::Unknown,
+            "SWITCH は Unknown に変換されること"
+        );
+        assert_eq!(
+            picture_type_from_output_value(&codec, 4),
+            PictureType::Unknown,
+            "SHOW_EXISTING は Unknown に変換されること"
+        );
+        assert_eq!(
+            picture_type_from_output_value(&codec, 5),
+            PictureType::Unknown,
+            "未定義の値は Unknown に変換されること"
+        );
+        assert_eq!(
+            picture_type_from_output_value(&codec, -1),
+            PictureType::Unknown,
+            "負の値は Unknown に変換されること"
+        );
+    }
 }
