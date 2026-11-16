@@ -158,6 +158,25 @@ fn test_encoder_rejects_hevc_10bit_without_main10() {
     }
 }
 
+/// HEVC には B フレーム用の QP プロパティがないため、qpb を指定すると Encoder::new がエラーになることを確認する
+#[test]
+fn test_encoder_rejects_hevc_qpb() {
+    let mut config = test_encoder_config(hevc_main(), FrameFormat::Nv12);
+    config.qpb = Some(30);
+    let err = create_encoder(config)
+        .err()
+        .expect("HEVC に qpb を指定したのにエンコーダーを作成できた");
+    assert_eq!(
+        err.status(),
+        None,
+        "AMF のエラーではなく Encoder::new のエラーであるべき: {err}"
+    );
+    assert!(
+        err.to_string().contains("qpb is not supported for HEVC"),
+        "想定したエラーメッセージではない: {err}"
+    );
+}
+
 /// P010 入力で HEVC Main10 と AV1 のエンコーダーを初期化し、エンコードできることを確認する
 #[test]
 fn test_encoder_p010_10bit_encoding() {

@@ -6,6 +6,7 @@
 
 // ビルド時に生成されるメタデータ
 mod metadata {
+    #![expect(missing_docs)]
     include!(concat!(env!("OUT_DIR"), "/metadata.rs"));
 }
 pub use metadata::*;
@@ -18,15 +19,20 @@ mod bindings {
     #![expect(non_camel_case_types)]
     #![expect(non_snake_case)]
     #![expect(non_upper_case_globals)]
+    #![expect(missing_docs)]
     include!(concat!(env!("OUT_DIR"), "/bindings.rs"));
 }
 pub use bindings::*;
 
-// ヘッダーのワイド文字列マクロから自動生成されたプロパティ名定数
+/// AMF ヘッダーのマクロから生成した文字列定数
+///
+/// AMF のコンポーネント ID とプロパティ名を表す。定数値は `&str` であり、
+/// AMF へ渡す際にワイド文字列へ変換する。
 pub mod str {
     // 定数名は AMF ヘッダーのマクロ名をそのまま使うため、大文字だけの
     // 命名規則には従わない。
     #![expect(non_upper_case_globals)]
+    #![expect(missing_docs)]
     include!(concat!(env!("OUT_DIR"), "/properties.rs"));
 }
 
@@ -51,8 +57,16 @@ pub const AMF_DLL_NAME: &str = "libamfrt64.so.1";
 // ライブラリから取得できたことを前提に呼び出す関数ポインタの型のため、
 // Option でラップしない
 // ---------------------------------------------------------------------------
+/// `AMFInit` の関数ポインタ型
+///
+/// `version` には要求する AMF のバージョンを、`pp_factory` には
+/// `AMFFactory` のポインタを書き込む先のポインタを指定する。
 pub type AmfInitFn =
     unsafe extern "C" fn(version: amf_uint64, pp_factory: *mut *mut AMFFactory) -> AMF_RESULT;
+
+/// `AMFQueryVersion` の関数ポインタ型
+///
+/// `p_version` には AMF のバージョンを受け取るポインタを指定する。
 pub type AmfQueryVersionFn = unsafe extern "C" fn(p_version: *mut amf_uint64) -> AMF_RESULT;
 
 // ---------------------------------------------------------------------------

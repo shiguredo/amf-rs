@@ -324,7 +324,7 @@ encoder.reconfigure(ReconfigureParams {
 `reconfigure` で変更できる項目は codec ごとに異なる:
 
 - **H.264**: `framerate_num` / `framerate_den` / `target_kbps` / `max_kbps` / `qpi` / `qpp` / `qpb` / `gop_pic_size`
-- **H.265**: `framerate_num` / `framerate_den` / `target_kbps` / `max_kbps` / `qpi` / `qpp` (B フレーム用 QP プロパティが存在しないため `qpb` / `gop_pic_size` は無視)
+- **H.265**: `framerate_num` / `framerate_den` / `target_kbps` / `max_kbps` / `qpi` / `qpp` (B フレーム用 QP プロパティが存在せず GOP サイズも初期化時のみ設定できるため、`qpb` / `gop_pic_size` を指定するとエラー)
 - **AV1**: `framerate_num` / `framerate_den` / `target_kbps` / `max_kbps` / `qpi` / `qpp` / `qpb` / `gop_pic_size`
 
 `framerate_num` と `framerate_den` は必ず同時に指定する。片方だけ指定すると `Err` を返す。`None` の項目はそのまま維持される。

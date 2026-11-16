@@ -760,7 +760,6 @@ fn test_roundtrip_hevc_cqp() {
     );
     config.qpi = Some(26);
     config.qpp = Some(28);
-    config.qpb = Some(30);
     config.gop_pic_size = Some(10);
 
     roundtrip_colorbar(config, DecoderCodec::Hevc, 10, 25.0);
@@ -975,9 +974,9 @@ fn test_reconfigure_h264_runtime_change() {
     assert_eq!(decoded.len(), 10);
 }
 
-/// HEVC で非対応項目 qpb/gop_pic_size を指定しても失敗せず継続できることを確認する
+/// HEVC で未対応の qpb/gop_pic_size を reconfigure に指定するとエラーになることを確認する
 #[test]
-fn test_reconfigure_hevc_ignores_qpb_and_gop() {
+fn test_reconfigure_hevc_rejects_qpb_and_gop() {
     let mut config = EncoderConfig::new(
         CodecConfig::Hevc(HevcEncoderConfig {
             profile: Some(HevcProfile::Main),
@@ -990,34 +989,44 @@ fn test_reconfigure_hevc_ignores_qpb_and_gop() {
         RateControlMode::Cbr,
     );
     config.target_kbps = Some(1000);
-    let format = config.frame_format;
 
-    let context = create_context();
-    let result = Arc::new(Mutex::new(Vec::new()));
-    let r = result.clone();
-    let mut encoder = Encoder::new(
-        context.clone(),
-        config,
-        FnEncodeHandler::<()>::new(move |result| {
-            r.lock()
-                .expect("エンコード結果を格納する Mutex のロックに失敗")
-                .push(result.expect("エンコード結果の取得に失敗"));
-        }),
-    )
-    .expect("エンコーダーの作成に失敗");
-    let options = EncodeOptions {
-        frame_type: frame_type::UNKNOWN,
-    };
+    let mut encoder = Encoder::new(create_context(), config, FnEncodeHandler::<()>::new(|_| {}))
+        .expect("エンコーダーの作成に失敗");
 
-    for i in 0..4 {
-        let frame = generate_dummy_nv12(320, 240, i);
-        let surface = encoder.alloc_surface().expect("Surface の確保に失敗");
-        copy_frame_to_surface(&surface, &frame, format, 320, 240);
-        encoder
-            .encode(surface, &options, ())
-            .expect("エンコードに失敗");
-    }
+    let err = encoder
+        .reconfigure(ReconfigureParams {
+            qpb: Some(28),
+            ..ReconfigureParams::default()
+        })
+        .expect_err("HEVC の qpb を再設定できてしまった");
+    assert_eq!(
+        err.status(),
+        None,
+        "AMF のエラーではなく Encoder::reconfigure のエラーであるべき: {err}"
+    );
+    assert!(
+        err.to_string().contains("qpb is not supported for HEVC"),
+        "想定したエラーメッセージではない: {err}"
+    );
 
+    let err = encoder
+        .reconfigure(ReconfigureParams {
+            gop_pic_size: Some(20),
+            ..ReconfigureParams::default()
+        })
+        .expect_err("HEVC の gop_pic_size を再設定できてしまった");
+    assert_eq!(
+        err.status(),
+        None,
+        "AMF のエラーではなく Encoder::reconfigure のエラーであるべき: {err}"
+    );
+    assert!(
+        err.to_string()
+            .contains("gop_pic_size cannot be changed for HEVC"),
+        "想定したエラーメッセージではない: {err}"
+    );
+
+    // 未対応項目を含まない再設定は成功する
     encoder
         .reconfigure(ReconfigureParams {
             framerate_num: Some(24),
@@ -1025,34 +1034,10 @@ fn test_reconfigure_hevc_ignores_qpb_and_gop() {
             target_kbps: Some(1200),
             qpi: Some(24),
             qpp: Some(26),
-            qpb: Some(28),
-            gop_pic_size: Some(20),
             ..ReconfigureParams::default()
         })
-        .expect("reconfigure に失敗");
-
-    for i in 4..8 {
-        let frame = generate_dummy_nv12(320, 240, i);
-        let surface = encoder.alloc_surface().expect("Surface の確保に失敗");
-        copy_frame_to_surface(&surface, &frame, format, 320, 240);
-        encoder
-            .encode(surface, &options, ())
-            .expect("エンコードに失敗");
-    }
-
+        .expect("対応項目だけの reconfigure に失敗");
     encoder.finish().expect("finish に失敗");
-    drop(encoder);
-    let encoded_frames = Arc::try_unwrap(result)
-        .expect("Arc の参照が残っている")
-        .into_inner()
-        .expect("エンコード結果を格納する Mutex がポイズンされている");
-    assert!(
-        !encoded_frames.is_empty(),
-        "エンコード済みフレームが生成されなかった"
-    );
-
-    let decoded = decode(&context, DecoderCodec::Hevc, encoded_frames);
-    assert_eq!(decoded.len(), 8);
 }
 
 /// AV1 で qpb と gop_pic_size の再設定を適用して継続できることを確認する

@@ -406,8 +406,7 @@ impl Surface {
     /// 指定プレーンを取得する
     ///
     /// # Errors
-    /// `AMFPlane` を取得できない場合、または返された `AMFPlane` の必須関数が利用できない
-    /// 場合にエラーを返す。
+    /// 指定したプレーンを取得できない場合にエラーを返す。
     pub fn get_plane(&self, plane_type: sys::AMF_PLANE_TYPE) -> Result<Plane<'_>, Error> {
         let _guard = self.state.lock();
         let plane = unsafe { (self.f.get_plane)(self.ptr, plane_type) };
@@ -420,8 +419,7 @@ impl Surface {
     /// インデックスでプレーンを取得する
     ///
     /// # Errors
-    /// `index` に対応する `AMFPlane` を取得できない場合、または返された `AMFPlane` の
-    /// 必須関数が利用できない場合にエラーを返す。
+    /// `index` に対応するプレーンを取得できない場合にエラーを返す。
     pub fn get_plane_at(&self, index: sys::amf_size) -> Result<Plane<'_>, Error> {
         let _guard = self.state.lock();
         let plane = unsafe { (self.f.get_plane_at)(self.ptr, index) };
@@ -434,8 +432,7 @@ impl Surface {
     /// メモリ種別を変換する
     ///
     /// # Errors
-    /// self に対する [Plane] が生存している場合はエラーを返す。
-    /// AMF の変換が失敗した場合はエラーを返す。
+    /// [`Plane`] が生存している場合、または AMF の変換に失敗した場合にエラーを返す。
     pub fn convert(&self, type_: sys::AMF_MEMORY_TYPE) -> Result<(), Error> {
         let _guard = self.state.lock();
         if self.has_planes() {
@@ -739,7 +736,7 @@ impl<'a> Plane<'a> {
     /// 呼ばないこと。
     ///
     /// # Errors
-    /// `AMFPlane` の必須関数が利用できない場合にエラーを返す。
+    /// `ptr` から `Plane` を作成できない場合にエラーを返す。
     pub unsafe fn from_raw(ptr: *mut sys::AMFPlane, surface: &'a Surface) -> Result<Self, Error> {
         unsafe { Self::from_raw_with_acquire(ptr, false, surface) }
     }
@@ -752,7 +749,7 @@ impl<'a> Plane<'a> {
     /// 並行して呼ばないこと。
     ///
     /// # Errors
-    /// `AMFPlane` の必須関数が利用できない場合にエラーを返す。
+    /// `ptr` から `Plane` を作成できない場合にエラーを返す。
     pub unsafe fn from_raw_acquired(
         ptr: *mut sys::AMFPlane,
         surface: &'a Surface,
@@ -938,7 +935,7 @@ impl Context {
     /// Surface を確保する
     ///
     /// # Errors
-    /// Surface の確保に失敗した場合、または返されたポインタが null の場合にエラーを返す。
+    /// Surface を確保できない場合にエラーを返す。
     pub fn alloc_surface(
         &self,
         type_: sys::AMF_MEMORY_TYPE,
@@ -971,7 +968,7 @@ impl Context {
     /// Buffer を確保する
     ///
     /// # Errors
-    /// Buffer の確保に失敗した場合、または返されたポインタが null の場合にエラーを返す。
+    /// Buffer を確保できない場合にエラーを返す。
     pub fn alloc_buffer(
         &self,
         type_: sys::AMF_MEMORY_TYPE,
