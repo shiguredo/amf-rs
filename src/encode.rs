@@ -177,71 +177,127 @@ pub enum PictureType {
 /// H.264 プロファイル
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum H264Profile {
+    /// Baseline プロファイル
     Baseline,
+    /// Main プロファイル
     Main,
+    /// High プロファイル
     High,
+    /// Constrained Baseline プロファイル
     ConstrainedBaseline,
+    /// Constrained High プロファイル
     ConstrainedHigh,
 }
 
 /// H.264 エンコーダー固有設定
 #[derive(Debug, Clone)]
 pub struct H264EncoderConfig {
+    /// プロファイル
     pub profile: Option<H264Profile>,
 }
 
 /// HEVC プロファイル
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HevcProfile {
+    /// Main プロファイル
     Main,
+    /// Main 10 プロファイル
     Main10,
 }
 
 /// HEVC エンコーダー固有設定
 #[derive(Debug, Clone)]
 pub struct HevcEncoderConfig {
+    /// プロファイル
+    ///
+    /// 10bit の入力フォーマットでは `Some(HevcProfile::Main10)` を指定する必要があり、
+    /// `Some(HevcProfile::Main)` や `None` を指定した場合は [`Encoder::new`] が
+    /// エラーを返す。
     pub profile: Option<HevcProfile>,
 }
 
 /// AV1 プロファイル
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Av1Profile {
+    /// Main プロファイル
     Main,
 }
 
 /// AV1 エンコーダー固有設定
 #[derive(Debug, Clone)]
 pub struct Av1EncoderConfig {
+    /// プロファイル
     pub profile: Option<Av1Profile>,
 }
 
-/// コーデック設定
+/// コーデックとコーデック固有設定
+///
+/// [`EncoderConfig::codec`] に指定する。コーデック固有設定のプロファイルが
+/// `None` の場合は AMF の既定のプロファイルを使う。
 #[derive(Debug, Clone)]
 pub enum CodecConfig {
+    /// H.264/AVC
     H264(H264EncoderConfig),
+    /// H.265/HEVC
     Hevc(HevcEncoderConfig),
+    /// AV1
     Av1(Av1EncoderConfig),
 }
 
 /// エンコーダー設定
+///
+/// `width` と `height` は 0 でない偶数で、`i32::MAX` 以下を指定する。
+/// `framerate_num` と `framerate_den` は 0 でない値で、フレームレートを表す。
+/// `Option` のフィールドは `None` のとき AMF の既定値を使う。
+/// QP の有効範囲は H.264 と HEVC が 0-51、AV1 が 1-255 である。
 #[derive(Debug, Clone)]
 pub struct EncoderConfig {
+    /// 使用するコーデック
     pub codec: CodecConfig,
+    /// エンコードするフレームの幅 (ピクセル単位)
     pub width: u32,
+    /// エンコードするフレームの高さ (ピクセル単位)
     pub height: u32,
+    /// 入力フレームのフォーマット
+    ///
+    /// H.264 は 8bit のフォーマットだけを使える。HEVC と AV1 は 8bit と 10bit の
+    /// フォーマットを使えるが、利用できるかは GPU と AMF の実装に依存する。
+    /// 12bit と 16bit のフォーマット (P012 / P016 / Y416) は初期化に失敗する。
     pub frame_format: FrameFormat,
+    /// フレームレートの分子
     pub framerate_num: u32,
+    /// フレームレートの分母
     pub framerate_den: u32,
+    /// レート制御モード
+    ///
+    /// `target_kbps` と `max_kbps` の使われ方はこのモードによって変わる。
     pub rate_control_mode: RateControlMode,
+    /// 目標ビットレート (kbps 単位)
+    ///
+    /// CBR と VBR 系のレート制御で使う。
     pub target_kbps: Option<u32>,
+    /// ピークビットレート (kbps 単位)
+    ///
+    /// VBR 系のレート制御で使う。
     pub max_kbps: Option<u32>,
+    /// I フレームの QP
     pub qpi: Option<u16>,
+    /// P フレームの QP
     pub qpp: Option<u16>,
+    /// B フレームの QP
+    ///
+    /// HEVC では指定できない ([`Encoder::new`] がエラーを返す)。
     pub qpb: Option<u16>,
+    /// GOP サイズ (フレーム単位)
+    ///
+    /// H.264 では IDR フレームの間隔、HEVC と AV1 ではキーフレームの間隔になる。
     pub gop_pic_size: Option<u16>,
 }
 
 impl EncoderConfig {
+    /// エンコーダー設定を作成する
+    ///
+    /// 必須の項目を指定し、`Option` のフィールドは `None` で初期化する。
     pub fn new(
         codec: CodecConfig,
         width: u32,
@@ -272,22 +328,38 @@ impl EncoderConfig {
 /// エンコードオプション（フレームごと）
 #[derive(Debug, Clone, Copy, Default)]
 pub struct EncodeOptions {
-    /// 強制するフレームタイプ (0 = 自動)
+    /// 強制するフレームタイプ
+    ///
+    /// [`frame_type`] のビットフラグを指定する。0 の場合はフレームタイプを
+    /// 強制しない。
     pub frame_type: u16,
 }
 
 /// エンコーダー再設定パラメータ
 ///
-/// `None` の項目は変更しない。
+/// `None` の項目は変更しない。各フィールドの意味は [`EncoderConfig`] の対応する
+/// フィールドと同じである。`framerate_num` と `framerate_den` は 0 でない値で、
+/// 同時に指定する。HEVC では `qpb` と `gop_pic_size` を指定すると
+/// [`Encoder::reconfigure`] がエラーを返す。
 #[derive(Debug, Clone, Default)]
 pub struct ReconfigureParams {
+    /// フレームレートの分子
     pub framerate_num: Option<u32>,
+    /// フレームレートの分母
     pub framerate_den: Option<u32>,
+    /// 目標ビットレート (kbps 単位)
     pub target_kbps: Option<u32>,
+    /// ピークビットレート (kbps 単位)
     pub max_kbps: Option<u32>,
+    /// I フレームの QP
     pub qpi: Option<u16>,
+    /// P フレームの QP
     pub qpp: Option<u16>,
+    /// B フレームの QP
     pub qpb: Option<u16>,
+    /// GOP サイズ (フレーム単位)
+    ///
+    /// H.264 では IDR フレームの間隔、AV1 ではキーフレームの間隔になる。
     pub gop_pic_size: Option<u16>,
 }
 
@@ -323,16 +395,24 @@ impl<T> EncodedFrame<T> {
 
 // ---------------------------------------------------------------------------
 // frame_type 定数
-//
-// フレームタイプをビットフラグで指定する定数。
-// Encoder::encode は IDR フラグだけをキーフレームの強制として扱う。
 // ---------------------------------------------------------------------------
+/// 強制するフレームタイプを表すビットフラグ
+///
+/// [`EncodeOptions::frame_type`] に指定する。現在有効なのは [`IDR`](frame_type::IDR)
+/// だけで、[`crate::Encoder::encode`] はこのフラグが立っている場合にキーフレームを
+/// 強制する。ほかのフラグは [`crate::Encoder::encode`] の挙動を変えない。
 pub mod frame_type {
+    /// フレームタイプを強制しない
     pub const UNKNOWN: u16 = 0;
+    /// I フレーム
     pub const I: u16 = 0x0001;
+    /// P フレーム
     pub const P: u16 = 0x0002;
+    /// B フレーム
     pub const B: u16 = 0x0004;
+    /// IDR フレーム
     pub const IDR: u16 = 0x0020;
+    /// 参照フレーム
     pub const REF: u16 = 0x0040;
 }
 
@@ -358,6 +438,10 @@ pub struct FnEncodeHandler<T, E = crate::Error> {
 }
 
 impl<T, E> FnEncodeHandler<T, E> {
+    /// クロージャからハンドラーを作成する
+    ///
+    /// `f` は [`EncodeHandler::on_encoded`] と同じ引数で、エンコード完了時に
+    /// ワーカースレッドから呼ばれる。
     pub fn new<F>(f: F) -> Self
     where
         F: FnMut(Result<EncodedFrame<T>, E>) + Send + 'static,
@@ -429,19 +513,15 @@ impl<H: EncodeHandler> Encoder<H> {
     ///
     /// `handler` はエンコード完了時にワーカースレッドから呼び出される。
     ///
-    /// # 入力フォーマットとビット深度
+    /// # 入力フォーマットとプロファイル
     ///
-    /// 入力フォーマットのビット深度は [`FrameFormat`] に従う。
-    /// H.264 は 8bit 入力のみ、HEVC と AV1 は 8bit と 10bit の入力に対応する。
-    /// HEVC のプロファイルは [`HevcProfile`] で指定する。
-    ///
-    /// 入力フォーマットとプロファイルの組み合わせを利用できるかは GPU と AMF の
-    /// 実装に依存し、利用できない場合は初期化に失敗する。
+    /// 入力フォーマットのビット深度と利用可否は [`EncoderConfig::frame_format`]、
+    /// HEVC のプロファイルの制約は [`HevcEncoderConfig::profile`] を参照すること。
     ///
     /// # Errors
     ///
-    /// 解像度・フレームレートが不正な場合、AMF のコンポーネント作成または初期化に
-    /// 失敗した場合にエラーを返す。
+    /// `config` の値が不正な場合、または AMF のエンコーダーを初期化できない場合に
+    /// エラーを返す。GPU と AMF の実装が指定した設定に対応していない場合も含む。
     pub fn new(context: Context, config: EncoderConfig, handler: H) -> Result<Self, Error> {
         // 入力パラメータのバリデーション
         if config.width == 0 || config.height == 0 {
@@ -478,6 +558,14 @@ impl<H: EncodeHandler> Encoder<H> {
                     "invalid framerate: {}/{} (must be non-zero)",
                     config.framerate_num, config.framerate_den
                 ),
+            ));
+        }
+
+        // HEVC には B フレーム用の QP プロパティがないため、qpb は指定できない。
+        if matches!(&config.codec, CodecConfig::Hevc(_)) && config.qpb.is_some() {
+            return Err(Error::new_custom(
+                "Encoder::new",
+                "qpb is not supported for HEVC",
             ));
         }
 
@@ -590,7 +678,30 @@ impl<H: EncodeHandler> Encoder<H> {
     /// エンコーダーの動的プロパティを再設定する
     ///
     /// 変更は次回 `SubmitInput` 前に AMF エンコーダーへ反映される。
+    ///
+    /// # Errors
+    ///
+    /// `params` の値が不正な場合、または AMF のプロパティを設定できない場合に
+    /// エラーを返す。コーデックが対応していない項目を指定した場合も含む。
     pub fn reconfigure(&mut self, params: ReconfigureParams) -> Result<(), Error> {
+        // HEVC には B フレーム用の QP プロパティがない。また AMF の HEVC では
+        // GOP サイズが初期化前の静的プロパティであり、H.264 の IDRPeriod や
+        // AV1 の GOPSize と異なり初期化後には変更できない。再設定では指定できない。
+        if let CodecConfig::Hevc(_) = &self.codec_config {
+            if params.qpb.is_some() {
+                return Err(Error::new_custom(
+                    "Encoder::reconfigure",
+                    "qpb is not supported for HEVC",
+                ));
+            }
+            if params.gop_pic_size.is_some() {
+                return Err(Error::new_custom(
+                    "Encoder::reconfigure",
+                    "gop_pic_size cannot be changed for HEVC",
+                ));
+            }
+        }
+
         let framerate = Self::resolve_reconfigure_framerate(&params)?;
         let prop = self.component.property_storage()?;
 
@@ -929,8 +1040,7 @@ impl<H: EncodeHandler> Encoder<H> {
             max_kbps: config.max_kbps,
             qpi: config.qpi,
             qpp: config.qpp,
-            // AV1 の初期設定では qpb は設定しない
-            qpb: None,
+            qpb: config.qpb,
             gop_pic_size: config.gop_pic_size,
             ..ReconfigureParams::default()
         };

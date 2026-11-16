@@ -159,7 +159,7 @@ for frame in frame_rx.try_iter() {
 - H.265: `framerate_num` / `framerate_den` / `target_kbps` / `max_kbps` / `qpi` / `qpp`
 - AV1: `framerate_num` / `framerate_den` / `target_kbps` / `max_kbps` / `qpi` / `qpp` / `qpb` / `gop_pic_size`
 
-`framerate_num` と `framerate_den` は必ず同時に指定してください。
+H.265 で `qpb` / `gop_pic_size` を指定するとエラーになります。`framerate_num` と `framerate_den` は必ず同時に指定してください。
 
 ### デコード
 

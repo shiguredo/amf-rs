@@ -3,6 +3,69 @@
 //! AMD GPU を使ったハードウェアアクセラレーションによるビデオエンコード/デコードを提供する。
 //! AMF ランタイムライブラリ (libamfrt64.so.1) はドライバーに同梱されており、
 //! dlopen で動的にロードされる。
+//!
+//! # エンコードの例
+//!
+//! ```no_run
+//! use std::sync::mpsc;
+//!
+//! use shiguredo_amf::{
+//!     AmfLibrary, CodecConfig, EncodeOptions, EncodedFrame, Encoder, EncoderConfig,
+//!     FnEncodeHandler, FrameFormat, H264EncoderConfig, RateControlMode, frame_type,
+//! };
+//!
+//! let context = AmfLibrary::instance()
+//!     .create_context()
+//!     .expect("failed to create AMF context");
+//!
+//! let mut config = EncoderConfig::new(
+//!     CodecConfig::H264(H264EncoderConfig { profile: None }),
+//!     1920,
+//!     1080,
+//!     FrameFormat::Nv12,
+//!     30,
+//!     1,
+//!     RateControlMode::Cbr,
+//! );
+//! config.target_kbps = Some(5_000);
+//!
+//! // エンコード結果はワーカースレッドからチャネルで受け取る
+//! let (tx, rx) = mpsc::channel();
+//! let mut encoder = Encoder::new(
+//!     context,
+//!     config,
+//!     FnEncodeHandler::new(
+//!         move |result: Result<EncodedFrame<()>, shiguredo_amf::Error>| {
+//!             tx.send(result).expect("failed to send encoded frame");
+//!         },
+//!     ),
+//! )
+//! .expect("failed to create encoder");
+//!
+//! // Surface を確保し、プレーンにフレームデータを書き込む (書き込み処理は省略)
+//! let surface = encoder.alloc_surface().expect("failed to allocate surface");
+//! // ... ここで surface にフレームデータを書き込む ...
+//!
+//! encoder
+//!     .encode(
+//!         surface,
+//!         &EncodeOptions {
+//!             frame_type: frame_type::IDR,
+//!         },
+//!         (),
+//!     )
+//!     .expect("failed to encode frame");
+//!
+//! // 残りのフレームを出力させ、ハンドラーへの通知が完了するまで待つ
+//! encoder.finish().expect("failed to finish encoding");
+//!
+//! for result in rx.try_iter() {
+//!     let frame = result.expect("failed to receive encoded frame");
+//!     println!("encoded {} bytes", frame.buffer().get_size());
+//! }
+//! ```
+
+#![warn(missing_docs)]
 
 pub mod amf;
 mod codec_info;
@@ -84,6 +147,10 @@ impl AmfLibrary {
         }
     }
 
+    /// プロセス全体で共有する AMF ライブラリインスタンスを返す
+    ///
+    /// AMF ランタイムライブラリは、[`AmfLibrary::create_context`] や
+    /// [`AmfLibrary::query_version`] の初回呼び出し時にロードされる。
     pub fn instance() -> &'static AmfLibrary {
         &AMF_LIBRARY
     }
@@ -158,8 +225,7 @@ impl AmfLibrary {
     /// 新しい AMFContext を作成し、既定の Vulkan デバイスで初期化する
     ///
     /// # Errors
-    /// AMF ランタイムのロード、Context の作成、または Vulkan デバイスの初期化に
-    /// 失敗した場合にエラーを返す。
+    /// AMF ランタイムを初期化できない場合にエラーを返す。
     pub fn create_context(&self) -> Result<Context, Error> {
         // Context::init_vulkan も state のロックを取得するため、Context を作成したら
         // ロックを解放してから Vulkan デバイスを初期化する。

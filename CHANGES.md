@@ -27,6 +27,10 @@
   - `Encoder::new` / `Decoder::new` が `Context` を受け取るように変更する
   - `amf` の各オブジェクトにコンテキストを取得する `context` 関数を追加する
   - @melpon
+- [CHANGE] HEVC で未対応の `qpb` / `gop_pic_size` を指定した場合はエラーを返すように変更する
+  - `EncoderConfig` の `qpb` は `Encoder::new` がエラーを返す
+  - `ReconfigureParams` の `qpb` / `gop_pic_size` は `Encoder::reconfigure` がエラーを返す
+  - @melpon
 - [ADD] `amf::Buffer::set_pts` と `amf::Surface::get_pts` を追加する
   - @melpon
 - [FIX] `Decoder::decode` の `user_data` が B フレームを含むストリームで誤ったフレームに付く問題を修正する
@@ -51,6 +55,8 @@
   - `QueryOutput` の終端エラーをハンドラーへ通知し、ワーカーを終了する
   - エンコーダーの `finish()` で、対応する入力がない出力と、出力が得られなかった入力を通知する
   - エンコーダーの `finish()` の 5 秒タイムアウトを削除し、ワーカーの完了まで待つ
+  - @melpon
+- [FIX] AV1 の `qpb` が初期化時に反映されない問題を修正する
   - @melpon
 
 ### misc

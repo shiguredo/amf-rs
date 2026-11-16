@@ -24,14 +24,20 @@ use crate::sys::{
 /// デコーダーのコーデック種別
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DecoderCodec {
+    /// H.264/AVC
     H264,
+    /// H.265/HEVC
     Hevc,
+    /// AV1
     Av1,
 }
 
 /// デコーダー設定
 #[derive(Debug, Clone)]
 pub struct DecoderConfig {
+    /// デコードするコーデック
+    ///
+    /// 出力フォーマットは NV12 に固定される。
     pub codec: DecoderCodec,
 }
 
@@ -81,6 +87,10 @@ pub struct FnDecodeHandler<T, E = crate::Error> {
 }
 
 impl<T, E> FnDecodeHandler<T, E> {
+    /// クロージャからハンドラーを作成する
+    ///
+    /// `f` は [`DecodeHandler::on_decoded`] と同じ引数で、デコード完了時に
+    /// ワーカースレッドから呼ばれる。
     pub fn new<F>(f: F) -> Self
     where
         F: FnMut(Result<DecodedFrame<T>, E>) + Send + 'static,
@@ -149,6 +159,11 @@ impl<H: DecodeHandler> Decoder<H> {
     /// デコーダーを作成する
     ///
     /// `handler` はデコード完了時にワーカースレッドから呼び出される。
+    ///
+    /// # Errors
+    ///
+    /// AMF のデコーダーを初期化できない場合にエラーを返す。GPU と AMF の実装が
+    /// 指定したコーデックに対応していない場合も含む。
     pub fn new(context: Context, config: DecoderConfig, handler: H) -> Result<Self, Error> {
         let lib = AmfLibrary::instance();
 

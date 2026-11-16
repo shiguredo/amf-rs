@@ -1,7 +1,7 @@
 # 公開 API の `///` ドキュメントを追加する
 
 - Created: 2026-11-10
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-11-16
 - Branch: feature/fix-public-api-docs
 - Polished: {YYYY-MM-DD}
 - Reporter: @melpon
@@ -41,3 +41,15 @@ shiguredo-rust の規約は、公開 API の型・関数・フィールド・var
 - doc のリンク切れ (`[`encode()`]` / `[`decode()`]`) が解消されている。
 - `cargo test --doc` が通る。
 - `CHANGES.md` は doc のみの変更のため更新しない。
+
+## 解決方法
+
+- `src/lib.rs` に `#![warn(missing_docs)]` を追加した。`#[doc(hidden)]` の `ffi` 経由でのみ公開する `sys` の生成コード (`metadata` / `bindings` / `str`) は、項目ごとの doc を持たないため `#![expect(missing_docs)]` で対象外にした。
+- `H264Profile` / `HevcProfile` / `Av1Profile`、`CodecConfig`、`DecoderCodec` の全 variant と、各エンコーダー設定の `profile` に doc を追加した。
+- `EncoderConfig` / `ReconfigureParams` の全フィールドに doc を追加した。共通の制約は型の doc にまとめ、フィールドには値の意味と単位を書いた。
+- `frame_type` モジュールと 6 定数、`EncodeOptions::frame_type` に doc を追加し、IDR だけが有効であることを明記した。
+- `EncoderConfig::new`、`FnEncodeHandler::new`、`FnDecodeHandler::new`、`DecoderConfig::codec`、`AmfLibrary::instance`、`AmfInitFn` / `AmfQueryVersionFn` に doc を追加した。
+- `# Errors` は実装の検証分岐を列挙せず、設定不正・バックエンド非対応・バックエンド呼び出し失敗などのカテゴリ単位の契約に整理した。
+- ドキュメント整備中に確認した `qpb` の扱いを修正した。HEVC の `qpb` は `Encoder::new` / `Encoder::reconfigure` でエラーにし、AV1 の `qpb` は初期化時にも設定する。HEVC の `ReconfigureParams::gop_pic_size` も `Encoder::reconfigure` でエラーにする。
+- クレート冒頭に `no_run` のエンコード例を追加し、`cargo test --doc` でコンパイルを検証するようにした。振る舞いの変更を含むため、README / SKILL.md / CHANGES.md も実装に合わせて更新した。
+- `cargo fmt --all -- --check`、`cargo clippy --workspace --all-targets -- -D warnings`、`RUSTDOCFLAGS="-D warnings" cargo doc --no-deps`、`cargo test --doc`、`cargo test --workspace` が AMD GPU 環境で通ることを確認した。
