@@ -231,17 +231,28 @@ B フレームを含むストリームでは出力 `Surface` の PTS も入力�
 ```rust
 use shiguredo_amf::supported_codecs;
 
-let codecs = supported_codecs();
+let codecs = supported_codecs().expect("failed to query codec support");
 for info in &codecs {
     println!("{:?}:", info.codec);
-    println!("  decoding: supported={}, hw_accel={}",
-        info.decoding.supported, info.decoding.hardware_accelerated);
-    println!("  encoding: supported={}, hw_accel={}",
-        info.encoding.supported, info.encoding.hardware_accelerated);
+    match &info.decoding {
+        Some(decoding) => println!("  decoding: acceleration={:?}", decoding.acceleration),
+        None => println!("  decoding: not supported"),
+    }
+    match &info.encoding {
+        Some(encoding) => println!(
+            "  encoding: acceleration={:?}, profile={:?}, level={:?}, frame_reordering={:?}",
+            encoding.acceleration,
+            encoding.max_profile,
+            encoding.max_level,
+            encoding.supports_frame_reordering
+        ),
+        None => println!("  encoding: not supported"),
+    }
 }
 ```
 
-AMF ランタイムがロードできない環境では、全コーデックが非対応として返されます。
+`supported_codecs()` は AMF ランタイムを初期化できない場合に `Err` を返します。
+個々のコーデックの非対応は `decoding` / `encoding` の `None` で表されます。
 
 CLI で確認する場合は [amf-check](#amf-check) を利用してください。
 

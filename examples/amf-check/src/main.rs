@@ -6,8 +6,8 @@
 use shiguredo_amf::amf::Context;
 use shiguredo_amf::{
     AmfLibrary, Av1EncoderConfig, BUILD_VERSION, CodecConfig, Decoder, DecoderCodec, DecoderConfig,
-    Encoder, EncoderConfig, EncodingProfiles, FnDecodeHandler, FnEncodeHandler, FrameFormat,
-    H264EncoderConfig, HevcEncoderConfig, RateControlMode, VideoCodecType, supported_codecs,
+    Encoder, EncoderConfig, FnDecodeHandler, FnEncodeHandler, FrameFormat, H264EncoderConfig,
+    HevcEncoderConfig, RateControlMode, VideoCodecType, VideoProfile, supported_codecs,
 };
 
 #[derive(Debug)]
@@ -84,24 +84,32 @@ fn codec_name(codec: VideoCodecType) -> &'static str {
     }
 }
 
-fn format_profiles(profiles: &EncodingProfiles) -> String {
-    match profiles {
-        EncodingProfiles::H264(list) => list
-            .iter()
-            .map(|p| format!("{p:?}"))
-            .collect::<Vec<_>>()
-            .join(", "),
-        EncodingProfiles::Hevc(list) => list
-            .iter()
-            .map(|p| format!("{p:?}"))
-            .collect::<Vec<_>>()
-            .join(", "),
-        EncodingProfiles::Av1(list) => list
-            .iter()
-            .map(|p| format!("{p:?}"))
-            .collect::<Vec<_>>()
-            .join(", "),
-        EncodingProfiles::None => "-".to_string(),
+fn format_profile(profile: Option<VideoProfile>) -> String {
+    match profile {
+        Some(profile) => format!("{profile:?}"),
+        None => "-".to_string(),
+    }
+}
+
+fn format_acceleration(acceleration: Option<shiguredo_amf::AccelerationType>) -> String {
+    match acceleration {
+        Some(acceleration) => format!("{acceleration:?}"),
+        None => "-".to_string(),
+    }
+}
+
+fn format_io_capabilities(caps: Option<&shiguredo_amf::IoCapabilities>) -> String {
+    match caps {
+        Some(caps) => format!(
+            "{}..{}x{}..{} formats={} memory_types={}",
+            caps.min_width,
+            caps.max_width,
+            caps.min_height,
+            caps.max_height,
+            caps.formats.len(),
+            caps.memory_types.len()
+        ),
+        None => "-".to_string(),
     }
 }
 
@@ -127,23 +135,45 @@ fn check_runtime() -> bool {
 fn print_codec_support() {
     println!();
     println!("=== Codec Support (supported_codecs) ===");
-    for info in supported_codecs() {
+    let codecs = match supported_codecs() {
+        Ok(codecs) => codecs,
+        Err(e) => {
+            println!("supported_codecs failed: {e}");
+            return;
+        }
+    };
+    for info in codecs {
         let name = codec_name(info.codec);
         println!("{name}:");
-        println!(
-            "  decoding: supported={}, hw_accel={}",
-            info.decoding.supported, info.decoding.hardware_accelerated
-        );
-        println!(
-            "  encoding: supported={}, hw_accel={}",
-            info.encoding.supported, info.encoding.hardware_accelerated
-        );
-        if info.encoding.supported {
-            println!(
-                "    frame_reordering={}, multi_pass={}",
-                info.encoding.supports_frame_reordering, info.encoding.supports_multi_pass
-            );
-            println!("    profiles: {}", format_profiles(&info.encoding.profiles));
+        match &info.decoding {
+            Some(decoding) => {
+                println!(
+                    "  decoding: acceleration={} input={} output={} properties={}",
+                    format_acceleration(decoding.acceleration),
+                    format_io_capabilities(decoding.input.as_ref()),
+                    format_io_capabilities(decoding.output.as_ref()),
+                    decoding.properties.len()
+                );
+            }
+            None => println!("  decoding: not supported"),
+        }
+        match &info.encoding {
+            Some(encoding) => {
+                println!(
+                    "  encoding: acceleration={} profile={} level={:?} frame_reordering={:?}",
+                    format_acceleration(encoding.acceleration),
+                    format_profile(encoding.max_profile),
+                    encoding.max_level,
+                    encoding.supports_frame_reordering
+                );
+                println!(
+                    "    input={} output={} properties={}",
+                    format_io_capabilities(encoding.input.as_ref()),
+                    format_io_capabilities(encoding.output.as_ref()),
+                    encoding.properties.len()
+                );
+            }
+            None => println!("  encoding: not supported"),
         }
     }
 }
@@ -219,8 +249,15 @@ fn check_component_init(width: u32, height: u32) -> bool {
     };
 
     let mut ok = true;
-    for info in supported_codecs() {
-        if info.encoding.supported {
+    let codecs = match supported_codecs() {
+        Ok(codecs) => codecs,
+        Err(e) => {
+            println!("[context] supported_codecs ... NG ({e})");
+            return false;
+        }
+    };
+    for info in codecs {
+        if info.encoding.is_some() {
             if !check_encoder_init(&context, info.codec, width, height) {
                 ok = false;
             }
@@ -231,7 +268,7 @@ fn check_component_init(width: u32, height: u32) -> bool {
             );
         }
 
-        if info.decoding.supported {
+        if info.decoding.is_some() {
             if !check_decoder_init(&context, info.codec) {
                 ok = false;
             }

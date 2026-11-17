@@ -52,7 +52,7 @@ AMF が返した値を Rust の型に無理やり押し込めない。`AMFCaps` 
   - `formats()`（`AMF_SURFACE_FORMAT` と native フラグ）
   - `memory_types()`（`AMF_MEMORY_TYPE` と native フラグ）
   - `interlaced()`
-- `AMFIOCaps` が公開するアライメントは `GetVertAlign` の縦方向だけである。したがって `IoCaps.vertical_alignment` は `AMFIOCaps::GetVertAlign` の値（行数の倍数制約）を表し、横方向のアライメントは `IoCaps` には含めない。
+- `AMFIOCaps` が公開するアライメントは `GetVertAlign` の縦方向だけである。したがって `IoCapabilities.vertical_alignment` は `AMFIOCaps::GetVertAlign` の値（行数の倍数制約）を表し、横方向のアライメントは `IoCapabilities` には含めない。
 - `GetPropertyAt` は `AMFVariantCopy` で値をコピーするため、`STRING` / `WSTRING` は AMF が確保した領域を `free` し、`INTERFACE` は `Release` する。Linux では AMF の variant 文字列が `malloc` で確保されるため `free` で解放できる。
 - `GetPropertyAt`、`GetFormatAt`、`GetMemoryTypeAt` のいずれかが途中で失敗した場合は、その `Caps` / `IoCaps` の取得全体をエラーにする。取得できた分だけを返して情報を黙って落とさない。
 - `GetCaps` が返した `AMFCaps` はコンポーネントを `Terminate` する前に破棄する。
@@ -116,10 +116,10 @@ AMF が返した値を Rust の型に無理やり押し込めない。`AMFCaps` 
 
   `DX9` / `DX11` / `DX12` / `GRALLOC` / `COMPUTE_FOR_DX9` / `COMPUTE_FOR_DX11` はこのクレートでは使わないため `Unknown(raw)` にする。`AMF_MEMORY_UNKNOWN` (0) も `Unknown(0)` である。
 
-- `IoCaps` を追加する。AMF が返した順序を維持する。
+- `IoCapabilities` を追加する。AMF が返した順序を維持する。
 
   ```rust
-  pub struct IoCaps {
+  pub struct IoCapabilities {
       pub min_width: i32,
       pub max_width: i32,
       pub min_height: i32,
@@ -185,8 +185,8 @@ AMF が返した値を Rust の型に無理やり押し込めない。`AMFCaps` 
 
   pub struct DecodingInfo {
       pub acceleration: Option<AccelerationType>,
-      pub input: Option<IoCaps>,
-      pub output: Option<IoCaps>,
+      pub input: Option<IoCapabilities>,
+      pub output: Option<IoCapabilities>,
       pub properties: Vec<Property>,
   }
 
@@ -195,8 +195,8 @@ AMF が返した値を Rust の型に無理やり押し込めない。`AMFCaps` 
       pub max_profile: Option<VideoProfile>,
       pub max_level: Option<i64>,
       pub supports_frame_reordering: Option<bool>,
-      pub input: Option<IoCaps>,
-      pub output: Option<IoCaps>,
+      pub input: Option<IoCapabilities>,
+      pub output: Option<IoCapabilities>,
       pub properties: Vec<Property>,
   }
   ```
@@ -210,7 +210,6 @@ AMF が返した値を Rust の型に無理やり押し込めない。`AMFCaps` 
 ### `supported_codecs`
 
 - 戻り値を `Result<Vec<CodecInfo>, Error>` に変更する。AMF ランタイムのロードまたは `Context` の作成に失敗した場合は `Err` を返す。個々のコーデックの `CreateComponent` または `Init` に失敗した場合は、その方向を `None` として返す。
-- 返す順序は H.264 / HEVC / AV1 のままにする。
 - 処理手順は次の通り。
   1. `Context` を 1 つ作る。
   2. コーデックごとに `CreateComponent` する。
@@ -219,7 +218,6 @@ AMF が返した値を Rust の型に無理やり押し込めない。`AMFCaps` 
   5. `Init` に成功したら `DecodingInfo` / `EncodingInfo` を作る。`GetCaps` が `Init` 前に失敗していた場合は、`Init` 後にもう一度 `GetCaps` を呼ぶ。
   6. `Terminate` してコンポーネントを解放する。
 - `GetCaps` が `Init` 前に成功するかは AMF のバージョンに依存し得るため、`Init` 前の取得に失敗しても `Init` 後に再試行する手順にして、どちらの挙動でも動作させる。
-- `AMFCaps` / `AMFIOCaps` の値は AMF が報告する能力であり、実際のエンコード・デコードの成功を保証しない。`supported_codecs` の doc に書く。
 
 ### 0040 との関係
 
@@ -228,12 +226,12 @@ AMF が返した値を Rust の型に無理やり押し込めない。`AMFCaps` 
 
 ### ドキュメントとテスト
 
-- `EncodingInfo` / `DecodingInfo` / `IoCaps` / `Property` の各フィールドに、値の出所、単位、`None` の条件、順序を書く。
+- `EncodingInfo` / `DecodingInfo` / `IoCapabilities` / `Property` の各フィールドに、値の出所、単位、`None` の条件、順序を書く。
 - `max_level` はコーデックごとのレベル enum の値であり、コーデック間で比較できないことを書く。
-- 実機テストを追加する。`AMFCaps` から取得したプロパティ数、各プロパティの名前と値、`IoCaps` の幅・高さ、フォーマット数、メモリタイプ数、native フラグ、インターレース対応を `supported_codecs` の出力と比較する。
+- 実機テストを追加する。`AMFCaps` から取得したプロパティ数、各プロパティの名前と値、`IoCapabilities` の幅・高さ、フォーマット数、メモリタイプ数、native フラグ、インターレース対応を `supported_codecs` の出力と比較する。
 - `properties` に `MaxProfile` / `MaxLevel` / `BFrames` など、構造体のフィールドに写像したプロパティも含まれることを確認する。
 - `EncodingInfo::max_profile` / `max_level` / `supports_frame_reordering` が対応するプロパティの値と一致することを確認する。
-- `supported_codecs` が `Ok` を返すこと、要素の順序、`Some(encoding)` の `max_profile` の variant が `codec` と一致することを確認する。
+- `supported_codecs` が `Ok` を返すこと、`Some(encoding)` の `max_profile` の variant が `codec` と一致することを確認する。
 - `HEVC` の `BFrames` が存在しない場合に `None` になることを実機で確認する。
 - `examples/amf-check`、`README.md`、`skills/shiguredo-amf/SKILL.md` を新しい API に合わせる。
 - `CHANGES.md` の `## develop` に `[CHANGE]` を追記する。

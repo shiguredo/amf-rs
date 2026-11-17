@@ -1089,6 +1089,9 @@ struct ComponentFuncs {
     query_output:
         unsafe extern "C" fn(*mut sys::AMFComponent, *mut *mut sys::AMFData) -> sys::AMF_RESULT,
     get_context: unsafe extern "C" fn(*mut sys::AMFComponent) -> *mut sys::AMFContext,
+    get_caps: Option<
+        unsafe extern "C" fn(*mut sys::AMFComponent, *mut *mut sys::AMFCaps) -> sys::AMF_RESULT,
+    >,
 }
 
 /// `AMFComponent` の RAII ラッパー
@@ -1136,6 +1139,7 @@ impl Component {
             submit_input: require_vtbl_fn(vtbl.SubmitInput, "AMFComponent::SubmitInput")?,
             query_output: require_vtbl_fn(vtbl.QueryOutput, "AMFComponent::QueryOutput")?,
             get_context: require_vtbl_fn(vtbl.GetContext, "AMFComponent::GetContext")?,
+            get_caps: vtbl.GetCaps,
         };
         if acquire {
             unsafe { (f.acquire)(ptr) };
@@ -1248,6 +1252,26 @@ impl Component {
             )
         }
     }
+
+    /// コンポーネントの能力情報を取得する
+    ///
+    /// AMF ランタイムが `GetCaps` を実装していない場合はエラーを返す。
+    pub(crate) fn get_caps(&self) -> Result<Caps, Error> {
+        let _guard = self.process_state.lock();
+        let get_caps = self.f.get_caps.ok_or_else(|| {
+            Error::new_custom("AMFComponent::GetCaps", "not available in this runtime")
+        })?;
+        let mut caps: *mut sys::AMFCaps = std::ptr::null_mut();
+        let result = unsafe { get_caps(self.ptr, &mut caps) };
+        Error::check(result, "AMFComponent::GetCaps")?;
+        if caps.is_null() {
+            return Err(Error::new_custom(
+                "AMFComponent::GetCaps",
+                "returned null caps",
+            ));
+        }
+        unsafe { Caps::from_raw(caps) }
+    }
 }
 
 impl Clone for Component {
@@ -1274,6 +1298,382 @@ impl Drop for Component {
         if self.ptr.is_null() {
             return;
         }
+        unsafe {
+            (self.f.release)(self.ptr);
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// AMFCaps / AMFIOCaps のラッパー
+// ---------------------------------------------------------------------------
+
+// AMF は variant の文字列を libc の malloc で確保する。同じ libc の free で解放する。
+unsafe extern "C" {
+    fn free(ptr: *mut std::ffi::c_void);
+}
+
+#[derive(Clone, Copy)]
+struct CapsFuncs {
+    release: unsafe extern "C" fn(*mut sys::AMFCaps) -> sys::amf_long,
+    get_acceleration_type: unsafe extern "C" fn(*mut sys::AMFCaps) -> sys::AMF_ACCELERATION_TYPE,
+    get_input_caps:
+        unsafe extern "C" fn(*mut sys::AMFCaps, *mut *mut sys::AMFIOCaps) -> sys::AMF_RESULT,
+    get_output_caps:
+        unsafe extern "C" fn(*mut sys::AMFCaps, *mut *mut sys::AMFIOCaps) -> sys::AMF_RESULT,
+    get_property_count: unsafe extern "C" fn(*mut sys::AMFCaps) -> sys::amf_size,
+    get_property_at: unsafe extern "C" fn(
+        *mut sys::AMFCaps,
+        sys::amf_size,
+        *mut sys::wchar_t,
+        sys::amf_size,
+        *mut sys::AMFVariantStruct,
+    ) -> sys::AMF_RESULT,
+    get_property: unsafe extern "C" fn(
+        *mut sys::AMFCaps,
+        *const sys::wchar_t,
+        *mut sys::AMFVariantStruct,
+    ) -> sys::AMF_RESULT,
+}
+
+/// `AMFCaps` の RAII ラッパー
+pub(crate) struct Caps {
+    ptr: *mut sys::AMFCaps,
+    f: CapsFuncs,
+}
+
+impl Caps {
+    /// 生ポインタから `Caps` を作成する
+    ///
+    /// # Safety
+    /// `ptr` は有効な `AMFCaps` を指し、呼び出し元が参照を所有していること。
+    unsafe fn from_raw(ptr: *mut sys::AMFCaps) -> Result<Self, Error> {
+        let vtbl = unsafe { &*(*ptr).pVtbl };
+        let release = require_vtbl_fn(vtbl.Release, "AMFCaps::Release")?;
+        let funcs = (|| {
+            Ok(CapsFuncs {
+                release,
+                get_acceleration_type: require_vtbl_fn(
+                    vtbl.GetAccelerationType,
+                    "AMFCaps::GetAccelerationType",
+                )?,
+                get_input_caps: require_vtbl_fn(vtbl.GetInputCaps, "AMFCaps::GetInputCaps")?,
+                get_output_caps: require_vtbl_fn(vtbl.GetOutputCaps, "AMFCaps::GetOutputCaps")?,
+                get_property_count: require_vtbl_fn(
+                    vtbl.GetPropertyCount,
+                    "AMFCaps::GetPropertyCount",
+                )?,
+                get_property_at: require_vtbl_fn(vtbl.GetPropertyAt, "AMFCaps::GetPropertyAt")?,
+                get_property: require_vtbl_fn(vtbl.GetProperty, "AMFCaps::GetProperty")?,
+            })
+        })();
+        match funcs {
+            Ok(f) => Ok(Self { ptr, f }),
+            Err(e) => {
+                unsafe { release(ptr) };
+                Err(e)
+            }
+        }
+    }
+
+    /// AMF が報告するアクセラレーション種別を返す
+    pub(crate) fn acceleration_type(&self) -> sys::AMF_ACCELERATION_TYPE {
+        unsafe { (self.f.get_acceleration_type)(self.ptr) }
+    }
+
+    /// 入力の能力情報を返す
+    pub(crate) fn input_caps(&self) -> Result<IoCaps, Error> {
+        let mut io_caps: *mut sys::AMFIOCaps = std::ptr::null_mut();
+        let result = unsafe { (self.f.get_input_caps)(self.ptr, &mut io_caps) };
+        Error::check(result, "AMFCaps::GetInputCaps")?;
+        if io_caps.is_null() {
+            return Err(Error::new_custom(
+                "AMFCaps::GetInputCaps",
+                "returned null io caps",
+            ));
+        }
+        unsafe { IoCaps::from_raw(io_caps) }
+    }
+
+    /// 出力の能力情報を返す
+    pub(crate) fn output_caps(&self) -> Result<IoCaps, Error> {
+        let mut io_caps: *mut sys::AMFIOCaps = std::ptr::null_mut();
+        let result = unsafe { (self.f.get_output_caps)(self.ptr, &mut io_caps) };
+        Error::check(result, "AMFCaps::GetOutputCaps")?;
+        if io_caps.is_null() {
+            return Err(Error::new_custom(
+                "AMFCaps::GetOutputCaps",
+                "returned null io caps",
+            ));
+        }
+        unsafe { IoCaps::from_raw(io_caps) }
+    }
+
+    /// プロパティ数を返す
+    pub(crate) fn property_count(&self) -> sys::amf_size {
+        unsafe { (self.f.get_property_count)(self.ptr) }
+    }
+
+    /// インデックスでプロパティを取得する
+    ///
+    /// 返した `Variant` は AMF がコピーした値であり、`Drop` で解放される。
+    pub(crate) fn property_at(&self, index: sys::amf_size) -> Result<(String, Variant), Error> {
+        let mut name = vec![0 as sys::wchar_t; 256];
+        let mut value = Variant::empty();
+        let result = unsafe {
+            (self.f.get_property_at)(
+                self.ptr,
+                index,
+                name.as_mut_ptr(),
+                name.len(),
+                value.as_ptr(),
+            )
+        };
+        Error::check(result, "AMFCaps::GetPropertyAt")?;
+        Ok((sys::from_wstring(&name), value))
+    }
+
+    /// Int64 プロパティを取得する
+    ///
+    /// プロパティが存在しない場合と、値が Int64 でない場合は `None` を返す。
+    pub(crate) fn get_property_int64(&self, name: &str) -> Option<sys::amf_int64> {
+        let mut value = Variant::empty();
+        let name_w = sys::to_wstring(name);
+        let result = unsafe { (self.f.get_property)(self.ptr, name_w.as_ptr(), value.as_ptr()) };
+        if result != sys::AMF_RESULT::AMF_OK {
+            return None;
+        }
+        let value = value.as_ref();
+        if value.type_ != sys::AMF_VARIANT_TYPE::AMF_VARIANT_INT64 {
+            return None;
+        }
+        Some(unsafe { value.__bindgen_anon_1.int64Value })
+    }
+
+    /// Bool プロパティを取得する
+    ///
+    /// プロパティが存在しない場合と、値が Bool でない場合は `None` を返す。
+    pub(crate) fn get_property_bool(&self, name: &str) -> Option<bool> {
+        let mut value = Variant::empty();
+        let name_w = sys::to_wstring(name);
+        let result = unsafe { (self.f.get_property)(self.ptr, name_w.as_ptr(), value.as_ptr()) };
+        if result != sys::AMF_RESULT::AMF_OK {
+            return None;
+        }
+        let value = value.as_ref();
+        if value.type_ != sys::AMF_VARIANT_TYPE::AMF_VARIANT_BOOL {
+            return None;
+        }
+        Some(unsafe { value.__bindgen_anon_1.boolValue != 0 })
+    }
+}
+
+impl Drop for Caps {
+    fn drop(&mut self) {
+        unsafe {
+            (self.f.release)(self.ptr);
+        }
+    }
+}
+
+/// `AMFVariantStruct` の RAII ラッパー
+pub(crate) struct Variant {
+    value: sys::AMFVariantStruct,
+}
+
+impl Variant {
+    /// 空の variant を作成する
+    fn empty() -> Self {
+        Self {
+            value: sys::AMFVariantStruct::empty(),
+        }
+    }
+
+    /// 書き込み用のポインタを返す
+    fn as_ptr(&mut self) -> *mut sys::AMFVariantStruct {
+        &mut self.value
+    }
+
+    /// 読み取り用の参照を返す
+    pub(crate) fn as_ref(&self) -> &sys::AMFVariantStruct {
+        &self.value
+    }
+}
+
+impl Drop for Variant {
+    fn drop(&mut self) {
+        unsafe {
+            release_variant(&mut self.value);
+        }
+    }
+}
+
+/// `AMFVariantStruct` が保持する AMF 側の参照を解放する
+unsafe fn release_variant(value: &mut sys::AMFVariantStruct) {
+    // AMF は variant の文字列を libc の malloc で確保する。
+    // インターフェースは AMFInterface::Release で参照カウントを減らす。
+    if value.type_ == sys::AMF_VARIANT_TYPE::AMF_VARIANT_STRING {
+        let ptr = unsafe { value.__bindgen_anon_1.stringValue };
+        if !ptr.is_null() {
+            unsafe { free(ptr.cast()) };
+        }
+    } else if value.type_ == sys::AMF_VARIANT_TYPE::AMF_VARIANT_WSTRING {
+        let ptr = unsafe { value.__bindgen_anon_1.wstringValue };
+        if !ptr.is_null() {
+            unsafe { free(ptr.cast()) };
+        }
+    } else if value.type_ == sys::AMF_VARIANT_TYPE::AMF_VARIANT_INTERFACE {
+        let interface = unsafe { value.__bindgen_anon_1.pInterface };
+        if !interface.is_null() {
+            let vtbl = unsafe { &*(*interface).pVtbl };
+            if let Some(release) = vtbl.Release {
+                unsafe { release(interface) };
+            }
+        }
+    }
+    value.type_ = sys::AMF_VARIANT_TYPE::AMF_VARIANT_EMPTY;
+}
+
+#[derive(Clone, Copy)]
+struct IoCapsFuncs {
+    release: unsafe extern "C" fn(*mut sys::AMFIOCaps) -> sys::amf_long,
+    get_width_range:
+        unsafe extern "C" fn(*mut sys::AMFIOCaps, *mut sys::amf_int32, *mut sys::amf_int32),
+    get_height_range:
+        unsafe extern "C" fn(*mut sys::AMFIOCaps, *mut sys::amf_int32, *mut sys::amf_int32),
+    get_vert_align: unsafe extern "C" fn(*mut sys::AMFIOCaps) -> sys::amf_int32,
+    get_num_of_formats: unsafe extern "C" fn(*mut sys::AMFIOCaps) -> sys::amf_int32,
+    get_format_at: unsafe extern "C" fn(
+        *mut sys::AMFIOCaps,
+        sys::amf_int32,
+        *mut sys::AMF_SURFACE_FORMAT,
+        *mut sys::amf_bool,
+    ) -> sys::AMF_RESULT,
+    get_num_of_memory_types: unsafe extern "C" fn(*mut sys::AMFIOCaps) -> sys::amf_int32,
+    get_memory_type_at: unsafe extern "C" fn(
+        *mut sys::AMFIOCaps,
+        sys::amf_int32,
+        *mut sys::AMF_MEMORY_TYPE,
+        *mut sys::amf_bool,
+    ) -> sys::AMF_RESULT,
+    is_interlaced_supported: unsafe extern "C" fn(*mut sys::AMFIOCaps) -> sys::amf_bool,
+}
+
+/// `AMFIOCaps` の RAII ラッパー
+pub(crate) struct IoCaps {
+    ptr: *mut sys::AMFIOCaps,
+    f: IoCapsFuncs,
+}
+
+impl IoCaps {
+    /// 生ポインタから `IoCaps` を作成する
+    ///
+    /// # Safety
+    /// `ptr` は有効な `AMFIOCaps` を指し、呼び出し元が参照を所有していること。
+    unsafe fn from_raw(ptr: *mut sys::AMFIOCaps) -> Result<Self, Error> {
+        let vtbl = unsafe { &*(*ptr).pVtbl };
+        let release = require_vtbl_fn(vtbl.Release, "AMFIOCaps::Release")?;
+        let funcs = (|| {
+            Ok(IoCapsFuncs {
+                release,
+                get_width_range: require_vtbl_fn(vtbl.GetWidthRange, "AMFIOCaps::GetWidthRange")?,
+                get_height_range: require_vtbl_fn(
+                    vtbl.GetHeightRange,
+                    "AMFIOCaps::GetHeightRange",
+                )?,
+                get_vert_align: require_vtbl_fn(vtbl.GetVertAlign, "AMFIOCaps::GetVertAlign")?,
+                get_num_of_formats: require_vtbl_fn(
+                    vtbl.GetNumOfFormats,
+                    "AMFIOCaps::GetNumOfFormats",
+                )?,
+                get_format_at: require_vtbl_fn(vtbl.GetFormatAt, "AMFIOCaps::GetFormatAt")?,
+                get_num_of_memory_types: require_vtbl_fn(
+                    vtbl.GetNumOfMemoryTypes,
+                    "AMFIOCaps::GetNumOfMemoryTypes",
+                )?,
+                get_memory_type_at: require_vtbl_fn(
+                    vtbl.GetMemoryTypeAt,
+                    "AMFIOCaps::GetMemoryTypeAt",
+                )?,
+                is_interlaced_supported: require_vtbl_fn(
+                    vtbl.IsInterlacedSupported,
+                    "AMFIOCaps::IsInterlacedSupported",
+                )?,
+            })
+        })();
+        match funcs {
+            Ok(f) => Ok(Self { ptr, f }),
+            Err(e) => {
+                unsafe { release(ptr) };
+                Err(e)
+            }
+        }
+    }
+
+    /// 幅の範囲を返す
+    pub(crate) fn width_range(&self) -> (sys::amf_int32, sys::amf_int32) {
+        let mut min_width = 0;
+        let mut max_width = 0;
+        unsafe {
+            (self.f.get_width_range)(self.ptr, &mut min_width, &mut max_width);
+        }
+        (min_width, max_width)
+    }
+
+    /// 高さの範囲を返す
+    pub(crate) fn height_range(&self) -> (sys::amf_int32, sys::amf_int32) {
+        let mut min_height = 0;
+        let mut max_height = 0;
+        unsafe {
+            (self.f.get_height_range)(self.ptr, &mut min_height, &mut max_height);
+        }
+        (min_height, max_height)
+    }
+
+    /// 垂直アライメントを返す
+    pub(crate) fn vertical_alignment(&self) -> sys::amf_int32 {
+        unsafe { (self.f.get_vert_align)(self.ptr) }
+    }
+
+    /// 対応する surface format の一覧を返す
+    pub(crate) fn formats(&self) -> Result<Vec<(sys::AMF_SURFACE_FORMAT, bool)>, Error> {
+        let count = unsafe { (self.f.get_num_of_formats)(self.ptr) };
+        let mut formats = Vec::new();
+        for index in 0..count {
+            let mut format = sys::AMF_SURFACE_FORMAT::AMF_SURFACE_UNKNOWN;
+            let mut native = 0;
+            let result =
+                unsafe { (self.f.get_format_at)(self.ptr, index, &mut format, &mut native) };
+            Error::check(result, "AMFIOCaps::GetFormatAt")?;
+            formats.push((format, native != 0));
+        }
+        Ok(formats)
+    }
+
+    /// 対応する memory type の一覧を返す
+    pub(crate) fn memory_types(&self) -> Result<Vec<(sys::AMF_MEMORY_TYPE, bool)>, Error> {
+        let count = unsafe { (self.f.get_num_of_memory_types)(self.ptr) };
+        let mut memory_types = Vec::new();
+        for index in 0..count {
+            let mut memory_type = sys::AMF_MEMORY_TYPE::AMF_MEMORY_UNKNOWN;
+            let mut native = 0;
+            let result = unsafe {
+                (self.f.get_memory_type_at)(self.ptr, index, &mut memory_type, &mut native)
+            };
+            Error::check(result, "AMFIOCaps::GetMemoryTypeAt")?;
+            memory_types.push((memory_type, native != 0));
+        }
+        Ok(memory_types)
+    }
+
+    /// インターレースに対応しているかを返す
+    pub(crate) fn interlaced(&self) -> bool {
+        unsafe { (self.f.is_interlaced_supported)(self.ptr) != 0 }
+    }
+}
+
+impl Drop for IoCaps {
+    fn drop(&mut self) {
         unsafe {
             (self.f.release)(self.ptr);
         }

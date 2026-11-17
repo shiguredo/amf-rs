@@ -47,7 +47,7 @@ AMD GPU 向けハードウェアアクセラレーションによるビデオエ
 | `AmfLibrary` | AMF ランタイムライブラリのプロセスシングルトン | `instance()`, `query_version() -> Result<(u16, u16, u16, u16), Error>`, `create_context() -> Result<Context, Error>` |
 | `Encoder<H: EncodeHandler>` | AMF ハードウェアエンコーダー | `new(Context, EncoderConfig, H)`, `context()`, `alloc_surface()`, `encode(Surface, &EncodeOptions, H::UserData)`, `reconfigure(ReconfigureParams)`, `finish()` |
 | `Decoder<H: DecodeHandler>` | AMF ハードウェアデコーダー | `new(Context, DecoderConfig, H)`, `context()`, `alloc_buffer(size)`, `decode(Buffer, H::UserData)`, `finish()` |
-| `supported_codecs() -> Vec<CodecInfo>` | このバックエンドで利用可能なコーデック情報の一覧を返す (ランタイムのロードまたは判定用 Context の初期化に失敗した場合は全コーデック非対応を返す) | - |
+| `supported_codecs() -> Result<Vec<CodecInfo>, Error>` | このバックエンドで利用可能なコーデック情報の一覧を返す (AMF ランタイムを初期化できない場合はエラー) | - |
 | `BUILD_VERSION` | ビルド時の AMF バージョン文字列 (`&'static str`) | - |
 
 `Encoder` / `Decoder` は内部でワーカースレッドを起動し、`encode()` / `decode()` で投入したフレームの結果は `EncodeHandler::on_encoded` / `DecodeHandler::on_decoded` に非同期で通知される。`finish()` は残りのフレームをハンドラーが受け取り終わるまで待機する。
@@ -88,15 +88,17 @@ AMD GPU 向けハードウェアアクセラレーションによるビデオエ
 
 | 型/関数 | 説明 |
 |--------|------|
-| `supported_codecs() -> Vec<CodecInfo>` | このバックエンドで利用可能なコーデック情報の一覧 |
+| `supported_codecs() -> Result<Vec<CodecInfo>, Error>` | このバックエンドで利用可能なコーデック情報の一覧 |
 | `VideoCodecType` | コーデック種別 (`H264`, `Hevc`, `Av1`) |
-| `CodecInfo` | コーデックごとの情報 (`codec: VideoCodecType`, `decoding: DecodingInfo`, `encoding: EncodingInfo`) |
-| `DecodingInfo` | `supported: bool`, `hardware_accelerated: bool` |
-| `EncodingInfo` | `supported`, `hardware_accelerated`, `supports_frame_reordering`, `supports_multi_pass`, `profiles: EncodingProfiles` |
-| `EncodingProfiles` | `H264(Vec<H264EncodingProfile>)`, `Hevc(Vec<HevcEncodingProfile>)`, `Av1(Vec<Av1EncodingProfile>)`, `None` |
-| `H264EncodingProfile` | `Baseline`, `ConstrainedBaseline`, `Main`, `High`, `ConstrainedHigh` |
-| `HevcEncodingProfile` | `Main`, `Main10` |
-| `Av1EncodingProfile` | `Main` |
+| `CodecInfo` | コーデックごとの情報 (`codec`, `decoding: Option<DecodingInfo>`, `encoding: Option<EncodingInfo>`) |
+| `DecodingInfo` | `acceleration: Option<AccelerationType>`, `input: Option<IoCapabilities>`, `output: Option<IoCapabilities>`, `properties: Vec<Property>` |
+| `EncodingInfo` | `acceleration`, `max_profile: Option<VideoProfile>`, `max_level: Option<i64>`, `supports_frame_reordering: Option<bool>`, `input`, `output`, `properties` |
+| `AccelerationType` | `NotSupported`, `Hardware`, `Gpu`, `Software`, `Unknown(i32)` |
+| `VideoProfile` | `H264(H264Profile)`, `Hevc(HevcProfile)`, `Av1(Av1Profile)`, `Unknown(i64)` |
+| `IoCapabilities` | 幅・高さの範囲、垂直アライメント、`SurfaceFormatCapability`、`MemoryTypeCapability`、インターレース対応 |
+| `SurfaceFormat` | `Known(FrameFormat)`, `Unknown(i32)` |
+| `MemoryType` | `Host`, `OpenCl`, `OpenGl`, `Xv`, `Vulkan`, `Unknown(i32)` |
+| `Property` / `Value` | AMF が返した全ケーパビリティプロパティの名前と値。値の確認用 |
 
 ## ハンドラートレイト
 
@@ -348,21 +350,27 @@ IDR 強制時は内部でコーデック別に AMF の `FORCE_PICTURE_TYPE` / `F
 ```rust
 use shiguredo_amf::supported_codecs;
 
-let codecs = supported_codecs();
+let codecs = supported_codecs().expect("failed to query codec support");
 for info in &codecs {
     println!("{:?}:", info.codec);
-    println!(
-        "  decoding: supported={}, hw_accel={}",
-        info.decoding.supported, info.decoding.hardware_accelerated
-    );
-    println!(
-        "  encoding: supported={}, hw_accel={}",
-        info.encoding.supported, info.encoding.hardware_accelerated
-    );
+    match &info.decoding {
+        Some(decoding) => println!("  decoding: acceleration={:?}", decoding.acceleration),
+        None => println!("  decoding: not supported"),
+    }
+    match &info.encoding {
+        Some(encoding) => println!(
+            "  encoding: acceleration={:?}, profile={:?}, level={:?}, frame_reordering={:?}",
+            encoding.acceleration,
+            encoding.max_profile,
+            encoding.max_level,
+            encoding.supports_frame_reordering
+        ),
+        None => println!("  encoding: not supported"),
+    }
 }
 ```
 
-`supported_codecs()` は AMF ランタイムをロードして実際に `CreateComponent` を試行する。AMF ランタイムがロードできない環境では全コーデックが非対応として返される。
+`supported_codecs()` は AMF ランタイムをロードして利用可能なコーデックを判定する。AMF ランタイムを初期化できない場合は `Err` を返し、個々のコーデックの非対応は `decoding` / `encoding` の `None` になる。
 
 ### AMF ランタイムバージョンの取得
 

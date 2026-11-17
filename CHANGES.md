@@ -11,6 +11,12 @@
 
 ## develop
 
+- [CHANGE] `supported_codecs` の戻り値と `CodecInfo` の能力情報を AMF が返す値に基づく形に変更する
+  - `supported_codecs` は `Result<Vec<CodecInfo>, Error>` を返す
+  - `CodecInfo` の `decoding` / `encoding` を `Option` に変更する
+  - `hardware_accelerated` / `supports_multi_pass` / `profiles` を削除し、`AccelerationType`、`VideoProfile`、`max_level`、`IoCapabilities`、`properties` を追加する
+  - `AMF_SURFACE_FORMAT` / `AMF_MEMORY_TYPE` / `AMF_VARIANT_TYPE` を newtype enum に変更する
+  - @melpon
 - [CHANGE] `amf::Plane` の寿命を取得元の `Surface` に縛るように変更する
   - `Plane<'a>` は `Surface` を借用し、`Surface` を drop した後の `Plane` の利用はコンパイルエラーになる
   - `Plane::from_raw` / `Plane::from_raw_acquired` は `Context` ではなく `&Surface` を受け取る
