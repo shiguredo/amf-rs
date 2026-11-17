@@ -43,7 +43,7 @@
 
 ## 解決方法
 
-- `amf::Buffer` に `as_slice` / `as_mut_slice` / `set_size` を追加し、`amf::Plane` に `as_slice` / `as_mut_slice` を追加した。スライスの生成前に null、サイズ、`hpitch`、`vpitch`、長さのオーバーフローを検証し、ホストメモリ以外のオブジェクトは `Err` にした。
+- `amf::Buffer` に unsafe な `as_slice` / `as_mut_slice` / `set_size` を追加し、`amf::Plane` に unsafe な `as_slice` / `as_mut_slice` を追加した。スライスの生成前に null、サイズ、`hpitch`、`vpitch`、長さのオーバーフローを検証し、ホストメモリ以外のオブジェクトは `Err` にした。
 - `PlaneType` / `MemoryType` / `SurfaceFormat` を公開型にし、`Surface::get_plane`、`Surface::convert`、`Context::alloc_surface`、`Context::alloc_buffer`、`Component::init` から `ffi` 型を除去した。`SurfaceFormat` は `FrameFormat` に写像できる値を `Known`、写像できない値を `Unknown` に保持する形にした。
 - 100 ナノ秒単位の PTS / Duration の扱いを doc に明記した。`Buffer::set_pts` と `Surface::get_pts` は既に追加済みだったため、そのまま利用する。
 - null、サイズ、ピッチの検証テストと、実 GPU 上でのスライス読み書き・`set_size`・Vulkan Surface の拒否テストを追加した。
