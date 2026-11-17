@@ -1089,9 +1089,8 @@ struct ComponentFuncs {
     query_output:
         unsafe extern "C" fn(*mut sys::AMFComponent, *mut *mut sys::AMFData) -> sys::AMF_RESULT,
     get_context: unsafe extern "C" fn(*mut sys::AMFComponent) -> *mut sys::AMFContext,
-    get_caps: Option<
+    get_caps:
         unsafe extern "C" fn(*mut sys::AMFComponent, *mut *mut sys::AMFCaps) -> sys::AMF_RESULT,
-    >,
 }
 
 /// `AMFComponent` の RAII ラッパー
@@ -1139,7 +1138,7 @@ impl Component {
             submit_input: require_vtbl_fn(vtbl.SubmitInput, "AMFComponent::SubmitInput")?,
             query_output: require_vtbl_fn(vtbl.QueryOutput, "AMFComponent::QueryOutput")?,
             get_context: require_vtbl_fn(vtbl.GetContext, "AMFComponent::GetContext")?,
-            get_caps: vtbl.GetCaps,
+            get_caps: require_vtbl_fn(vtbl.GetCaps, "AMFComponent::GetCaps")?,
         };
         if acquire {
             unsafe { (f.acquire)(ptr) };
@@ -1255,14 +1254,11 @@ impl Component {
 
     /// コンポーネントの能力情報を取得する
     ///
-    /// AMF ランタイムが `GetCaps` を実装していない場合はエラーを返す。
+    /// `GetCaps` を利用できない場合はエラーを返す。
     pub(crate) fn get_caps(&self) -> Result<Caps, Error> {
         let _guard = self.process_state.lock();
-        let get_caps = self.f.get_caps.ok_or_else(|| {
-            Error::new_custom("AMFComponent::GetCaps", "not available in this runtime")
-        })?;
         let mut caps: *mut sys::AMFCaps = std::ptr::null_mut();
-        let result = unsafe { get_caps(self.ptr, &mut caps) };
+        let result = unsafe { (self.f.get_caps)(self.ptr, &mut caps) };
         Error::check(result, "AMFComponent::GetCaps")?;
         if caps.is_null() {
             return Err(Error::new_custom(
@@ -1308,7 +1304,6 @@ impl Drop for Component {
 // AMFCaps / AMFIOCaps のラッパー
 // ---------------------------------------------------------------------------
 
-// AMF は variant の文字列を libc の malloc で確保する。同じ libc の free で解放する。
 unsafe extern "C" {
     fn free(ptr: *mut std::ffi::c_void);
 }
@@ -1377,12 +1372,12 @@ impl Caps {
     }
 
     /// AMF が報告するアクセラレーション種別を返す
-    pub(crate) fn acceleration_type(&self) -> sys::AMF_ACCELERATION_TYPE {
+    pub(crate) fn get_acceleration_type(&self) -> sys::AMF_ACCELERATION_TYPE {
         unsafe { (self.f.get_acceleration_type)(self.ptr) }
     }
 
     /// 入力の能力情報を返す
-    pub(crate) fn input_caps(&self) -> Result<IoCaps, Error> {
+    pub(crate) fn get_input_caps(&self) -> Result<IoCaps, Error> {
         let mut io_caps: *mut sys::AMFIOCaps = std::ptr::null_mut();
         let result = unsafe { (self.f.get_input_caps)(self.ptr, &mut io_caps) };
         Error::check(result, "AMFCaps::GetInputCaps")?;
@@ -1396,7 +1391,7 @@ impl Caps {
     }
 
     /// 出力の能力情報を返す
-    pub(crate) fn output_caps(&self) -> Result<IoCaps, Error> {
+    pub(crate) fn get_output_caps(&self) -> Result<IoCaps, Error> {
         let mut io_caps: *mut sys::AMFIOCaps = std::ptr::null_mut();
         let result = unsafe { (self.f.get_output_caps)(self.ptr, &mut io_caps) };
         Error::check(result, "AMFCaps::GetOutputCaps")?;
@@ -1410,15 +1405,17 @@ impl Caps {
     }
 
     /// プロパティ数を返す
-    pub(crate) fn property_count(&self) -> sys::amf_size {
+    pub(crate) fn get_property_count(&self) -> sys::amf_size {
         unsafe { (self.f.get_property_count)(self.ptr) }
     }
 
     /// インデックスでプロパティを取得する
     ///
+    /// プロパティ名が 256 文字以上の場合はエラーを返す。
     /// 返した `Variant` は AMF がコピーした値であり、`Drop` で解放される。
-    pub(crate) fn property_at(&self, index: sys::amf_size) -> Result<(String, Variant), Error> {
-        let mut name = vec![0 as sys::wchar_t; 256];
+    pub(crate) fn get_property_at(&self, index: sys::amf_size) -> Result<(String, Variant), Error> {
+        const MAX_NAME_LEN: usize = 255;
+        let mut name = vec![0 as sys::wchar_t; MAX_NAME_LEN + 1];
         let mut value = Variant::empty();
         let result = unsafe {
             (self.f.get_property_at)(
@@ -1430,41 +1427,27 @@ impl Caps {
             )
         };
         Error::check(result, "AMFCaps::GetPropertyAt")?;
-        Ok((sys::from_wstring(&name), value))
+        let name = sys::from_wstring(&name);
+        if name.chars().count() >= MAX_NAME_LEN {
+            return Err(Error::new_custom(
+                "AMFCaps::GetPropertyAt",
+                "property name is too long",
+            ));
+        }
+        Ok((name, value))
     }
 
-    /// Int64 プロパティを取得する
+    /// 名前でプロパティを取得する
     ///
-    /// プロパティが存在しない場合と、値が Int64 でない場合は `None` を返す。
-    pub(crate) fn get_property_int64(&self, name: &str) -> Option<sys::amf_int64> {
+    /// プロパティが存在しない場合は `None` を返す。
+    pub(crate) fn get_property(&self, name: &str) -> Option<Variant> {
         let mut value = Variant::empty();
         let name_w = sys::to_wstring(name);
         let result = unsafe { (self.f.get_property)(self.ptr, name_w.as_ptr(), value.as_ptr()) };
         if result != sys::AMF_RESULT::AMF_OK {
             return None;
         }
-        let value = value.as_ref();
-        if value.type_ != sys::AMF_VARIANT_TYPE::AMF_VARIANT_INT64 {
-            return None;
-        }
-        Some(unsafe { value.__bindgen_anon_1.int64Value })
-    }
-
-    /// Bool プロパティを取得する
-    ///
-    /// プロパティが存在しない場合と、値が Bool でない場合は `None` を返す。
-    pub(crate) fn get_property_bool(&self, name: &str) -> Option<bool> {
-        let mut value = Variant::empty();
-        let name_w = sys::to_wstring(name);
-        let result = unsafe { (self.f.get_property)(self.ptr, name_w.as_ptr(), value.as_ptr()) };
-        if result != sys::AMF_RESULT::AMF_OK {
-            return None;
-        }
-        let value = value.as_ref();
-        if value.type_ != sys::AMF_VARIANT_TYPE::AMF_VARIANT_BOOL {
-            return None;
-        }
-        Some(unsafe { value.__bindgen_anon_1.boolValue != 0 })
+        Some(value)
     }
 }
 
@@ -1498,6 +1481,26 @@ impl Variant {
     pub(crate) fn as_ref(&self) -> &sys::AMFVariantStruct {
         &self.value
     }
+
+    /// Int64 の値を返す
+    ///
+    /// variant の型が Int64 でない場合は `None` を返す。
+    pub(crate) fn as_int64(&self) -> Option<sys::amf_int64> {
+        if self.value.type_ != sys::AMF_VARIANT_TYPE::AMF_VARIANT_INT64 {
+            return None;
+        }
+        Some(unsafe { self.value.__bindgen_anon_1.int64Value })
+    }
+
+    /// Bool の値を返す
+    ///
+    /// variant の型が Bool でない場合は `None` を返す。
+    pub(crate) fn as_bool(&self) -> Option<bool> {
+        if self.value.type_ != sys::AMF_VARIANT_TYPE::AMF_VARIANT_BOOL {
+            return None;
+        }
+        Some(unsafe { self.value.__bindgen_anon_1.boolValue != 0 })
+    }
 }
 
 impl Drop for Variant {
@@ -1510,7 +1513,7 @@ impl Drop for Variant {
 
 /// `AMFVariantStruct` が保持する AMF 側の参照を解放する
 unsafe fn release_variant(value: &mut sys::AMFVariantStruct) {
-    // AMF は variant の文字列を libc の malloc で確保する。
+    // AMF は variant の文字列を libc の malloc で確保するため free で解放する。
     // インターフェースは AMFInterface::Release で参照カウントを減らす。
     if value.type_ == sys::AMF_VARIANT_TYPE::AMF_VARIANT_STRING {
         let ptr = unsafe { value.__bindgen_anon_1.stringValue };

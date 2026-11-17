@@ -39,7 +39,7 @@ AMF が返した値を Rust の型に無理やり押し込めない。`AMFCaps` 
 ### AMF の能力照会
 
 - `amf` モジュールに `Component::get_caps()` と、`Caps` / `IoCaps` の RAII ラッパーを追加する。0022 ではクレート内公開に留める。
-- `ComponentFuncs` に `GetCaps` を追加する。古い AMF ランタイムで `GetCaps` が存在しない場合でもエンコーダー/デコーダー自体は使えるように、`GetCaps` は `Option` で保持し、呼び出し時に無ければエラーにする。
+- `ComponentFuncs` に `GetCaps` を追加する。`GetCaps` は使用する AMF 1.5 のコンポーネント vtable に存在するため、`require_vtbl_fn` で取得する。
 - `Caps` は `Release` を `Drop` で呼ぶ。`GetCaps` の呼び出しは `Component` の他の操作と同じプロセスロックで直列化する。
 - `Caps` に次の機能を追加する。
   - `get_acceleration_type()`
@@ -55,7 +55,6 @@ AMF が返した値を Rust の型に無理やり押し込めない。`AMFCaps` 
 - `AMFIOCaps` が公開するアライメントは `GetVertAlign` の縦方向だけである。したがって `IoCapabilities.vertical_alignment` は `AMFIOCaps::GetVertAlign` の値（行数の倍数制約）を表し、横方向のアライメントは `IoCapabilities` には含めない。
 - `GetPropertyAt` は `AMFVariantCopy` で値をコピーするため、`STRING` / `WSTRING` は AMF が確保した領域を `free` し、`INTERFACE` は `Release` する。Linux では AMF の variant 文字列が `malloc` で確保されるため `free` で解放できる。
 - `GetPropertyAt`、`GetFormatAt`、`GetMemoryTypeAt` のいずれかが途中で失敗した場合は、その `Caps` / `IoCaps` の取得全体をエラーにする。取得できた分だけを返して情報を黙って落とさない。
-- `GetCaps` が返した `AMFCaps` はコンポーネントを `Terminate` する前に破棄する。
 
 ### FFI の未知値
 
@@ -209,16 +208,14 @@ AMF が返した値を Rust の型に無理やり押し込めない。`AMFCaps` 
 
 ### `supported_codecs`
 
-- 戻り値を `Result<Vec<CodecInfo>, Error>` に変更する。AMF ランタイムのロードまたは `Context` の作成に失敗した場合は `Err` を返す。個々のコーデックの `CreateComponent` または `Init` に失敗した場合は、その方向を `None` として返す。
+- 戻り値を `Result<Vec<CodecInfo>, Error>` に変更する。AMF ランタイムのロードまたは `Context` の作成に失敗した場合は `Err` を返す。個々のコーデックの `CreateComponent` に失敗した場合は、その方向を `None` として返す。
 - 処理手順は次の通り。
   1. `Context` を 1 つ作る。
   2. コーデックごとに `CreateComponent` する。
-  3. `GetCaps` を呼ぶ。成功した場合は入力 caps の最小幅・最小高さ、全プロパティ、入出力の `IoCaps` を取得する。
-  4. エンコーダーは `NV12` と入力 caps の最小サイズで `Init` する。入力 caps を取得できない場合は 640x480 で `Init` する。デコーダーは `NV12`、0x0 で `Init` する。
-  5. `Init` に成功したら `DecodingInfo` / `EncodingInfo` を作る。`GetCaps` が `Init` 前に失敗していた場合は、`Init` 後にもう一度 `GetCaps` を呼ぶ。
-  6. `Terminate` してコンポーネントを解放する。
-- `GetCaps` が `Init` 前に成功するかは AMF のバージョンに依存し得るため、`Init` 前の取得に失敗しても `Init` 後に再試行する手順にして、どちらの挙動でも動作させる。
-
+  3. `GetCaps` を呼ぶ。成功した場合は全プロパティと入出力の能力情報を取得する。
+  4. `DecodingInfo` / `EncodingInfo` を作る。
+- `GetCaps` は `Context` を初期化した後、コンポーネントの `Init` 前に呼ぶ。`Init` は設定依存なので、コーデック対応の判定には使わない。
+- `GetCaps` が失敗した場合もコンポーネント自体は利用できるため `Some` を返し、能力情報の各フィールドは `None`、`properties` は空にする。
 ### 0040 との関係
 
 - 0040 は 0022 に統合する。`supported_codecs` が全コーデック分の `CodecInfo` を返し、1 コーデックだけ必要な場合も結果を codec で絞れるため、`query_encoder_caps` / `query_decoder_caps` は追加しない。
@@ -245,7 +242,7 @@ AMF が返した値を Rust の型に無理やり押し込めない。`AMFCaps` 
 - `AMFCaps` のプロパティ数と `properties.len()`、`AMFIOCaps` のフォーマット数と `formats.len()`、メモリタイプ数と `memory_types.len()` が実機で一致する。
 - `VideoProfile::Unknown`、`AccelerationType::Unknown`、`SurfaceFormat::Unknown`、`MemoryType::Unknown`、`Value::Unknown` が生値を保持する。
 - `hardware_accelerated` が削除され、`AccelerationType` で AMF の値を保持する。
-- `GetCaps` が `Init` 前後どちらでも動く手順になっている。
+- `supported_codecs` は `CreateComponent` と `GetCaps` だけでコーデック対応を判定し、`Init` を使わない。
 - 実機テストが追加され、`cargo test --workspace` が通る。
 - `examples/amf-check`、`README.md`、`skills/shiguredo-amf/SKILL.md` が新しい API に追従している。
 - `CHANGES.md` の `## develop` に変更が追記されている。

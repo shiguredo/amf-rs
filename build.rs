@@ -51,21 +51,7 @@ fn main() {
         let output_properties_path = out_dir.join("properties.rs");
         std::fs::write(
             &output_properties_path,
-            r#"pub const AMFVideoEncoderVCE_AVC: &str = "AMFVideoEncoderVCE_AVC";
-pub const AMFVideoEncoder_HEVC: &str = "AMFVideoEncoderHW_HEVC";
-pub const AMFVideoEncoder_AV1: &str = "AMFVideoEncoderHW_AV1";
-pub const AMFVideoDecoderUVD_H264_AVC: &str = "AMFVideoDecoderUVD_H264_AVC";
-pub const AMFVideoDecoderHW_H265_HEVC: &str = "AMFVideoDecoderHW_H265_HEVC";
-pub const AMFVideoDecoderHW_AV1: &str = "AMFVideoDecoderHW_AV1";
-pub const AMF_VIDEO_ENCODER_CAP_MAX_PROFILE: &str = "MaxProfile";
-pub const AMF_VIDEO_ENCODER_CAP_MAX_LEVEL: &str = "MaxLevel";
-pub const AMF_VIDEO_ENCODER_CAP_BFRAMES: &str = "BFrames";
-pub const AMF_VIDEO_ENCODER_HEVC_CAP_MAX_PROFILE: &str = "HevcMaxProfile";
-pub const AMF_VIDEO_ENCODER_HEVC_CAP_MAX_LEVEL: &str = "HevcMaxLevel";
-pub const AMF_VIDEO_ENCODER_AV1_CAP_MAX_PROFILE: &str = "Av1MaxProfile";
-pub const AMF_VIDEO_ENCODER_AV1_CAP_MAX_LEVEL: &str = "Av1MaxLevel";
-pub const AMF_VIDEO_ENCODER_AV1_CAP_BFRAMES: &str = "AV1BFrames";
-"#,
+            "// docs.rs: プロパティ定数は省略\n",
         )
         .expect("failed to write properties.rs");
         return;
@@ -194,35 +180,9 @@ pub enum AMF_RESULT { AMF_OK = 0, AMF_FAIL = 1 }
 #[repr(transparent)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct AMF_SURFACE_FORMAT(pub amf_uint);
-impl AMF_SURFACE_FORMAT {
-    pub const AMF_SURFACE_UNKNOWN: Self = Self(0);
-    pub const AMF_SURFACE_NV12: Self = Self(1);
-    pub const AMF_SURFACE_YV12: Self = Self(2);
-    pub const AMF_SURFACE_BGRA: Self = Self(3);
-    pub const AMF_SURFACE_ARGB: Self = Self(4);
-    pub const AMF_SURFACE_RGBA: Self = Self(5);
-    pub const AMF_SURFACE_YUV420P: Self = Self(7);
-    pub const AMF_SURFACE_YUY2: Self = Self(9);
-    pub const AMF_SURFACE_P010: Self = Self(10);
-    pub const AMF_SURFACE_UYVY: Self = Self(12);
-    pub const AMF_SURFACE_Y210: Self = Self(14);
-    pub const AMF_SURFACE_AYUV: Self = Self(15);
-    pub const AMF_SURFACE_Y410: Self = Self(16);
-    pub const AMF_SURFACE_Y416: Self = Self(17);
-    pub const AMF_SURFACE_P012: Self = Self(19);
-    pub const AMF_SURFACE_P016: Self = Self(20);
-}
 #[repr(transparent)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct AMF_MEMORY_TYPE(pub amf_uint);
-impl AMF_MEMORY_TYPE {
-    pub const AMF_MEMORY_UNKNOWN: Self = Self(0);
-    pub const AMF_MEMORY_HOST: Self = Self(1);
-    pub const AMF_MEMORY_OPENCL: Self = Self(4);
-    pub const AMF_MEMORY_OPENGL: Self = Self(5);
-    pub const AMF_MEMORY_XV: Self = Self(6);
-    pub const AMF_MEMORY_VULKAN: Self = Self(10);
-}
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AMF_DATA_TYPE { AMF_DATA_BUFFER = 0, AMF_DATA_SURFACE = 1 }
@@ -232,26 +192,6 @@ pub enum AMF_PLANE_TYPE { AMF_PLANE_UNKNOWN = 0, AMF_PLANE_PACKED = 1, AMF_PLANE
 #[repr(transparent)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct AMF_VARIANT_TYPE(pub amf_uint);
-impl AMF_VARIANT_TYPE {
-    pub const AMF_VARIANT_EMPTY: Self = Self(0);
-    pub const AMF_VARIANT_BOOL: Self = Self(1);
-    pub const AMF_VARIANT_INT64: Self = Self(2);
-    pub const AMF_VARIANT_DOUBLE: Self = Self(3);
-    pub const AMF_VARIANT_RECT: Self = Self(4);
-    pub const AMF_VARIANT_SIZE: Self = Self(5);
-    pub const AMF_VARIANT_POINT: Self = Self(6);
-    pub const AMF_VARIANT_RATE: Self = Self(7);
-    pub const AMF_VARIANT_RATIO: Self = Self(8);
-    pub const AMF_VARIANT_COLOR: Self = Self(9);
-    pub const AMF_VARIANT_STRING: Self = Self(10);
-    pub const AMF_VARIANT_WSTRING: Self = Self(11);
-    pub const AMF_VARIANT_INTERFACE: Self = Self(12);
-    pub const AMF_VARIANT_FLOAT: Self = Self(13);
-    pub const AMF_VARIANT_FLOAT_SIZE: Self = Self(14);
-    pub const AMF_VARIANT_FLOAT_POINT2D: Self = Self(15);
-    pub const AMF_VARIANT_FLOAT_POINT3D: Self = Self(16);
-    pub const AMF_VARIANT_FLOAT_VECTOR4D: Self = Self(17);
-}
 pub type AMF_VIDEO_ENCODER_OUTPUT_DATA_TYPE_ENUM = amf_uint;
 pub const AMF_VIDEO_ENCODER_OUTPUT_DATA_TYPE_ENUM_AMF_VIDEO_ENCODER_OUTPUT_DATA_TYPE_IDR: AMF_VIDEO_ENCODER_OUTPUT_DATA_TYPE_ENUM = 0;
 pub const AMF_VIDEO_ENCODER_OUTPUT_DATA_TYPE_ENUM_AMF_VIDEO_ENCODER_OUTPUT_DATA_TYPE_I: AMF_VIDEO_ENCODER_OUTPUT_DATA_TYPE_ENUM = 1;
@@ -336,20 +276,6 @@ pub struct AMFVariantStruct {
 }
 
 pub type AMF_ACCELERATION_TYPE = std::ffi::c_int;
-pub const AMF_ACCELERATION_TYPE_AMF_ACCEL_NOT_SUPPORTED: AMF_ACCELERATION_TYPE = -1;
-pub const AMF_ACCELERATION_TYPE_AMF_ACCEL_HARDWARE: AMF_ACCELERATION_TYPE = 0;
-pub const AMF_ACCELERATION_TYPE_AMF_ACCEL_GPU: AMF_ACCELERATION_TYPE = 1;
-pub const AMF_ACCELERATION_TYPE_AMF_ACCEL_SOFTWARE: AMF_ACCELERATION_TYPE = 2;
-
-pub const AMF_VIDEO_ENCODER_PROFILE_ENUM_AMF_VIDEO_ENCODER_PROFILE_UNKNOWN: amf_uint = 0;
-pub const AMF_VIDEO_ENCODER_PROFILE_ENUM_AMF_VIDEO_ENCODER_PROFILE_BASELINE: amf_uint = 66;
-pub const AMF_VIDEO_ENCODER_PROFILE_ENUM_AMF_VIDEO_ENCODER_PROFILE_MAIN: amf_uint = 77;
-pub const AMF_VIDEO_ENCODER_PROFILE_ENUM_AMF_VIDEO_ENCODER_PROFILE_HIGH: amf_uint = 100;
-pub const AMF_VIDEO_ENCODER_PROFILE_ENUM_AMF_VIDEO_ENCODER_PROFILE_CONSTRAINED_BASELINE: amf_uint = 256;
-pub const AMF_VIDEO_ENCODER_PROFILE_ENUM_AMF_VIDEO_ENCODER_PROFILE_CONSTRAINED_HIGH: amf_uint = 257;
-pub const AMF_VIDEO_ENCODER_HEVC_PROFILE_ENUM_AMF_VIDEO_ENCODER_HEVC_PROFILE_MAIN: amf_uint = 1;
-pub const AMF_VIDEO_ENCODER_HEVC_PROFILE_ENUM_AMF_VIDEO_ENCODER_HEVC_PROFILE_MAIN_10: amf_uint = 2;
-pub const AMF_VIDEO_ENCODER_AV1_PROFILE_ENUM_AMF_VIDEO_ENCODER_AV1_PROFILE_MAIN: amf_uint = 1;
 
 #[repr(C)]
 pub struct AMFCaps { pub pVtbl: *const AMFCapsVtbl }

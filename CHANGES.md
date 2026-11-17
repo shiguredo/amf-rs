@@ -14,8 +14,14 @@
 - [CHANGE] `supported_codecs` の戻り値と `CodecInfo` の能力情報を AMF が返す値に基づく形に変更する
   - `supported_codecs` は `Result<Vec<CodecInfo>, Error>` を返す
   - `CodecInfo` の `decoding` / `encoding` を `Option` に変更する
-  - `hardware_accelerated` / `supports_multi_pass` / `profiles` を削除し、`AccelerationType`、`VideoProfile`、`max_level`、`IoCapabilities`、`properties` を追加する
-  - `AMF_SURFACE_FORMAT` / `AMF_MEMORY_TYPE` / `AMF_VARIANT_TYPE` を newtype enum に変更する
+  - `DecodingInfo::supported` / `EncodingInfo::supported` を削除する
+  - `hardware_accelerated` / `supports_multi_pass` / `profiles` を削除する
+  - `EncodingProfiles` / `H264EncodingProfile` / `HevcEncodingProfile` / `Av1EncodingProfile` を削除する
+  - `supports_frame_reordering` を `bool` から `Option<bool>` に変更する
+  - `DecodingInfo` の `Eq` 実装を削除する
+  - `max_profile: Option<VideoProfile>` / `max_level: Option<i64>` を追加する
+  - `AccelerationType` / `SurfaceFormat` / `MemoryType` / `SurfaceFormatCapability` / `MemoryTypeCapability` / `IoCapabilities` / `Property` / `Value` を追加する
+  - `properties` に AMF が返した全プロパティを追加する
   - @melpon
 - [CHANGE] `amf::Plane` の寿命を取得元の `Surface` に縛るように変更する
   - `Plane<'a>` は `Surface` を借用し、`Surface` を drop した後の `Plane` の利用はコンパイルエラーになる
@@ -75,6 +81,8 @@
 
 ### misc
 
+- [UPDATE] `ffi` の `AMF_SURFACE_FORMAT` / `AMF_MEMORY_TYPE` / `AMF_VARIANT_TYPE` を newtype enum に変更する
+  - @melpon
 - [UPDATE] shiguredo-rust と AGENTS.md の規約に合わせて lint 抑制・`.unwrap()`・ログ出力・コメントを整理する
   - `#[allow]` を `#[expect]` に置き換え、bindgen の生成コードを専用モジュールに閉じ込める
   - `log` を `tracing` に置き換え、毎フレーム実行されるログを `trace` に下げる

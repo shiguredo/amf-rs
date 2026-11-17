@@ -92,7 +92,7 @@ AMD GPU 向けハードウェアアクセラレーションによるビデオエ
 | `VideoCodecType` | コーデック種別 (`H264`, `Hevc`, `Av1`) |
 | `CodecInfo` | コーデックごとの情報 (`codec`, `decoding: Option<DecodingInfo>`, `encoding: Option<EncodingInfo>`) |
 | `DecodingInfo` | `acceleration: Option<AccelerationType>`, `input: Option<IoCapabilities>`, `output: Option<IoCapabilities>`, `properties: Vec<Property>` |
-| `EncodingInfo` | `acceleration`, `max_profile: Option<VideoProfile>`, `max_level: Option<i64>`, `supports_frame_reordering: Option<bool>`, `input`, `output`, `properties` |
+| `EncodingInfo` | `acceleration: Option<AccelerationType>`, `max_profile: Option<VideoProfile>`, `max_level: Option<i64>`, `supports_frame_reordering: Option<bool>`, `input: Option<IoCapabilities>`, `output: Option<IoCapabilities>`, `properties: Vec<Property>` |
 | `AccelerationType` | `NotSupported`, `Hardware`, `Gpu`, `Software`, `Unknown(i32)` |
 | `VideoProfile` | `H264(H264Profile)`, `Hevc(HevcProfile)`, `Av1(Av1Profile)`, `Unknown(i64)` |
 | `IoCapabilities` | 幅・高さの範囲、垂直アライメント、`SurfaceFormatCapability`、`MemoryTypeCapability`、インターレース対応 |

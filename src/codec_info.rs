@@ -4,7 +4,7 @@ use std::ffi::CStr;
 
 use crate::AmfLibrary;
 use crate::Error;
-use crate::amf::{Caps, Context, IoCaps as RawIoCaps};
+use crate::amf::{Caps, Context, IoCaps};
 use crate::sys;
 use crate::types::{Av1Profile, FrameFormat, H264Profile, HevcProfile};
 
@@ -67,7 +67,9 @@ pub enum VideoProfile {
     Hevc(HevcProfile),
     /// AV1 プロファイル
     Av1(Av1Profile),
-    /// 本クレートが型として持たないプロファイル
+    /// AMF の生値
+    ///
+    /// 値の意味はコーデックごとに異なり、コーデック間で比較できない。
     Unknown(i64),
 }
 
@@ -279,7 +281,6 @@ pub struct IoCapabilities {
 /// この型は AMF が返した値を確認するためのものであり、値の意味や存在は
 /// AMF のバージョンとドライバーに依存する。動作の制御には
 /// [`EncodingInfo`] / [`DecodingInfo`] の各フィールドを使う。
-/// 各プロパティは AMF が返した順序で並ぶ。
 #[derive(Debug, Clone, PartialEq)]
 pub struct Property {
     /// プロパティ名
@@ -546,7 +547,7 @@ pub struct DecodingInfo {
     pub output: Option<IoCapabilities>,
     /// デコーダーに関する全プロパティ
     ///
-    /// 取得できなかった場合は空になる。
+    /// 要素は AMF が返した順序で並ぶ。取得できなかった場合は空になる。
     pub properties: Vec<Property>,
 }
 
@@ -561,6 +562,8 @@ pub struct EncodingInfo {
     /// エンコード時のアクセラレーション種別
     pub acceleration: Option<AccelerationType>,
     /// 最大プロファイル
+    ///
+    /// H.264 の値 0 はプロファイル不明として `None` になる。HEVC / AV1 の値 0 は `Unknown(0)`。
     pub max_profile: Option<VideoProfile>,
     /// 最大レベル
     ///
@@ -568,7 +571,7 @@ pub struct EncodingInfo {
     pub max_level: Option<i64>,
     /// B フレーム (フレームリオーダリング) に対応しているか
     ///
-    /// `None` は非対応を意味しない。
+    /// AMF が対応情報を返さない場合は `None`。`Some(false)` は非対応を表す。
     pub supports_frame_reordering: Option<bool>,
     /// エンコーダーの入力の能力情報
     pub input: Option<IoCapabilities>,
@@ -577,7 +580,7 @@ pub struct EncodingInfo {
     /// エンコーダーに関する全プロパティ
     ///
     /// `max_profile` / `max_level` / `supports_frame_reordering` に使うプロパティも含む。
-    /// 全件を取得できなかった場合は空になる。
+    /// 要素は AMF が返した順序で並ぶ。全件を取得できなかった場合は空になる。
     pub properties: Vec<Property>,
 }
 
@@ -628,7 +631,7 @@ fn decoder_component_id(codec: VideoCodecType) -> &'static str {
 }
 
 /// 最大プロファイルのプロパティ名を返す
-fn profile_property(codec: VideoCodecType) -> &'static str {
+fn max_profile_property(codec: VideoCodecType) -> &'static str {
     match codec {
         VideoCodecType::H264 => sys::str::AMF_VIDEO_ENCODER_CAP_MAX_PROFILE,
         VideoCodecType::Hevc => sys::str::AMF_VIDEO_ENCODER_HEVC_CAP_MAX_PROFILE,
@@ -637,7 +640,7 @@ fn profile_property(codec: VideoCodecType) -> &'static str {
 }
 
 /// 最大レベルのプロパティ名を返す
-fn level_property(codec: VideoCodecType) -> &'static str {
+fn max_level_property(codec: VideoCodecType) -> &'static str {
     match codec {
         VideoCodecType::H264 => sys::str::AMF_VIDEO_ENCODER_CAP_MAX_LEVEL,
         VideoCodecType::Hevc => sys::str::AMF_VIDEO_ENCODER_HEVC_CAP_MAX_LEVEL,
@@ -648,7 +651,7 @@ fn level_property(codec: VideoCodecType) -> &'static str {
 /// B フレーム対応のプロパティ名を返す
 ///
 /// HEVC には B フレーム対応を表す caps プロパティがないため `None` を返す。
-fn bframes_property(codec: VideoCodecType) -> Option<&'static str> {
+fn supports_frame_reordering_property(codec: VideoCodecType) -> Option<&'static str> {
     match codec {
         VideoCodecType::H264 => Some(sys::str::AMF_VIDEO_ENCODER_CAP_BFRAMES),
         VideoCodecType::Hevc => None,
@@ -662,36 +665,7 @@ fn probe_encoding(context: &Context, codec: VideoCodecType) -> Option<EncodingIn
         .create_component(context, encoder_component_id(codec))
         .ok()?;
     let caps = component.get_caps().ok();
-
-    // Init に渡すサイズは入力 caps の最小値を使う。取得できない場合は、
-    // 実機の全コーデックで受け付けられる 640x480 にフォールバックする。
-    let (width, height) = caps
-        .as_ref()
-        .and_then(|caps| caps.input_caps().ok())
-        .map(|io_caps| {
-            let (min_width, _) = io_caps.width_range();
-            let (min_height, _) = io_caps.height_range();
-            (min_width, min_height)
-        })
-        .unwrap_or((640, 480));
-
-    let result = component.init(sys::AMF_SURFACE_FORMAT::AMF_SURFACE_NV12, width, height);
-    if result != sys::AMF_RESULT::AMF_OK {
-        drop(caps);
-        let _ = component.terminate();
-        return None;
-    }
-
-    // GetCaps が Init 前に失敗するランタイムでも能力情報を取得できるよう、
-    // Init 後に一度だけ再試行する。
-    let caps = match caps {
-        Some(caps) => Some(caps),
-        None => component.get_caps().ok(),
-    };
-    let info = encoding_info_from_caps(codec, caps.as_ref());
-    drop(caps);
-    let _ = component.terminate();
-    Some(info)
+    Some(build_encoding_info(codec, caps.as_ref()))
 }
 
 /// デコーダーの能力情報を返す
@@ -700,41 +674,32 @@ fn probe_decoding(context: &Context, codec: VideoCodecType) -> Option<DecodingIn
         .create_component(context, decoder_component_id(codec))
         .ok()?;
     let caps = component.get_caps().ok();
-
-    let result = component.init(sys::AMF_SURFACE_FORMAT::AMF_SURFACE_NV12, 0, 0);
-    if result != sys::AMF_RESULT::AMF_OK {
-        drop(caps);
-        let _ = component.terminate();
-        return None;
-    }
-
-    let caps = match caps {
-        Some(caps) => Some(caps),
-        None => component.get_caps().ok(),
-    };
-    let info = decoding_info_from_caps(caps.as_ref());
-    drop(caps);
-    let _ = component.terminate();
-    Some(info)
+    Some(build_decoding_info(caps.as_ref()))
 }
 
 /// エンコーダーの能力情報を構築する
-fn encoding_info_from_caps(codec: VideoCodecType, caps: Option<&Caps>) -> EncodingInfo {
-    let acceleration = caps.map(|caps| AccelerationType::from_amf(caps.acceleration_type()));
+fn build_encoding_info(codec: VideoCodecType, caps: Option<&Caps>) -> EncodingInfo {
+    let acceleration = caps.map(|caps| AccelerationType::from_amf(caps.get_acceleration_type()));
     let max_profile = caps
-        .and_then(|caps| caps.get_property_int64(profile_property(codec)))
+        .and_then(|caps| caps.get_property(max_profile_property(codec)))
+        .and_then(|value| value.as_int64())
         .and_then(|value| VideoProfile::from_amf(codec, value));
-    let max_level = caps.and_then(|caps| caps.get_property_int64(level_property(codec)));
-    let supports_frame_reordering =
-        caps.and_then(|caps| bframes_property(codec).and_then(|name| caps.get_property_bool(name)));
+    let max_level = caps
+        .and_then(|caps| caps.get_property(max_level_property(codec)))
+        .and_then(|value| value.as_int64());
+    let supports_frame_reordering = caps.and_then(|caps| {
+        supports_frame_reordering_property(codec)
+            .and_then(|name| caps.get_property(name))
+            .and_then(|value| value.as_bool())
+    });
     let input = caps
-        .and_then(|caps| caps.input_caps().ok())
-        .and_then(|io_caps| convert_io_caps(io_caps).ok());
+        .and_then(|caps| caps.get_input_caps().ok())
+        .and_then(|io_caps| convert_io_capabilities(io_caps).ok());
     let output = caps
-        .and_then(|caps| caps.output_caps().ok())
-        .and_then(|io_caps| convert_io_caps(io_caps).ok());
+        .and_then(|caps| caps.get_output_caps().ok())
+        .and_then(|io_caps| convert_io_capabilities(io_caps).ok());
     let properties = caps
-        .and_then(|caps| properties_from_caps(caps).ok())
+        .and_then(|caps| collect_properties(caps).ok())
         .unwrap_or_default();
 
     EncodingInfo {
@@ -749,16 +714,16 @@ fn encoding_info_from_caps(codec: VideoCodecType, caps: Option<&Caps>) -> Encodi
 }
 
 /// デコーダーの能力情報を構築する
-fn decoding_info_from_caps(caps: Option<&Caps>) -> DecodingInfo {
-    let acceleration = caps.map(|caps| AccelerationType::from_amf(caps.acceleration_type()));
+fn build_decoding_info(caps: Option<&Caps>) -> DecodingInfo {
+    let acceleration = caps.map(|caps| AccelerationType::from_amf(caps.get_acceleration_type()));
     let input = caps
-        .and_then(|caps| caps.input_caps().ok())
-        .and_then(|io_caps| convert_io_caps(io_caps).ok());
+        .and_then(|caps| caps.get_input_caps().ok())
+        .and_then(|io_caps| convert_io_capabilities(io_caps).ok());
     let output = caps
-        .and_then(|caps| caps.output_caps().ok())
-        .and_then(|io_caps| convert_io_caps(io_caps).ok());
+        .and_then(|caps| caps.get_output_caps().ok())
+        .and_then(|io_caps| convert_io_capabilities(io_caps).ok());
     let properties = caps
-        .and_then(|caps| properties_from_caps(caps).ok())
+        .and_then(|caps| collect_properties(caps).ok())
         .unwrap_or_default();
 
     DecodingInfo {
@@ -770,7 +735,7 @@ fn decoding_info_from_caps(caps: Option<&Caps>) -> DecodingInfo {
 }
 
 /// `AMFIOCaps` を公開型に変換する
-fn convert_io_caps(io_caps: RawIoCaps) -> Result<IoCapabilities, Error> {
+fn convert_io_capabilities(io_caps: IoCaps) -> Result<IoCapabilities, Error> {
     let (min_width, max_width) = io_caps.width_range();
     let (min_height, max_height) = io_caps.height_range();
     let vertical_alignment = io_caps.vertical_alignment();
@@ -804,11 +769,11 @@ fn convert_io_caps(io_caps: RawIoCaps) -> Result<IoCapabilities, Error> {
 }
 
 /// `AMFCaps` の全プロパティを取得する
-fn properties_from_caps(caps: &Caps) -> Result<Vec<Property>, Error> {
-    let count = caps.property_count();
+fn collect_properties(caps: &Caps) -> Result<Vec<Property>, Error> {
+    let count = caps.get_property_count();
     let mut properties = Vec::new();
     for index in 0..count {
-        let (name, value) = caps.property_at(index)?;
+        let (name, value) = caps.get_property_at(index)?;
         properties.push(Property {
             name,
             value: Value::from_variant(value.as_ref()),
@@ -828,29 +793,45 @@ mod tests {
             .expect("Context の作成に失敗")
     }
 
-    /// 入力 caps の最小サイズでエンコーダーを初期化する
-    fn init_encoder(component: &crate::amf::Component, caps: &Caps) -> sys::AMF_RESULT {
-        let (width, height) = caps
-            .input_caps()
-            .ok()
-            .map(|io_caps| {
-                let (min_width, _) = io_caps.width_range();
-                let (min_height, _) = io_caps.height_range();
-                if min_width > 0 && min_height > 0 {
-                    (min_width, min_height)
-                } else {
-                    (640, 480)
-                }
-            })
-            .unwrap_or((640, 480));
-        component.init(sys::AMF_SURFACE_FORMAT::AMF_SURFACE_NV12, width, height)
+    /// テスト側で AMF の surface format を期待値に変換する
+    fn expected_surface_format(format: sys::AMF_SURFACE_FORMAT) -> SurfaceFormat {
+        match format {
+            sys::AMF_SURFACE_FORMAT::AMF_SURFACE_NV12 => SurfaceFormat::Known(FrameFormat::Nv12),
+            sys::AMF_SURFACE_FORMAT::AMF_SURFACE_YV12 => SurfaceFormat::Known(FrameFormat::Yv12),
+            sys::AMF_SURFACE_FORMAT::AMF_SURFACE_YUV420P => SurfaceFormat::Known(FrameFormat::I420),
+            sys::AMF_SURFACE_FORMAT::AMF_SURFACE_BGRA => SurfaceFormat::Known(FrameFormat::Bgra),
+            sys::AMF_SURFACE_FORMAT::AMF_SURFACE_ARGB => SurfaceFormat::Known(FrameFormat::Argb),
+            sys::AMF_SURFACE_FORMAT::AMF_SURFACE_RGBA => SurfaceFormat::Known(FrameFormat::Rgba),
+            sys::AMF_SURFACE_FORMAT::AMF_SURFACE_YUY2 => SurfaceFormat::Known(FrameFormat::Yuy2),
+            sys::AMF_SURFACE_FORMAT::AMF_SURFACE_UYVY => SurfaceFormat::Known(FrameFormat::Uyvy),
+            sys::AMF_SURFACE_FORMAT::AMF_SURFACE_P010 => SurfaceFormat::Known(FrameFormat::P010),
+            sys::AMF_SURFACE_FORMAT::AMF_SURFACE_P012 => SurfaceFormat::Known(FrameFormat::P012),
+            sys::AMF_SURFACE_FORMAT::AMF_SURFACE_P016 => SurfaceFormat::Known(FrameFormat::P016),
+            sys::AMF_SURFACE_FORMAT::AMF_SURFACE_Y210 => SurfaceFormat::Known(FrameFormat::Y210),
+            sys::AMF_SURFACE_FORMAT::AMF_SURFACE_AYUV => SurfaceFormat::Known(FrameFormat::Ayuv),
+            sys::AMF_SURFACE_FORMAT::AMF_SURFACE_Y410 => SurfaceFormat::Known(FrameFormat::Y410),
+            sys::AMF_SURFACE_FORMAT::AMF_SURFACE_Y416 => SurfaceFormat::Known(FrameFormat::Y416),
+            other => SurfaceFormat::Unknown(other.0 as i32),
+        }
+    }
+
+    /// テスト側で AMF の memory type を期待値に変換する
+    fn expected_memory_type(memory_type: sys::AMF_MEMORY_TYPE) -> MemoryType {
+        match memory_type {
+            sys::AMF_MEMORY_TYPE::AMF_MEMORY_HOST => MemoryType::Host,
+            sys::AMF_MEMORY_TYPE::AMF_MEMORY_OPENCL => MemoryType::OpenCl,
+            sys::AMF_MEMORY_TYPE::AMF_MEMORY_OPENGL => MemoryType::OpenGl,
+            sys::AMF_MEMORY_TYPE::AMF_MEMORY_XV => MemoryType::Xv,
+            sys::AMF_MEMORY_TYPE::AMF_MEMORY_VULKAN => MemoryType::Vulkan,
+            other => MemoryType::Unknown(other.0 as i32),
+        }
     }
 
     /// 公開 IoCapabilities が AMF の値と一致することを確認する
-    fn assert_io_caps_matches(
+    fn assert_io_capabilities_match(
         label: &str,
         actual: Option<&IoCapabilities>,
-        raw: Result<RawIoCaps, Error>,
+        raw: Result<IoCaps, Error>,
     ) {
         let actual = actual.unwrap_or_else(|| panic!("{label} が None になっている"));
         let raw = raw.unwrap_or_else(|e| panic!("{label} の取得に失敗した: {e}"));
@@ -871,21 +852,61 @@ mod tests {
             raw.vertical_alignment(),
             "{label} の垂直アライメントが一致しない"
         );
+
+        let raw_formats = raw.formats().expect("formats の取得に失敗");
         assert_eq!(
             actual.formats.len(),
-            raw.formats().expect("formats の取得に失敗").len(),
+            raw_formats.len(),
             "{label} のフォーマット数が一致しない"
         );
+        for (index, (actual, (raw_format, raw_native))) in
+            actual.formats.iter().zip(raw_formats).enumerate()
+        {
+            assert_eq!(
+                actual.format,
+                expected_surface_format(raw_format),
+                "{label} の {index} 番目の surface format が一致しない"
+            );
+            assert_eq!(
+                actual.native, raw_native,
+                "{label} の {index} 番目の native フラグが一致しない"
+            );
+        }
+
+        let raw_memory_types = raw.memory_types().expect("memory_types の取得に失敗");
         assert_eq!(
             actual.memory_types.len(),
-            raw.memory_types().expect("memory_types の取得に失敗").len(),
+            raw_memory_types.len(),
             "{label} のメモリタイプ数が一致しない"
         );
+        for (index, (actual, (raw_memory_type, raw_native))) in
+            actual.memory_types.iter().zip(raw_memory_types).enumerate()
+        {
+            assert_eq!(
+                actual.memory_type,
+                expected_memory_type(raw_memory_type),
+                "{label} の {index} 番目の memory type が一致しない"
+            );
+            assert_eq!(
+                actual.native, raw_native,
+                "{label} の {index} 番目の native フラグが一致しない"
+            );
+        }
+
         assert_eq!(
             actual.interlaced,
             raw.interlaced(),
             "{label} のインターレース対応が一致しない"
         );
+    }
+
+    /// テスト対象の GPU で報告されるエンコーダー能力の期待値を返す
+    fn expected_encoding(codec: VideoCodecType) -> (VideoProfile, i64, i64, Option<bool>) {
+        match codec {
+            VideoCodecType::H264 => (VideoProfile::H264(H264Profile::High), 100, 52, Some(true)),
+            VideoCodecType::Hevc => (VideoProfile::Hevc(HevcProfile::Main10), 2, 186, None),
+            VideoCodecType::Av1 => (VideoProfile::Av1(Av1Profile::Main), 1, 16, Some(false)),
+        }
     }
 
     /// エンコーダーの能力情報が AMFCaps の値と一致することを確認する
@@ -897,63 +918,112 @@ mod tests {
                 .create_component(&context, encoder_component_id(codec))
                 .expect("エンコーダーの作成に失敗");
             let caps = component.get_caps().expect("GetCaps に失敗");
-            assert_eq!(
-                init_encoder(&component, &caps),
-                sys::AMF_RESULT::AMF_OK,
-                "{codec:?} のエンコーダー初期化に失敗"
-            );
+            let (profile, profile_value, level, frame_reordering) = expected_encoding(codec);
 
-            let info = encoding_info_from_caps(codec, Some(&caps));
-            let expected_profile = caps
-                .get_property_int64(profile_property(codec))
-                .and_then(|value| VideoProfile::from_amf(codec, value));
             assert_eq!(
-                info.max_profile, expected_profile,
-                "{codec:?} の max_profile が一致しない"
+                caps.get_property(max_profile_property(codec))
+                    .and_then(|value| value.as_int64()),
+                Some(profile_value),
+                "{codec:?} の最大プロファイルプロパティが期待値と一致しない"
             );
             assert_eq!(
-                info.max_level,
-                caps.get_property_int64(level_property(codec)),
-                "{codec:?} の max_level が一致しない"
+                caps.get_property(max_level_property(codec))
+                    .and_then(|value| value.as_int64()),
+                Some(level),
+                "{codec:?} の最大レベルプロパティが期待値と一致しない"
             );
-            assert_eq!(
-                info.supports_frame_reordering,
-                bframes_property(codec).and_then(|name| caps.get_property_bool(name)),
-                "{codec:?} の supports_frame_reordering が一致しない"
-            );
-            assert_eq!(
-                info.properties.len(),
-                caps.property_count(),
-                "{codec:?} のプロパティ数が一致しない"
-            );
-
-            // フィールドに写像したプロパティも properties に含まれることを確認する
-            if let Some(value) = caps.get_property_int64(profile_property(codec)) {
-                let property = info
-                    .properties
-                    .iter()
-                    .find(|property| property.name == profile_property(codec))
-                    .unwrap_or_else(|| panic!("{codec:?} のプロパティが見つからない"));
+            if let Some(name) = supports_frame_reordering_property(codec) {
                 assert_eq!(
-                    property.value,
-                    Value::Int64(value),
-                    "{codec:?} のプロパティ値が一致しない"
+                    caps.get_property(name).and_then(|value| value.as_bool()),
+                    frame_reordering,
+                    "{codec:?} の B フレームプロパティが期待値と一致しない"
                 );
             }
 
-            assert_io_caps_matches(
-                &format!("{codec:?} の入力"),
-                info.input.as_ref(),
-                caps.input_caps(),
+            let info = build_encoding_info(codec, Some(&caps));
+            assert_eq!(
+                info.acceleration,
+                Some(AccelerationType::Hardware),
+                "{codec:?} の acceleration が期待値と一致しない"
             );
-            assert_io_caps_matches(
-                &format!("{codec:?} の出力"),
-                info.output.as_ref(),
-                caps.output_caps(),
+            assert_eq!(
+                info.max_profile,
+                Some(profile),
+                "{codec:?} の max_profile が期待値と一致しない"
+            );
+            assert_eq!(
+                info.max_level,
+                Some(level),
+                "{codec:?} の max_level が期待値と一致しない"
+            );
+            assert_eq!(
+                info.supports_frame_reordering, frame_reordering,
+                "{codec:?} の supports_frame_reordering が期待値と一致しない"
+            );
+            assert_eq!(
+                info.properties.len(),
+                caps.get_property_count(),
+                "{codec:?} のプロパティ数が一致しない"
             );
 
-            drop(caps);
-            let _ = component.terminate();
+            for (index, property) in info.properties.iter().enumerate() {
+                let (name, value) = caps.get_property_at(index).expect("プロパティの取得に失敗");
+                assert_eq!(
+                    property.name, name,
+                    "{codec:?} の {index} 番目のプロパティ名が一致しない"
+                );
+                assert_eq!(
+                    property.value,
+                    Value::from_variant(value.as_ref()),
+                    "{codec:?} の {index} 番目のプロパティ値が一致しない"
+                );
+            }
+
+            let max_profile_property = info
+                .properties
+                .iter()
+                .find(|property| property.name == max_profile_property(codec))
+                .unwrap_or_else(|| panic!("{codec:?} の最大プロファイルプロパティが見つからない"));
+            assert_eq!(
+                max_profile_property.value,
+                Value::Int64(profile_value),
+                "{codec:?} の最大プロファイルプロパティ値が一致しない"
+            );
+
+            let max_level_property = info
+                .properties
+                .iter()
+                .find(|property| property.name == max_level_property(codec))
+                .unwrap_or_else(|| panic!("{codec:?} の最大レベルプロパティが見つからない"));
+            assert_eq!(
+                max_level_property.value,
+                Value::Int64(level),
+                "{codec:?} の最大レベルプロパティ値が一致しない"
+            );
+
+            if let Some(name) = supports_frame_reordering_property(codec) {
+                let property = info
+                    .properties
+                    .iter()
+                    .find(|property| property.name == name)
+                    .unwrap_or_else(|| panic!("{codec:?} の B フレームプロパティが見つからない"));
+                assert_eq!(
+                    property.value,
+                    Value::Bool(frame_reordering.expect("B フレーム対応の期待値がない")),
+                    "{codec:?} の B フレームプロパティ値が一致しない"
+                );
+            }
+
+            assert_io_capabilities_match(
+                &format!("{codec:?} の入力"),
+                info.input.as_ref(),
+                caps.get_input_caps(),
+            );
+            assert_io_capabilities_match(
+                &format!("{codec:?} の出力"),
+                info.output.as_ref(),
+                caps.get_output_caps(),
+            );
         }
     }
 
@@ -966,36 +1036,140 @@ mod tests {
                 .create_component(&context, decoder_component_id(codec))
                 .expect("デコーダーの作成に失敗");
             let caps = component.get_caps().expect("GetCaps に失敗");
-            assert_eq!(
-                component.init(sys::AMF_SURFACE_FORMAT::AMF_SURFACE_NV12, 0, 0),
-                sys::AMF_RESULT::AMF_OK,
-                "{codec:?} のデコーダー初期化に失敗"
-            );
 
-            let info = decoding_info_from_caps(Some(&caps));
+            let info = build_decoding_info(Some(&caps));
             assert_eq!(
                 info.acceleration,
-                Some(AccelerationType::from_amf(caps.acceleration_type())),
-                "{codec:?} の acceleration が一致しない"
+                Some(AccelerationType::Hardware),
+                "{codec:?} の acceleration が期待値と一致しない"
             );
             assert_eq!(
                 info.properties.len(),
-                caps.property_count(),
+                caps.get_property_count(),
                 "{codec:?} のプロパティ数が一致しない"
             );
-            assert_io_caps_matches(
+            for (index, property) in info.properties.iter().enumerate() {
+                let (name, value) = caps.get_property_at(index).expect("プロパティの取得に失敗");
+                assert_eq!(
+                    property.name, name,
+                    "{codec:?} の {index} 番目のプロパティ名が一致しない"
+                );
+                assert_eq!(
+                    property.value,
+                    Value::from_variant(value.as_ref()),
+                    "{codec:?} の {index} 番目のプロパティ値が一致しない"
+                );
+            }
+            assert_io_capabilities_match(
                 &format!("{codec:?} の入力"),
                 info.input.as_ref(),
-                caps.input_caps(),
+                caps.get_input_caps(),
             );
-            assert_io_caps_matches(
+            assert_io_capabilities_match(
                 &format!("{codec:?} の出力"),
                 info.output.as_ref(),
-                caps.output_caps(),
+                caps.get_output_caps(),
+            );
+        }
+    }
+    /// `probe_encoding` / `probe_decoding` が能力情報を取得できることを確認する
+    #[test]
+    fn test_probe_returns_capabilities() {
+        let context = create_context();
+        for &codec in VideoCodecType::all() {
+            let encoding = probe_encoding(&context, codec)
+                .unwrap_or_else(|| panic!("{codec:?} のエンコーダー能力を取得できない"));
+            assert_eq!(
+                encoding.acceleration,
+                Some(AccelerationType::Hardware),
+                "{codec:?} のエンコーダー acceleration が期待値と一致しない"
+            );
+            assert!(
+                encoding.input.is_some(),
+                "{codec:?} のエンコーダー入力能力がない"
+            );
+            assert!(
+                encoding.output.is_some(),
+                "{codec:?} のエンコーダー出力能力がない"
+            );
+            assert!(
+                !encoding.properties.is_empty(),
+                "{codec:?} のエンコーダープロパティがない"
             );
 
-            drop(caps);
-            let _ = component.terminate();
+            let decoding = probe_decoding(&context, codec)
+                .unwrap_or_else(|| panic!("{codec:?} のデコーダー能力を取得できない"));
+            assert_eq!(
+                decoding.acceleration,
+                Some(AccelerationType::Hardware),
+                "{codec:?} のデコーダー acceleration が期待値と一致しない"
+            );
+            assert!(
+                decoding.input.is_some(),
+                "{codec:?} のデコーダー入力能力がない"
+            );
+            assert!(
+                decoding.output.is_some(),
+                "{codec:?} のデコーダー出力能力がない"
+            );
+            assert!(
+                !decoding.properties.is_empty(),
+                "{codec:?} のデコーダープロパティがない"
+            );
+        }
+    }
+
+    /// 能力情報がない場合のエンコーダー情報の契約を確認する
+    #[test]
+    fn test_build_encoding_info_none() {
+        for &codec in VideoCodecType::all() {
+            let info = build_encoding_info(codec, None);
+            assert_eq!(
+                info.acceleration, None,
+                "{codec:?} の acceleration が None ではない"
+            );
+            assert_eq!(
+                info.max_profile, None,
+                "{codec:?} の max_profile が None ではない"
+            );
+            assert_eq!(
+                info.max_level, None,
+                "{codec:?} の max_level が None ではない"
+            );
+            assert_eq!(
+                info.supports_frame_reordering, None,
+                "{codec:?} の supports_frame_reordering が None ではない"
+            );
+            assert!(info.input.is_none(), "{codec:?} の入力能力が None ではない");
+            assert!(
+                info.output.is_none(),
+                "{codec:?} の出力能力が None ではない"
+            );
+            assert!(
+                info.properties.is_empty(),
+                "{codec:?} のプロパティが空ではない"
+            );
+        }
+    }
+
+    /// 能力情報がない場合のデコーダー情報の契約を確認する
+    #[test]
+    fn test_build_decoding_info_none() {
+        for &codec in VideoCodecType::all() {
+            let info = build_decoding_info(None);
+            assert_eq!(
+                info.acceleration, None,
+                "{codec:?} の acceleration が None ではない"
+            );
+            assert!(info.input.is_none(), "{codec:?} の入力能力が None ではない");
+            assert!(
+                info.output.is_none(),
+                "{codec:?} の出力能力が None ではない"
+            );
+            assert!(
+                info.properties.is_empty(),
+                "{codec:?} のプロパティが空ではない"
+            );
         }
     }
 }
