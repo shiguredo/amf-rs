@@ -1448,8 +1448,15 @@ fn extract_encoded_output(
             "buffer size is 0",
         ));
     }
-    // 出力バッファをスライスとして扱えることを確認する。
-    unsafe { buffer.as_slice() }?;
+    // エンコーダーの出力バッファはホストメモリとは限らないため、メモリ種別ではなく
+    // GetNative がデータへのポインタを返すことだけを確認する。
+    let buf_native = buffer.get_native() as *const u8;
+    if buf_native.is_null() {
+        return Err(Error::new_custom(
+            "extract_encoded_output",
+            "buffer native is null",
+        ));
+    }
     let picture_type = get_output_picture_type(&buffer, codec_config)?;
     Ok((buffer, picture_type))
 }

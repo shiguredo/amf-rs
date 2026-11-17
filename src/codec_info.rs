@@ -724,7 +724,7 @@ mod tests {
             sys::AMF_SURFACE_FORMAT::AMF_SURFACE_AYUV => SurfaceFormat::Known(FrameFormat::Ayuv),
             sys::AMF_SURFACE_FORMAT::AMF_SURFACE_Y410 => SurfaceFormat::Known(FrameFormat::Y410),
             sys::AMF_SURFACE_FORMAT::AMF_SURFACE_Y416 => SurfaceFormat::Known(FrameFormat::Y416),
-            other => SurfaceFormat::Unknown(other.0 as i32),
+            other => SurfaceFormat::Unknown(other.0),
         }
     }
 

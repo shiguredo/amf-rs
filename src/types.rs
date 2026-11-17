@@ -60,16 +60,17 @@ impl FrameFormat {
     }
 }
 
-/// AMF が報告する surface format
+/// AMF の surface format
 ///
-/// `FrameFormat` に写像できる値は [`SurfaceFormat::Known`] に、写像できない値は
-/// [`SurfaceFormat::Unknown`] に AMF の生値を保持する。
+/// AMF が報告する値と、AMF に渡す値の両方に使う。`FrameFormat` に写像できる値は
+/// [`SurfaceFormat::Known`] に、写像できない値は [`SurfaceFormat::Unknown`] に
+/// AMF の生値を保持する。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SurfaceFormat {
     /// `FrameFormat` に写像できる形式
     Known(FrameFormat),
     /// `FrameFormat` に写像できない形式
-    Unknown(i32),
+    Unknown(u32),
 }
 
 impl SurfaceFormat {
@@ -91,7 +92,7 @@ impl SurfaceFormat {
             sys::AMF_SURFACE_FORMAT::AMF_SURFACE_AYUV => Self::Known(FrameFormat::Ayuv),
             sys::AMF_SURFACE_FORMAT::AMF_SURFACE_Y410 => Self::Known(FrameFormat::Y410),
             sys::AMF_SURFACE_FORMAT::AMF_SURFACE_Y416 => Self::Known(FrameFormat::Y416),
-            other => Self::Unknown(other.0 as i32),
+            other => Self::Unknown(other.0),
         }
     }
 
@@ -99,7 +100,7 @@ impl SurfaceFormat {
     pub(crate) fn to_amf(self) -> sys::AMF_SURFACE_FORMAT {
         match self {
             Self::Known(format) => format.to_amf(),
-            Self::Unknown(raw) => sys::AMF_SURFACE_FORMAT(raw as u32),
+            Self::Unknown(raw) => sys::AMF_SURFACE_FORMAT(raw),
         }
     }
 }

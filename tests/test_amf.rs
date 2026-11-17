@@ -297,23 +297,49 @@ fn test_buffer_as_slice_and_set_size() {
     assert_eq!(buffer.get_pts(), pts, "Buffer の PTS が一致しない");
 
     // 書き込み用スライスの長さと、書き込んだ内容が読み取り用スライスで得られることを確認する
-    let data = unsafe { buffer.as_mut_slice() }.expect("Buffer の書き込み用スライス取得に失敗");
-    assert_eq!(
-        data.len(),
-        BUFFER_SIZE,
-        "Buffer のスライスの長さが一致しない"
-    );
-    for (index, byte) in data.iter_mut().enumerate() {
-        *byte = (index % 256) as u8;
+    {
+        let data = unsafe { buffer.as_mut_slice() }.expect("Buffer の書き込み用スライス取得に失敗");
+        assert_eq!(
+            data.len(),
+            BUFFER_SIZE,
+            "Buffer のスライスの長さが一致しない"
+        );
+        for (index, byte) in data.iter_mut().enumerate() {
+            *byte = (index % 256) as u8;
+        }
+    }
+    {
+        let data = unsafe { buffer.as_slice() }.expect("Buffer の読み取り用スライス取得に失敗");
+        for (index, byte) in data.iter().enumerate() {
+            assert_eq!(
+                *byte,
+                (index % 256) as u8,
+                "{index} バイト目の内容が一致しない"
+            );
+        }
     }
 
-    let data = unsafe { buffer.as_slice() }.expect("Buffer の読み取り用スライス取得に失敗");
-    for (index, byte) in data.iter().enumerate() {
-        assert_eq!(
-            *byte,
-            (index % 256) as u8,
-            "{index} バイト目の内容が一致しない"
-        );
+    // 確保済みサイズを超える値は設定できない
+    let result = buffer.set_size(BUFFER_SIZE * 2);
+    assert!(
+        result.is_err(),
+        "確保済みサイズを超える set_size が成功した"
+    );
+    assert_eq!(
+        buffer.get_size(),
+        BUFFER_SIZE,
+        "set_size の失敗で Buffer のサイズが変化した"
+    );
+    {
+        let data =
+            unsafe { buffer.as_slice() }.expect("set_size 失敗後の Buffer のスライス取得に失敗");
+        for (index, byte) in data.iter().enumerate() {
+            assert_eq!(
+                *byte,
+                (index % 256) as u8,
+                "set_size の失敗で {index} バイト目の内容が変化した"
+            );
+        }
     }
 
     // サイズを縮めると、スライスの長さも新しいサイズに一致する
@@ -325,19 +351,94 @@ fn test_buffer_as_slice_and_set_size() {
         REDUCED_SIZE,
         "サイズ変更後の Buffer のサイズが一致しない"
     );
-    let data = unsafe { buffer.as_slice() }.expect("サイズ変更後の Buffer のスライス取得に失敗");
-    assert_eq!(
-        data.len(),
-        REDUCED_SIZE,
-        "サイズ変更後の Buffer のスライスの長さが一致しない"
-    );
-    for (index, byte) in data.iter().enumerate() {
+    {
+        let data =
+            unsafe { buffer.as_slice() }.expect("サイズ変更後の Buffer のスライス取得に失敗");
         assert_eq!(
-            *byte,
-            (index % 256) as u8,
-            "サイズ変更後に {index} バイト目の内容が変化した"
+            data.len(),
+            REDUCED_SIZE,
+            "サイズ変更後の Buffer のスライスの長さが一致しない"
         );
+        for (index, byte) in data.iter().enumerate() {
+            assert_eq!(
+                *byte,
+                (index % 256) as u8,
+                "サイズ変更後に {index} バイト目の内容が変化した"
+            );
+        }
     }
+
+    // サイズを 0 にすると空のスライスになる
+    buffer
+        .set_size(0)
+        .expect("Buffer のサイズを 0 にできなかった");
+    assert_eq!(
+        buffer.get_size(),
+        0,
+        "サイズ 0 の Buffer のサイズが一致しない"
+    );
+    assert_eq!(
+        unsafe { buffer.as_slice() }
+            .expect("サイズ 0 の Buffer の読み取り用スライス取得に失敗")
+            .len(),
+        0,
+        "サイズ 0 の Buffer の読み取り用スライスが空でない"
+    );
+    assert_eq!(
+        unsafe { buffer.as_mut_slice() }
+            .expect("サイズ 0 の Buffer の書き込み用スライス取得に失敗")
+            .len(),
+        0,
+        "サイズ 0 の Buffer の書き込み用スライスが空でない"
+    );
+
+    // 確保済みサイズまで戻せる
+    buffer
+        .set_size(BUFFER_SIZE)
+        .expect("Buffer のサイズを元に戻せなかった");
+    assert_eq!(
+        buffer.get_size(),
+        BUFFER_SIZE,
+        "サイズを戻した Buffer のサイズが一致しない"
+    );
+    {
+        let data =
+            unsafe { buffer.as_slice() }.expect("サイズを戻した Buffer のスライス取得に失敗");
+        assert_eq!(
+            data.len(),
+            BUFFER_SIZE,
+            "サイズを戻した Buffer のスライスの長さが一致しない"
+        );
+        for (index, byte) in data.iter().enumerate() {
+            assert_eq!(
+                *byte,
+                (index % 256) as u8,
+                "サイズを戻した後に {index} バイト目の内容が変化した"
+            );
+        }
+    }
+}
+
+/// 非ホストメモリの Buffer はスライスとして扱えないことを確認する
+#[test]
+fn test_non_host_buffer_as_slice_is_rejected() {
+    let context = helpers::create_context();
+    let mut buffer = context
+        .alloc_buffer(MemoryType::Vulkan, 4096)
+        .expect("Vulkan Buffer の確保に失敗");
+    assert_eq!(
+        buffer.get_memory_type(),
+        MemoryType::Vulkan,
+        "Buffer のメモリ種別が Vulkan でない"
+    );
+    assert!(
+        unsafe { buffer.as_slice() }.is_err(),
+        "Vulkan Buffer が読み取り用スライスとして取得できた"
+    );
+    assert!(
+        unsafe { buffer.as_mut_slice() }.is_err(),
+        "Vulkan Buffer が書き込み用スライスとして取得できた"
+    );
 }
 
 /// Plane のスライスがピッチと一致し、読み書きできることを確認する
@@ -437,11 +538,12 @@ fn test_handlers_can_access_frames() {
             let observation = match result {
                 Ok(frame) => {
                     let size = frame.buffer().get_size();
+                    let memory_type = frame.buffer().get_memory_type();
                     let slice_ok = unsafe { frame.buffer().as_slice() }.is_ok();
                     e.lock()
                         .expect("エンコード結果の記録用 Mutex がポイズンされた")
                         .push(frame.into_parts().0);
-                    Ok((size, slice_ok))
+                    Ok((size, memory_type, slice_ok))
                 }
                 Err(err) => Err(format!("エンコード結果の受信に失敗: {err}")),
             };
@@ -477,10 +579,15 @@ fn test_handlers_can_access_frames() {
         "エンコード結果の数が期待値と一致しない"
     );
     for (i, observation) in encode_observations.iter().enumerate() {
-        let (size, slice_ok) = observation
+        let (size, memory_type, slice_ok) = observation
             .as_ref()
             .unwrap_or_else(|err| panic!("エンコード結果 {i}: {err}"));
         assert!(*size > 0, "エンコード済みバッファ {i} が空");
+        assert_eq!(
+            *memory_type,
+            MemoryType::Host,
+            "エンコード済みバッファ {i} のメモリ種別が Host でない"
+        );
         assert!(
             *slice_ok,
             "エンコード済みバッファ {i} をスライスとして取得できない"

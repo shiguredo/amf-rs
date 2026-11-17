@@ -637,8 +637,11 @@ impl Buffer {
 
     /// バッファのサイズ (バイト数) を設定する
     ///
+    /// 設定できる最大サイズは確保済みのサイズである。[`Buffer::get_size`] は
+    /// 最後に設定に成功したサイズを返す。
+    ///
     /// # Errors
-    /// AMF がサイズの変更を受け付けない場合にエラーを返す。
+    /// 指定したサイズを設定できない場合にエラーを返す。
     pub fn set_size(&self, size: usize) -> Result<(), Error> {
         let _guard = self.state.lock();
         Error::check(
@@ -659,6 +662,7 @@ impl Buffer {
     /// ホストメモリのバッファの内容をバイトスライスとして返す
     ///
     /// 返されるスライスの長さは [`Buffer::get_size`] が返すサイズと同じである。
+    /// サイズが 0 の場合は空のスライスを返す。
     ///
     /// # Safety
     ///
@@ -677,6 +681,9 @@ impl Buffer {
         self.check_host_memory("Buffer::as_slice")?;
         let ptr = unsafe { (self.f.get_native)(self.ptr) } as *const u8;
         let size = unsafe { (self.f.get_size)(self.ptr) };
+        if size == 0 {
+            return Ok(&[]);
+        }
         validate_slice_ptr("Buffer::as_slice", ptr)?;
         validate_slice_len("Buffer::as_slice", size)?;
         // SAFETY: ptr は null でなく、size はスライスの長さとして有効な範囲にあり、
@@ -687,6 +694,7 @@ impl Buffer {
     /// ホストメモリのバッファの内容を書き込み用のバイトスライスとして返す
     ///
     /// 返されるスライスの長さは [`Buffer::get_size`] が返すサイズと同じである。
+    /// サイズが 0 の場合は空のスライスを返す。
     ///
     /// # Safety
     ///
@@ -705,6 +713,9 @@ impl Buffer {
         self.check_host_memory("Buffer::as_mut_slice")?;
         let ptr = unsafe { (self.f.get_native)(self.ptr) } as *mut u8;
         let size = unsafe { (self.f.get_size)(self.ptr) };
+        if size == 0 {
+            return Ok(&mut []);
+        }
         validate_slice_ptr("Buffer::as_mut_slice", ptr)?;
         validate_slice_len("Buffer::as_mut_slice", size)?;
         // SAFETY: ptr は null でなく、size はスライスの長さとして有効な範囲にあり、

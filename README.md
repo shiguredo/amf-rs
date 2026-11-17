@@ -203,7 +203,7 @@ let bitstream_data = std::fs::read("input.h264")?;
 
 // Buffer を確保してビットストリームデータをコピーし、デコードする
 let mut buffer = decoder.alloc_buffer(bitstream_data.len())?;
-unsafe { buffer.as_mut_slice() }?.copy_from_slice(&bitstream_data);
+unsafe { buffer.as_mut_slice() }?[..bitstream_data.len()].copy_from_slice(&bitstream_data);
 decoder.decode(buffer, ())?;
 
 // 残りのフレームをすべて取得する
@@ -226,8 +226,9 @@ B フレームを含むストリームでは出力 `Surface` の PTS も入力�
 フレームデータは unsafe な `Plane::as_slice` / `Plane::as_mut_slice` で、ビットストリームは
 unsafe な `Buffer::as_slice` / `Buffer::as_mut_slice` で読み書きします。`Plane` のスライスは
 `hpitch * vpitch` バイトで、各行の先頭は `hpitch` バイト間隔です。
-ホストメモリかつタイル状でないプレーンだけが対象です。`Buffer::set_size` で
-バッファのサイズを変更できます。PTS と Duration の単位は 100 ナノ秒です。
+ホストメモリかつタイル状でないプレーンだけが対象です。`Buffer::set_size` は
+確保済みサイズ以下の範囲でサイズを変更でき、確保済みサイズを超える値はエラーに
+なります。PTS と Duration の単位は 100 ナノ秒です。
 
 ### コーデック対応状況の確認
 

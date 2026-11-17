@@ -96,7 +96,7 @@ AMD GPU 向けハードウェアアクセラレーションによるビデオエ
 | `AccelerationType` | `NotSupported`, `Hardware`, `Gpu`, `Software`, `Unknown(i32)` |
 | `VideoProfile` | `H264(H264Profile)`, `Hevc(HevcProfile)`, `Av1(Av1Profile)`, `Unknown(i64)` |
 | `IoCapabilities` | 幅・高さの範囲、垂直アライメント、`SurfaceFormatCapability`、`MemoryTypeCapability`、インターレース対応 |
-| `SurfaceFormat` | `Known(FrameFormat)`, `Unknown(i32)` |
+| `SurfaceFormat` | `Known(FrameFormat)`, `Unknown(u32)` |
 | `MemoryType` | `Host`, `OpenCl`, `OpenGl`, `Xv`, `Vulkan`, `Unknown(u32)` |
 | `Property` / `Value` | AMF が返した全ケーパビリティプロパティの名前と値。値の確認用 |
 
@@ -174,6 +174,10 @@ AMFContext が破棄され、そのデストラクタが `Terminate` を呼ぶ�
 タイル状のプレーン、null、サイズ、ピッチがスライスの前提を満たさないオブジェクトは
 `Err` を返す。
 スライスが有効な間は、同じ AMF オブジェクトへのアクセスを他のハンドルから行わないこと。
+
+`Buffer::set_size` は確保済みサイズ以下の範囲でサイズを変更でき、確保済みサイズを
+超える値は `Err` になる。サイズ変更はメモリの再確保を伴わず、`get_size()` は最後に
+設定に成功したサイズを返す。
 
 `Clone` したハンドルは同じ AMF オブジェクトを指す。コンポーネントに投入する `Surface` / `Buffer` は、
 投入前に他のハンドルを破棄する必要がある。`Encoder::encode` / `Decoder::decode` は、投入する
@@ -298,7 +302,7 @@ let bitstream_data = std::fs::read("input.h264")?;
 
 // Buffer を確保してビットストリームデータをコピーし、デコードする
 let mut buffer = decoder.alloc_buffer(bitstream_data.len())?;
-unsafe { buffer.as_mut_slice() }?.copy_from_slice(&bitstream_data);
+unsafe { buffer.as_mut_slice() }?[..bitstream_data.len()].copy_from_slice(&bitstream_data);
 decoder.decode(buffer, ())?;
 
 // 残りのフレームをすべて取得する (Drain → ワーカー完了待ち)
