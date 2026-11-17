@@ -13,9 +13,8 @@ use crate::AmfLibrary;
 use crate::amf::{Buffer, Component, Context, Surface};
 use crate::error::Error;
 use crate::query_output::{DrainStatus, QueryOutputKind, classify_query_output};
-use crate::sys::{
-    self, AMF_MEMORY_TYPE, AMF_RESULT, AMF_SURFACE_FORMAT, AMFData, AMFSurface, amf_pts,
-};
+use crate::sys::{self, AMF_RESULT, AMFData, AMFSurface, amf_pts};
+use crate::types::{FrameFormat, MemoryType, SurfaceFormat};
 
 // ---------------------------------------------------------------------------
 // 公開型
@@ -190,7 +189,7 @@ impl<H: DecodeHandler> Decoder<H> {
         )?;
 
         // デコーダーを初期化する (解像度は 0,0 でストリームから自動検出)
-        let result = component.init(AMF_SURFACE_FORMAT::AMF_SURFACE_NV12, 0, 0);
+        let result = component.init(SurfaceFormat::from(FrameFormat::Nv12), 0, 0);
         Error::check(result, "AMFComponent::Init")?;
 
         let (cmd_tx, cmd_rx) = mpsc::channel::<WorkerCommand<H::UserData>>();
@@ -226,8 +225,7 @@ impl<H: DecodeHandler> Decoder<H> {
     /// 確保されたバッファは呼び出し元がビットストリームデータを書き込んでから
     /// [`Decoder::decode`] に渡す。
     pub fn alloc_buffer(&self, size: usize) -> Result<Buffer, Error> {
-        self.context
-            .alloc_buffer(AMF_MEMORY_TYPE::AMF_MEMORY_HOST, size)
+        self.context.alloc_buffer(MemoryType::Host, size)
     }
 
     /// ビットストリームをデコードする
@@ -691,7 +689,7 @@ fn extract_frame(
     let pts = surface.get_pts();
 
     surface
-        .convert(AMF_MEMORY_TYPE::AMF_MEMORY_HOST)
+        .convert(MemoryType::Host)
         .map_err(|error| FrameError {
             pts: Some(pts),
             error,

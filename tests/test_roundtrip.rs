@@ -1,13 +1,11 @@
-use std::ptr;
 use std::sync::{Arc, Mutex};
 
 use shiguredo_amf::amf::{Context, Surface};
-use shiguredo_amf::ffi::{AMF_MEMORY_TYPE, AMF_PLANE_TYPE, AMF_SURFACE_FORMAT};
 use shiguredo_amf::{
     Av1EncoderConfig, Av1Profile, CodecConfig, Decoder, DecoderCodec, DecoderConfig, EncodeOptions,
     EncodedFrame, Encoder, EncoderConfig, FnDecodeHandler, FnEncodeHandler, FrameFormat,
-    H264EncoderConfig, H264Profile, HevcEncoderConfig, HevcProfile, PictureType, RateControlMode,
-    ReconfigureParams, frame_type,
+    H264EncoderConfig, H264Profile, HevcEncoderConfig, HevcProfile, MemoryType, PictureType,
+    PlaneType, RateControlMode, ReconfigureParams, SurfaceFormat, frame_type,
 };
 
 pub mod helpers;
@@ -20,74 +18,60 @@ use helpers::{
 fn copy_i420_to_surface(surface: &Surface, data: &[u8], width: usize, height: usize) {
     let y_size = width * height;
     let uv_plane_size = (width / 2) * (height / 2);
+    let uv_width = width / 2;
+    let uv_height = height / 2;
 
     // Y プレーン
-    let y_plane = surface
-        .get_plane(AMF_PLANE_TYPE::AMF_PLANE_Y)
+    let mut y_plane = surface
+        .get_plane(PlaneType::Y)
         .expect("Y プレーンの取得に失敗");
-    let y_native = y_plane.get_native() as *mut u8;
     let y_hpitch = y_plane.get_hpitch() as usize;
+    let y_data = unsafe { y_plane.as_mut_slice() }.expect("Y プレーンのスライス取得に失敗");
     for row in 0..height {
-        unsafe {
-            ptr::copy_nonoverlapping(
-                data.as_ptr().add(row * width),
-                y_native.add(row * y_hpitch),
-                width,
-            );
-        }
+        let src = &data[row * width..row * width + width];
+        let dst = &mut y_data[row * y_hpitch..row * y_hpitch + width];
+        dst.copy_from_slice(src);
     }
 
     // U プレーン
-    let u_plane = surface
-        .get_plane(AMF_PLANE_TYPE::AMF_PLANE_U)
+    let mut u_plane = surface
+        .get_plane(PlaneType::U)
         .expect("U プレーンの取得に失敗");
-    let u_native = u_plane.get_native() as *mut u8;
     let u_hpitch = u_plane.get_hpitch() as usize;
-    let uv_width = width / 2;
-    let uv_height = height / 2;
+    let u_data = unsafe { u_plane.as_mut_slice() }.expect("U プレーンのスライス取得に失敗");
     for row in 0..uv_height {
-        unsafe {
-            ptr::copy_nonoverlapping(
-                data.as_ptr().add(y_size + row * uv_width),
-                u_native.add(row * u_hpitch),
-                uv_width,
-            );
-        }
+        let src = &data[y_size + row * uv_width..y_size + row * uv_width + uv_width];
+        let dst = &mut u_data[row * u_hpitch..row * u_hpitch + uv_width];
+        dst.copy_from_slice(src);
     }
 
     // V プレーン
-    let v_plane = surface
-        .get_plane(AMF_PLANE_TYPE::AMF_PLANE_V)
+    let mut v_plane = surface
+        .get_plane(PlaneType::V)
         .expect("V プレーンの取得に失敗");
-    let v_native = v_plane.get_native() as *mut u8;
     let v_hpitch = v_plane.get_hpitch() as usize;
+    let v_data = unsafe { v_plane.as_mut_slice() }.expect("V プレーンのスライス取得に失敗");
     for row in 0..uv_height {
-        unsafe {
-            ptr::copy_nonoverlapping(
-                data.as_ptr().add(y_size + uv_plane_size + row * uv_width),
-                v_native.add(row * v_hpitch),
-                uv_width,
-            );
-        }
+        let start = y_size + uv_plane_size + row * uv_width;
+        let src = &data[start..start + uv_width];
+        let dst = &mut v_data[row * v_hpitch..row * v_hpitch + uv_width];
+        dst.copy_from_slice(src);
     }
 }
 
 /// Packed データを Surface にコピーする
 fn copy_packed_to_surface(surface: &Surface, data: &[u8], width: usize, height: usize, bpp: usize) {
-    let plane = surface
+    let mut plane = surface
         .get_plane_at(0)
         .expect("インデックス 0 のプレーンの取得に失敗");
-    let native = plane.get_native() as *mut u8;
     let hpitch = plane.get_hpitch() as usize;
+    let plane_data =
+        unsafe { plane.as_mut_slice() }.expect("インデックス 0 のプレーンのスライス取得に失敗");
     let row_bytes = width * bpp;
     for row in 0..height {
-        unsafe {
-            ptr::copy_nonoverlapping(
-                data.as_ptr().add(row * row_bytes),
-                native.add(row * hpitch),
-                row_bytes,
-            );
-        }
+        let src = &data[row * row_bytes..row * row_bytes + row_bytes];
+        let dst = &mut plane_data[row * hpitch..row * hpitch + row_bytes];
+        dst.copy_from_slice(src);
     }
 }
 
@@ -119,35 +103,28 @@ fn copy_frame_to_surface(
 /// Surface から Y プレーンデータを読み取る
 fn read_y_plane_from_surface(surface: &Surface, width: usize, height: usize) -> Vec<u8> {
     let y_plane = surface
-        .get_plane(AMF_PLANE_TYPE::AMF_PLANE_Y)
+        .get_plane(PlaneType::Y)
         .expect("Y プレーンの取得に失敗");
-    let y_native = y_plane.get_native() as *const u8;
     let y_hpitch = y_plane.get_hpitch() as usize;
-    let y_size = width * height;
-    let mut y_data = vec![0u8; y_size];
+    let y_data = unsafe { y_plane.as_slice() }.expect("Y プレーンのスライス取得に失敗");
+    let mut result = vec![0u8; width * height];
     for row in 0..height {
-        unsafe {
-            ptr::copy_nonoverlapping(
-                y_native.add(row * y_hpitch),
-                y_data.as_mut_ptr().add(row * width),
-                width,
-            );
-        }
+        let src = &y_data[row * y_hpitch..row * y_hpitch + width];
+        let dst = &mut result[row * width..row * width + width];
+        dst.copy_from_slice(src);
     }
-    y_data
+    result
 }
 
 /// Buffer からデータを読み取る
 fn buffer_to_slice(buffer: &shiguredo_amf::amf::Buffer) -> &[u8] {
-    let ptr = buffer.get_native() as *const u8;
-    let size = buffer.get_size();
-    unsafe { std::slice::from_raw_parts(ptr, size) }
+    unsafe { buffer.as_slice() }.expect("バッファのスライス取得に失敗")
 }
 
 /// Surface から幅を取得する
 fn surface_width(surface: &shiguredo_amf::amf::Surface) -> usize {
     surface
-        .get_plane(AMF_PLANE_TYPE::AMF_PLANE_Y)
+        .get_plane(PlaneType::Y)
         .map(|p| p.get_width() as usize)
         .unwrap_or(0)
 }
@@ -155,7 +132,7 @@ fn surface_width(surface: &shiguredo_amf::amf::Surface) -> usize {
 /// Surface から高さを取得する
 fn surface_height(surface: &shiguredo_amf::amf::Surface) -> usize {
     surface
-        .get_plane(AMF_PLANE_TYPE::AMF_PLANE_Y)
+        .get_plane(PlaneType::Y)
         .map(|p| p.get_height() as usize)
         .unwrap_or(0)
 }
@@ -538,10 +515,7 @@ fn roundtrip(
             "デコード済みフレーム {i} の高さが一致しない"
         );
         assert!(
-            frame
-                .surface()
-                .get_plane(AMF_PLANE_TYPE::AMF_PLANE_Y)
-                .is_ok(),
+            frame.surface().get_plane(PlaneType::Y).is_ok(),
             "デコード済みフレーム {i} の surface が無効"
         );
     }
@@ -2005,8 +1979,8 @@ fn test_encode_rejects_surface_from_other_context() {
 
     let surface = surface_context
         .alloc_surface(
-            AMF_MEMORY_TYPE::AMF_MEMORY_HOST,
-            AMF_SURFACE_FORMAT::AMF_SURFACE_NV12,
+            MemoryType::Host,
+            SurfaceFormat::from(FrameFormat::Nv12),
             320,
             240,
         )
