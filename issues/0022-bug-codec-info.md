@@ -1,7 +1,7 @@
 # `codec_info` の能力情報を実機と一致させる
 
 - Created: 2026-11-10
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-11-17
 - Branch: feature/fix-codec-info
 - Polished: {YYYY-MM-DD}
 - Reporter: @melpon
@@ -246,3 +246,11 @@ AMF が返した値を Rust の型に無理やり押し込めない。`AMFCaps` 
 - 実機テストが追加され、`cargo test --workspace` が通る。
 - `examples/amf-check`、`README.md`、`skills/shiguredo-amf/SKILL.md` が新しい API に追従している。
 - `CHANGES.md` の `## develop` に変更が追記されている。
+
+## 解決方法
+
+`supported_codecs` は `CreateComponent` と `GetCaps` だけでコーデック対応を判定し、AMF が返す能力情報を `CodecInfo` / `DecodingInfo` / `EncodingInfo` に写像するようにした。`Init` は設定依存のため対応判定には使わない。`GetCaps` が失敗した場合もコンポーネント自体が利用できれば `Some` を返し、能力情報の各フィールドを `None`、`properties` を空にしている。
+
+能力情報として、アクセラレーション種別、最大プロファイル、最大レベル、B フレーム対応、入出力の解像度範囲、垂直アライメント、surface format、memory type、インターレース対応、および AMF が返した全プロパティを保持する。未知の値は `Unknown` に生値を保持する。
+
+テストは実機の AMD Radeon 780M / AMF 1.5.3 で既知のプロファイル・レベル・B フレーム対応を検証し、`AMFCaps` / `AMFIOCaps` の全要素と `properties` の名前・値を比較する。`examples/amf-check`、`README.md`、`skills/shiguredo-amf/SKILL.md`、`CHANGES.md` も新しい API に合わせて更新し、`cargo test --workspace` が成功することを確認した。
