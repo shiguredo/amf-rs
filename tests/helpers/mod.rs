@@ -2,9 +2,9 @@
 
 use shiguredo_amf::AmfLibrary;
 use shiguredo_amf::amf::{Context, Surface};
-use shiguredo_amf::ffi::AMF_PLANE_TYPE;
 use shiguredo_amf::{
-    CodecConfig, EncoderConfig, FrameFormat, H264EncoderConfig, H264Profile, RateControlMode,
+    CodecConfig, EncoderConfig, FrameFormat, H264EncoderConfig, H264Profile, PlaneType,
+    RateControlMode,
 };
 
 /// テスト用の Context を作成する
@@ -41,25 +41,28 @@ pub fn write_nv12_rows(
     mut write_y: impl FnMut(usize, &mut [u8]),
     mut write_uv: impl FnMut(usize, &mut [u8]),
 ) {
-    let y_plane = surface
-        .get_plane(AMF_PLANE_TYPE::AMF_PLANE_Y)
+    let mut y_plane = surface
+        .get_plane(PlaneType::Y)
         .expect("Y プレーンの取得に失敗");
-    let y_native = y_plane.get_native() as *mut u8;
     let y_hpitch = y_plane.get_hpitch() as usize;
+    let y_data = y_plane
+        .as_mut_slice()
+        .expect("Y プレーンのスライス取得に失敗");
     for row in 0..height {
-        let y_row = unsafe { std::slice::from_raw_parts_mut(y_native.add(row * y_hpitch), width) };
-        write_y(row, y_row);
+        let start = row * y_hpitch;
+        write_y(row, &mut y_data[start..start + width]);
     }
 
-    let uv_plane = surface
-        .get_plane(AMF_PLANE_TYPE::AMF_PLANE_UV)
+    let mut uv_plane = surface
+        .get_plane(PlaneType::Uv)
         .expect("UV プレーンの取得に失敗");
-    let uv_native = uv_plane.get_native() as *mut u8;
     let uv_hpitch = uv_plane.get_hpitch() as usize;
+    let uv_data = uv_plane
+        .as_mut_slice()
+        .expect("UV プレーンのスライス取得に失敗");
     for row in 0..height / 2 {
-        let uv_row =
-            unsafe { std::slice::from_raw_parts_mut(uv_native.add(row * uv_hpitch), width) };
-        write_uv(row, uv_row);
+        let start = row * uv_hpitch;
+        write_uv(row, &mut uv_data[start..start + width]);
     }
 }
 

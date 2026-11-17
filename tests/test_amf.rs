@@ -5,11 +5,11 @@
 use std::sync::{Arc, Barrier, Mutex};
 
 use shiguredo_amf::amf::{Buffer, Component, Context, Plane, PropertyStorage, Surface};
-use shiguredo_amf::ffi::{AMF_MEMORY_TYPE, AMF_PLANE_TYPE, AMF_SURFACE_FORMAT, amf_long, amf_pts};
+use shiguredo_amf::ffi::amf_long;
 use shiguredo_amf::{
     CodecConfig, Decoder, DecoderCodec, DecoderConfig, EncodeOptions, Encoder, EncoderConfig,
-    FnDecodeHandler, FnEncodeHandler, FrameFormat, H264EncoderConfig, H264Profile, RateControlMode,
-    frame_type,
+    FnDecodeHandler, FnEncodeHandler, FrameFormat, H264EncoderConfig, H264Profile, MemoryType,
+    PlaneType, RateControlMode, SurfaceFormat, frame_type,
 };
 
 pub mod helpers;
@@ -64,8 +64,8 @@ fn h264_test_decoder_config() -> DecoderConfig {
 fn create_nv12_host_surface(context: &Context) -> Surface {
     context
         .alloc_surface(
-            AMF_MEMORY_TYPE::AMF_MEMORY_HOST,
-            AMF_SURFACE_FORMAT::AMF_SURFACE_NV12,
+            MemoryType::Host,
+            SurfaceFormat::from(FrameFormat::Nv12),
             320,
             240,
         )
@@ -129,7 +129,7 @@ fn test_amf_handles_are_send_sync() {
     .expect("エンコーダーの作成に失敗");
     let surface = encoder.alloc_surface().expect("Surface の確保に失敗");
     let plane = surface
-        .get_plane(AMF_PLANE_TYPE::AMF_PLANE_Y)
+        .get_plane(PlaneType::Y)
         .expect("Y プレーンの取得に失敗");
     let property_storage = surface
         .property_storage()
@@ -170,12 +170,12 @@ fn test_surface_clone_concurrent_access() {
             let surface = surface.clone();
             scope.spawn(move || {
                 for i in 0..iterations {
-                    let pts = (thread_index * iterations + i) as amf_pts;
+                    let pts = (thread_index * iterations + i) as i64;
                     surface.set_pts(pts);
                     surface.set_duration(pts);
 
                     let y_plane = surface
-                        .get_plane(AMF_PLANE_TYPE::AMF_PLANE_Y)
+                        .get_plane(PlaneType::Y)
                         .expect("Y プレーンの取得に失敗");
                     assert_eq!(y_plane.get_width(), WIDTH as i32, "幅が一致しない");
                     assert_eq!(y_plane.get_height(), HEIGHT as i32, "高さが一致しない");
@@ -183,7 +183,10 @@ fn test_surface_clone_concurrent_access() {
                         y_plane.get_hpitch() >= WIDTH as i32,
                         "水平ピッチが幅より小さい"
                     );
-                    assert!(!y_plane.get_native().is_null(), "Y プレーンが null");
+                    assert!(
+                        y_plane.as_slice().is_ok(),
+                        "Y プレーンをスライスとして取得できない"
+                    );
 
                     // AMFPropertyStorage::SetProperty は存在しないプロパティでも
                     // AMF_OK を返す。ここでは共有ロックの下で FFI 呼び出しが
@@ -200,7 +203,7 @@ fn test_surface_clone_concurrent_access() {
 
     // 並行アクセス後も Surface が有効であることを確認する
     let y_plane = surface
-        .get_plane(AMF_PLANE_TYPE::AMF_PLANE_Y)
+        .get_plane(PlaneType::Y)
         .expect("Y プレーンの取得に失敗");
     assert_eq!(y_plane.get_width(), WIDTH as i32, "幅が一致しない");
     assert_eq!(y_plane.get_height(), HEIGHT as i32, "高さが一致しない");
@@ -224,8 +227,7 @@ fn test_surface_clone_concurrent_access() {
 /// 同じ `Buffer` を指す Clone からの読み取りを並行してもクラッシュやデッドロックが
 /// 起きないことを確認するスモークテスト
 ///
-/// `Buffer` には書き込み系の API がないため、ここでは読み取りの並行呼び出しだけを
-/// 確認する。
+/// ここでは読み取りの並行呼び出しだけを確認する。
 #[test]
 fn test_buffer_clone_concurrent_access() {
     const BUFFER_SIZE: usize = 4096;
@@ -253,7 +255,10 @@ fn test_buffer_clone_concurrent_access() {
             scope.spawn(move || {
                 for _ in 0..iterations {
                     assert_eq!(buffer.get_size(), BUFFER_SIZE, "サイズが一致しない");
-                    assert!(!buffer.get_native().is_null(), "バッファが null");
+                    assert!(
+                        buffer.as_slice().is_ok(),
+                        "バッファをスライスとして取得できない"
+                    );
                     assert_eq!(buffer.get_pts(), pts, "PTS が変化した");
                     assert_eq!(buffer.get_duration(), duration, "Duration が変化した");
                 }
@@ -263,6 +268,144 @@ fn test_buffer_clone_concurrent_access() {
 
     // 並行アクセス後も Buffer が有効であることを確認する
     assert_eq!(buffer.get_size(), BUFFER_SIZE, "サイズが一致しない");
+}
+
+/// Buffer のスライスとサイズ変更が利用できることを確認する
+#[test]
+fn test_buffer_as_slice_and_set_size() {
+    const BUFFER_SIZE: usize = 4096;
+    const REDUCED_SIZE: usize = BUFFER_SIZE / 4;
+
+    let context = helpers::create_context();
+    let mut buffer = context
+        .alloc_buffer(MemoryType::Host, BUFFER_SIZE)
+        .expect("Buffer の確保に失敗");
+    assert_eq!(
+        buffer.get_size(),
+        BUFFER_SIZE,
+        "確保直後の Buffer のサイズが一致しない"
+    );
+
+    // PTS が設定した値のまま取得できることを確認する
+    let pts = 6_789;
+    buffer.set_pts(pts);
+    assert_eq!(buffer.get_pts(), pts, "Buffer の PTS が一致しない");
+
+    // 書き込み用スライスの長さと、書き込んだ内容が読み取り用スライスで得られることを確認する
+    let data = buffer
+        .as_mut_slice()
+        .expect("Buffer の書き込み用スライス取得に失敗");
+    assert_eq!(
+        data.len(),
+        BUFFER_SIZE,
+        "Buffer のスライスの長さが一致しない"
+    );
+    for (index, byte) in data.iter_mut().enumerate() {
+        *byte = (index % 256) as u8;
+    }
+
+    let data = buffer
+        .as_slice()
+        .expect("Buffer の読み取り用スライス取得に失敗");
+    for (index, byte) in data.iter().enumerate() {
+        assert_eq!(
+            *byte,
+            (index % 256) as u8,
+            "{index} バイト目の内容が一致しない"
+        );
+    }
+
+    // サイズを縮めると、スライスの長さも新しいサイズに一致する
+    buffer
+        .set_size(REDUCED_SIZE)
+        .expect("Buffer のサイズ変更に失敗");
+    assert_eq!(
+        buffer.get_size(),
+        REDUCED_SIZE,
+        "サイズ変更後の Buffer のサイズが一致しない"
+    );
+    let data = buffer
+        .as_slice()
+        .expect("サイズ変更後の Buffer のスライス取得に失敗");
+    assert_eq!(
+        data.len(),
+        REDUCED_SIZE,
+        "サイズ変更後の Buffer のスライスの長さが一致しない"
+    );
+    for (index, byte) in data.iter().enumerate() {
+        assert_eq!(
+            *byte,
+            (index % 256) as u8,
+            "サイズ変更後に {index} バイト目の内容が変化した"
+        );
+    }
+}
+
+/// Plane のスライスがピッチと一致し、読み書きできることを確認する
+#[test]
+fn test_plane_as_slice_and_as_mut_slice() {
+    const WIDTH: usize = 320;
+    const HEIGHT: usize = 240;
+
+    let context = helpers::create_context();
+    let surface = create_nv12_host_surface(&context);
+    let mut plane = surface
+        .get_plane(PlaneType::Y)
+        .expect("Y プレーンの取得に失敗");
+    let hpitch = plane.get_hpitch() as usize;
+    let vpitch = plane.get_vpitch() as usize;
+    assert!(hpitch >= WIDTH, "水平ピッチが幅より小さい");
+    assert!(vpitch >= HEIGHT, "垂直ピッチが高さより小さい");
+
+    let data = plane
+        .as_mut_slice()
+        .expect("プレーンの書き込み用スライス取得に失敗");
+    assert_eq!(
+        data.len(),
+        hpitch * vpitch,
+        "プレーンのスライスの長さがピッチと一致しない"
+    );
+    for row in 0..HEIGHT {
+        for col in 0..WIDTH {
+            data[row * hpitch + col] = ((row + col) % 256) as u8;
+        }
+    }
+
+    let data = plane
+        .as_slice()
+        .expect("プレーンの読み取り用スライス取得に失敗");
+    for row in 0..HEIGHT {
+        for col in 0..WIDTH {
+            let index = row * hpitch + col;
+            assert_eq!(
+                data[index],
+                ((row + col) % 256) as u8,
+                "({row}, {col}) の画素が一致しない"
+            );
+        }
+    }
+
+    // Surface の PTS が設定した値のまま取得できることを確認する
+    let pts = 12_345;
+    surface.set_pts(pts);
+    assert_eq!(surface.get_pts(), pts, "Surface の PTS が一致しない");
+
+    // パック形式のプレーンも取得できることを確認する
+    let packed_surface = context
+        .alloc_surface(
+            MemoryType::Host,
+            SurfaceFormat::from(FrameFormat::Bgra),
+            WIDTH as i32,
+            HEIGHT as i32,
+        )
+        .expect("BGRA Surface の確保に失敗");
+    let packed_plane = packed_surface
+        .get_plane(PlaneType::Packed)
+        .expect("パック形式のプレーンの取得に失敗");
+    assert!(
+        packed_plane.as_slice().is_ok(),
+        "パック形式のプレーンをスライスとして取得できない"
+    );
 }
 
 /// ハンドラーからフレームのメソッドを呼べることを確認する
@@ -290,11 +433,11 @@ fn test_handlers_can_access_frames() {
             let observation = match result {
                 Ok(frame) => {
                     let size = frame.buffer().get_size();
-                    let native_ok = !frame.buffer().get_native().is_null();
+                    let slice_ok = frame.buffer().as_slice().is_ok();
                     e.lock()
                         .expect("エンコード結果の記録用 Mutex がポイズンされた")
                         .push(frame.into_parts().0);
-                    Ok((size, native_ok))
+                    Ok((size, slice_ok))
                 }
                 Err(err) => Err(format!("エンコード結果の受信に失敗: {err}")),
             };
@@ -330,11 +473,14 @@ fn test_handlers_can_access_frames() {
         "エンコード結果の数が期待値と一致しない"
     );
     for (i, observation) in encode_observations.iter().enumerate() {
-        let (size, native_ok) = observation
+        let (size, slice_ok) = observation
             .as_ref()
             .unwrap_or_else(|err| panic!("エンコード結果 {i}: {err}"));
         assert!(*size > 0, "エンコード済みバッファ {i} が空");
-        assert!(*native_ok, "エンコード済みバッファ {i} のポインタが null");
+        assert!(
+            *slice_ok,
+            "エンコード済みバッファ {i} をスライスとして取得できない"
+        );
     }
 
     let encoded_buffers = Arc::try_unwrap(encoded)
@@ -350,11 +496,11 @@ fn test_handlers_can_access_frames() {
         h264_test_decoder_config(),
         FnDecodeHandler::<()>::new(move |result| {
             let observation = match result {
-                Ok(frame) => match frame.surface().get_plane(AMF_PLANE_TYPE::AMF_PLANE_Y) {
+                Ok(frame) => match frame.surface().get_plane(PlaneType::Y) {
                     Ok(plane) => Ok((
                         plane.get_width(),
                         plane.get_height(),
-                        !plane.get_native().is_null(),
+                        plane.as_slice().is_ok(),
                     )),
                     Err(err) => Err(format!("Y プレーンの取得に失敗: {err}")),
                 },
@@ -384,7 +530,7 @@ fn test_handlers_can_access_frames() {
         "デコード結果の数が期待値と一致しない"
     );
     for (i, observation) in observations.iter().enumerate() {
-        let (width, height, native_ok) = observation
+        let (width, height, slice_ok) = observation
             .as_ref()
             .unwrap_or_else(|err| panic!("デコード済みフレーム {i}: {err}"));
         assert_eq!(
@@ -395,7 +541,10 @@ fn test_handlers_can_access_frames() {
             *height, HEIGHT as i32,
             "デコード済みフレーム {i} の高さが一致しない"
         );
-        assert!(*native_ok, "デコード済みフレーム {i} の Y プレーンが null");
+        assert!(
+            *slice_ok,
+            "デコード済みフレーム {i} の Y プレーンをスライスとして取得できない"
+        );
     }
 }
 
@@ -425,7 +574,7 @@ fn test_surface_into_raw_and_from_raw() {
     let surface =
         unsafe { Surface::from_raw(ptr, context.clone()) }.expect("Surface の再構築に失敗");
     let y_plane = surface
-        .get_plane(AMF_PLANE_TYPE::AMF_PLANE_Y)
+        .get_plane(PlaneType::Y)
         .expect("Y プレーンの取得に失敗");
     assert_eq!(y_plane.get_width(), WIDTH as i32, "幅が一致しない");
     assert_eq!(y_plane.get_height(), HEIGHT as i32, "高さが一致しない");
@@ -457,7 +606,10 @@ fn test_buffer_into_raw_and_from_raw() {
 
     let buffer = unsafe { Buffer::from_raw(ptr, context.clone()) }.expect("Buffer の再構築に失敗");
     assert_eq!(buffer.get_size(), BUFFER_SIZE, "サイズが一致しない");
-    assert!(!buffer.get_native().is_null(), "バッファが null");
+    assert!(
+        buffer.as_slice().is_ok(),
+        "バッファをスライスとして取得できない"
+    );
 
     // Buffer を Decoder より先に破棄する
     drop(buffer);
@@ -476,7 +628,7 @@ fn test_plane_into_raw_and_from_raw() {
     .expect("エンコーダーの作成に失敗");
     let surface = encoder.alloc_surface().expect("Surface の確保に失敗");
     let plane = surface
-        .get_plane(AMF_PLANE_TYPE::AMF_PLANE_Y)
+        .get_plane(PlaneType::Y)
         .expect("Y プレーンの取得に失敗");
 
     let ptr = plane.into_raw();
@@ -545,16 +697,16 @@ fn test_multiple_contexts_can_be_created() {
 
     let surface_a = context_a
         .alloc_surface(
-            shiguredo_amf::ffi::AMF_MEMORY_TYPE::AMF_MEMORY_HOST,
-            shiguredo_amf::ffi::AMF_SURFACE_FORMAT::AMF_SURFACE_NV12,
+            MemoryType::Host,
+            SurfaceFormat::from(FrameFormat::Nv12),
             320,
             240,
         )
         .expect("Context A の Surface の確保に失敗");
     let surface_b = context_b
         .alloc_surface(
-            shiguredo_amf::ffi::AMF_MEMORY_TYPE::AMF_MEMORY_HOST,
-            shiguredo_amf::ffi::AMF_SURFACE_FORMAT::AMF_SURFACE_NV12,
+            MemoryType::Host,
+            SurfaceFormat::from(FrameFormat::Nv12),
             320,
             240,
         )
@@ -562,7 +714,7 @@ fn test_multiple_contexts_can_be_created() {
 
     assert_eq!(
         surface_a
-            .get_plane(AMF_PLANE_TYPE::AMF_PLANE_Y)
+            .get_plane(PlaneType::Y)
             .expect("Context A の Surface の Y プレーンの取得に失敗")
             .get_width(),
         320,
@@ -570,7 +722,7 @@ fn test_multiple_contexts_can_be_created() {
     );
     assert_eq!(
         surface_b
-            .get_plane(AMF_PLANE_TYPE::AMF_PLANE_Y)
+            .get_plane(PlaneType::Y)
             .expect("Context B の Surface の Y プレーンの取得に失敗")
             .get_width(),
         320,
@@ -617,7 +769,7 @@ fn test_handles_expose_context() {
         "Surface の Context が確保元と一致しない"
     );
     let plane = surface
-        .get_plane(AMF_PLANE_TYPE::AMF_PLANE_Y)
+        .get_plane(PlaneType::Y)
         .expect("Y プレーンの取得に失敗");
     assert_eq!(
         plane.context(),
@@ -683,8 +835,8 @@ fn test_context_clone_and_handles_increment_ref_count() {
 
     let surface = context
         .alloc_surface(
-            AMF_MEMORY_TYPE::AMF_MEMORY_HOST,
-            AMF_SURFACE_FORMAT::AMF_SURFACE_NV12,
+            MemoryType::Host,
+            SurfaceFormat::from(FrameFormat::Nv12),
             320,
             240,
         )
@@ -702,7 +854,7 @@ fn test_context_clone_and_handles_increment_ref_count() {
     );
 
     let buffer = context
-        .alloc_buffer(AMF_MEMORY_TYPE::AMF_MEMORY_HOST, 4096)
+        .alloc_buffer(MemoryType::Host, 4096)
         .expect("Buffer の確保に失敗");
     assert_eq!(
         context_ref_count(&context),
@@ -725,8 +877,8 @@ fn test_vulkan_surface_convert_after_context_dropped() {
     let context = helpers::create_context();
     let surface = context
         .alloc_surface(
-            AMF_MEMORY_TYPE::AMF_MEMORY_VULKAN,
-            AMF_SURFACE_FORMAT::AMF_SURFACE_NV12,
+            MemoryType::Vulkan,
+            SurfaceFormat::from(FrameFormat::Nv12),
             320,
             240,
         )
@@ -734,15 +886,15 @@ fn test_vulkan_surface_convert_after_context_dropped() {
 
     // 複数のプレーンが生存している間は convert できない
     let y_plane = surface
-        .get_plane(AMF_PLANE_TYPE::AMF_PLANE_Y)
+        .get_plane(PlaneType::Y)
         .expect("Y プレーンの取得に失敗");
     let uv_plane = surface
-        .get_plane(AMF_PLANE_TYPE::AMF_PLANE_UV)
+        .get_plane(PlaneType::Uv)
         .expect("UV プレーンの取得に失敗");
     assert_eq!(y_plane.get_width(), 320, "幅が一致しない");
 
     let err = surface
-        .convert(AMF_MEMORY_TYPE::AMF_MEMORY_HOST)
+        .convert(MemoryType::Host)
         .expect_err("Plane が生存している Surface の convert は失敗するはず");
     assert!(
         err.to_string().contains("planes are alive"),
@@ -755,18 +907,18 @@ fn test_vulkan_surface_convert_after_context_dropped() {
     drop(context);
 
     surface
-        .convert(AMF_MEMORY_TYPE::AMF_MEMORY_HOST)
+        .convert(MemoryType::Host)
         .expect("Context を drop した後に Vulkan Surface の convert が失敗した");
 
     // 変換後はプレーンを取り直して利用できる
     let plane = surface
-        .get_plane(AMF_PLANE_TYPE::AMF_PLANE_Y)
+        .get_plane(PlaneType::Y)
         .expect("変換後の Y プレーンの取得に失敗");
     assert_eq!(plane.get_width(), 320, "変換後の幅が一致しない");
     assert_eq!(plane.get_height(), 240, "変換後の高さが一致しない");
     assert!(
-        !plane.get_native().is_null(),
-        "変換後の Y プレーンのポインタが null"
+        plane.as_slice().is_ok(),
+        "変換後の Y プレーンをスライスとして取得できない"
     );
     assert!(
         plane.get_hpitch() >= 320,
@@ -784,8 +936,8 @@ fn test_convert_allows_surface_clone() {
     let context = helpers::create_context();
     let surface = context
         .alloc_surface(
-            AMF_MEMORY_TYPE::AMF_MEMORY_VULKAN,
-            AMF_SURFACE_FORMAT::AMF_SURFACE_NV12,
+            MemoryType::Vulkan,
+            SurfaceFormat::from(FrameFormat::Nv12),
             320,
             240,
         )
@@ -793,8 +945,34 @@ fn test_convert_allows_surface_clone() {
     let _cloned = surface.clone();
 
     surface
-        .convert(AMF_MEMORY_TYPE::AMF_MEMORY_HOST)
+        .convert(MemoryType::Host)
         .expect("Surface の Clone だけの convert が失敗した");
+}
+
+/// ホストメモリにない Surface の Plane はスライスとして扱えないことを確認する
+#[test]
+fn test_vulkan_plane_as_slice_is_rejected() {
+    let context = helpers::create_context();
+    let surface = context
+        .alloc_surface(
+            MemoryType::Vulkan,
+            SurfaceFormat::from(FrameFormat::Nv12),
+            320,
+            240,
+        )
+        .expect("Vulkan Surface の確保に失敗");
+    let mut plane = surface
+        .get_plane(PlaneType::Y)
+        .expect("Y プレーンの取得に失敗");
+
+    assert!(
+        plane.as_slice().is_err(),
+        "Vulkan Surface のプレーンが読み取り用スライスとして取得できた"
+    );
+    assert!(
+        plane.as_mut_slice().is_err(),
+        "Vulkan Surface のプレーンが書き込み用スライスとして取得できた"
+    );
 }
 
 /// Plane が 1 個だけ生存している場合でも convert が失敗することを確認する
@@ -803,15 +981,15 @@ fn test_convert_rejects_single_plane() {
     let context = helpers::create_context();
     let surface = create_nv12_host_surface(&context);
     let plane = surface
-        .get_plane(AMF_PLANE_TYPE::AMF_PLANE_Y)
+        .get_plane(PlaneType::Y)
         .expect("Y プレーンの取得に失敗");
 
     // Plane 数の境界 (1 個) でも convert が拒否される
-    assert_convert_rejected(surface.convert(AMF_MEMORY_TYPE::AMF_MEMORY_HOST));
+    assert_convert_rejected(surface.convert(MemoryType::Host));
 
     drop(plane);
     surface
-        .convert(AMF_MEMORY_TYPE::AMF_MEMORY_HOST)
+        .convert(MemoryType::Host)
         .expect("Plane を drop した後に convert が失敗した");
 }
 
@@ -822,15 +1000,15 @@ fn test_convert_rejects_plane_from_surface_clone() {
     let surface = create_nv12_host_surface(&context);
     let other = surface.clone();
     let plane = surface
-        .get_plane(AMF_PLANE_TYPE::AMF_PLANE_Y)
+        .get_plane(PlaneType::Y)
         .expect("Y プレーンの取得に失敗");
 
     // Plane のカウンタが Surface の Clone 間で共有されていることを確認する
-    assert_convert_rejected(other.convert(AMF_MEMORY_TYPE::AMF_MEMORY_HOST));
+    assert_convert_rejected(other.convert(MemoryType::Host));
 
     drop(plane);
     other
-        .convert(AMF_MEMORY_TYPE::AMF_MEMORY_HOST)
+        .convert(MemoryType::Host)
         .expect("Plane を drop した後に clone 側の convert が失敗した");
 }
 
@@ -840,17 +1018,17 @@ fn test_convert_rejects_cloned_plane() {
     let context = helpers::create_context();
     let surface = create_nv12_host_surface(&context);
     let plane = surface
-        .get_plane(AMF_PLANE_TYPE::AMF_PLANE_Y)
+        .get_plane(PlaneType::Y)
         .expect("Y プレーンの取得に失敗");
     let cloned = plane.clone();
     drop(plane);
 
     // Clone した Plane が生存している間は convert が拒否される
-    assert_convert_rejected(surface.convert(AMF_MEMORY_TYPE::AMF_MEMORY_HOST));
+    assert_convert_rejected(surface.convert(MemoryType::Host));
 
     drop(cloned);
     surface
-        .convert(AMF_MEMORY_TYPE::AMF_MEMORY_HOST)
+        .convert(MemoryType::Host)
         .expect("Clone を drop した後に convert が失敗した");
 }
 
@@ -863,11 +1041,11 @@ fn test_convert_rejects_plane_from_get_plane_at() {
         .get_plane_at(0)
         .expect("インデックス 0 のプレーンの取得に失敗");
 
-    assert_convert_rejected(surface.convert(AMF_MEMORY_TYPE::AMF_MEMORY_HOST));
+    assert_convert_rejected(surface.convert(MemoryType::Host));
 
     drop(plane);
     surface
-        .convert(AMF_MEMORY_TYPE::AMF_MEMORY_HOST)
+        .convert(MemoryType::Host)
         .expect("Plane を drop した後に convert が失敗した");
 }
 
@@ -881,7 +1059,7 @@ fn test_convert_allows_property_storage() {
         .expect("PropertyStorage の取得に失敗");
 
     surface
-        .convert(AMF_MEMORY_TYPE::AMF_MEMORY_HOST)
+        .convert(MemoryType::Host)
         .expect("PropertyStorage だけの convert が失敗した");
 
     drop(property_storage);
@@ -910,7 +1088,7 @@ fn test_surface_outlives_encoder_and_context_handle() {
 
     // 保持しておいた Context があるため、Surface を引き続き利用できる
     let y_plane = surface
-        .get_plane(AMF_PLANE_TYPE::AMF_PLANE_Y)
+        .get_plane(PlaneType::Y)
         .expect("Y プレーンの取得に失敗");
     assert_eq!(y_plane.get_width(), WIDTH as i32, "幅が一致しない");
     assert_eq!(y_plane.get_height(), HEIGHT as i32, "高さが一致しない");
@@ -950,7 +1128,10 @@ fn test_buffer_outlives_decoder_and_context_handle() {
 
     // Buffer が Context を保持しているため、引き続きアクセスできる
     assert_eq!(buffer.get_size(), BUFFER_SIZE, "サイズが一致しない");
-    assert!(!buffer.get_native().is_null(), "バッファが null");
+    assert!(
+        buffer.as_slice().is_ok(),
+        "バッファをスライスとして取得できない"
+    );
 }
 
 /// 利用者が保持する Context がすべてなくなっても、Surface が Context を保持することを確認する
@@ -971,7 +1152,7 @@ fn test_surface_keeps_context_alive() {
 
     // Surface が Context を保持しているため、引き続き利用できる
     let y_plane = surface
-        .get_plane(AMF_PLANE_TYPE::AMF_PLANE_Y)
+        .get_plane(PlaneType::Y)
         .expect("Y プレーンの取得に失敗");
     assert_eq!(y_plane.get_width(), 320, "幅が一致しない");
 }
@@ -994,7 +1175,10 @@ fn test_buffer_keeps_context_alive() {
 
     // Buffer が Context を保持しているため、引き続き利用できる
     assert_eq!(buffer.get_size(), 4096, "サイズが一致しない");
-    assert!(!buffer.get_native().is_null(), "バッファが null");
+    assert!(
+        buffer.as_slice().is_ok(),
+        "バッファをスライスとして取得できない"
+    );
 }
 
 /// 複数の Context を作成し、それぞれに Encoder と Decoder を並列に作成できることを確認する

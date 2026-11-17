@@ -202,9 +202,8 @@ let mut decoder = Decoder::new(
 let bitstream_data = std::fs::read("input.h264")?;
 
 // Buffer を確保してビットストリームデータをコピーし、デコードする
-let buffer = decoder.alloc_buffer(bitstream_data.len())?;
-// bitstream データを buffer にコピーする
-// ...
+let mut buffer = decoder.alloc_buffer(bitstream_data.len())?;
+buffer.as_mut_slice()?.copy_from_slice(&bitstream_data);
 decoder.decode(buffer, ())?;
 
 // 残りのフレームをすべて取得する
@@ -212,9 +211,7 @@ decoder.finish()?;
 
 // デコード済みフレームを確認
 for frame in frame_rx.try_iter() {
-    let y_plane = frame
-        .surface()
-        .get_plane(shiguredo_amf::ffi::AMF_PLANE_TYPE::AMF_PLANE_Y)?;
+    let y_plane = frame.surface().get_plane(shiguredo_amf::PlaneType::Y)?;
     println!("decoded: {}x{}", y_plane.get_width(), y_plane.get_height());
 }
 ```
@@ -225,6 +222,11 @@ B フレームを含むストリームでは出力順が入力順と異なりま
 `user_data` は対応する出力フレームに付きます。`decode()` は入力 `Buffer` に設定した
 PTS を対応する出力 `Surface` に引き継ぎます。PTS を設定していない場合は 0 になります。
 B フレームを含むストリームでは出力 `Surface` の PTS も入力順には並びません。
+
+フレームデータは `Plane::as_slice` / `Plane::as_mut_slice` で、ビットストリームは
+`Buffer::as_slice` / `Buffer::as_mut_slice` で読み書きします。`Plane` のスライスは
+`hpitch * vpitch` バイトで、各行の先頭は `hpitch` バイト間隔です。`Buffer::set_size`
+でバッファのサイズを変更できます。PTS と Duration の単位は 100 ナノ秒です。
 
 ### コーデック対応状況の確認
 

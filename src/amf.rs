@@ -22,6 +22,13 @@
 //! 既存のハンドルがある場合は使ってはならない。`Plane` の `from_raw` /
 //! `from_raw_acquired` は取得元の `Surface` の状態を共有する。
 //!
+//! ## フレームデータ
+//!
+//! `Buffer` / `Plane` の内容は `as_slice` / `as_mut_slice` でバイトスライスとして
+//! 読み書きできる。対象はホストメモリのオブジェクトに限る。`Plane` のスライスは
+//! `hpitch * vpitch` バイトで、各行の先頭は `hpitch` バイト間隔になる。
+//! スライスが有効な間は、同じ AMF オブジェクトへのアクセスを他のハンドルから行わないこと。
+//!
 //! ## コンポーネントへの投入
 //!
 //! コンポーネントに投入する `Surface` / `Buffer` には、投入前にそのオブジェクトを
@@ -34,6 +41,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 
 use crate::error::{Error, require_vtbl_fn};
 use crate::sys;
+use crate::types::{MemoryType, PlaneType, SurfaceFormat};
 
 // SAFETY: 各型の `Send` / `Sync` の根拠。
 // `AMFComponent` は thread-safe と明記されている (AMF API Reference §2.6.1)。
@@ -202,7 +210,7 @@ impl PropertyStorage {
     }
 
     /// Int64 プロパティを設定する
-    pub fn set_property_int64(&self, name: &str, value: sys::amf_int64) -> Result<(), Error> {
+    pub fn set_property_int64(&self, name: &str, value: i64) -> Result<(), Error> {
         let name_w = sys::to_wstring(name);
         let var = sys::AMFVariantStruct::from_int64(value);
         let result = unsafe { self.set_property(name_w.as_ptr(), var) };
@@ -210,12 +218,7 @@ impl PropertyStorage {
     }
 
     /// Size プロパティを設定する
-    pub fn set_property_size(
-        &self,
-        name: &str,
-        width: sys::amf_int32,
-        height: sys::amf_int32,
-    ) -> Result<(), Error> {
+    pub fn set_property_size(&self, name: &str, width: i32, height: i32) -> Result<(), Error> {
         let name_w = sys::to_wstring(name);
         let var = sys::AMFVariantStruct::from_size(width, height);
         let result = unsafe { self.set_property(name_w.as_ptr(), var) };
@@ -272,6 +275,7 @@ struct SurfaceFuncs {
     get_plane:
         unsafe extern "C" fn(*mut sys::AMFSurface, sys::AMF_PLANE_TYPE) -> *mut sys::AMFPlane,
     get_plane_at: unsafe extern "C" fn(*mut sys::AMFSurface, sys::amf_size) -> *mut sys::AMFPlane,
+    get_memory_type: unsafe extern "C" fn(*mut sys::AMFSurface) -> sys::AMF_MEMORY_TYPE,
     convert: unsafe extern "C" fn(*mut sys::AMFSurface, sys::AMF_MEMORY_TYPE) -> sys::AMF_RESULT,
 }
 
@@ -314,6 +318,7 @@ impl Surface {
             set_duration: require_vtbl_fn(vtbl.SetDuration, "AMFSurface::SetDuration")?,
             get_plane: require_vtbl_fn(vtbl.GetPlane, "AMFSurface::GetPlane")?,
             get_plane_at: require_vtbl_fn(vtbl.GetPlaneAt, "AMFSurface::GetPlaneAt")?,
+            get_memory_type: require_vtbl_fn(vtbl.GetMemoryType, "AMFSurface::GetMemoryType")?,
             convert: require_vtbl_fn(vtbl.Convert, "AMFData::Convert")?,
         };
         if acquire {
@@ -386,19 +391,19 @@ impl Surface {
     }
 
     /// PTS (100 ナノ秒単位のタイムスタンプ) を設定する
-    pub fn set_pts(&self, pts: sys::amf_pts) {
+    pub fn set_pts(&self, pts: i64) {
         let _guard = self.state.lock();
         unsafe { (self.f.set_pts)(self.ptr, pts) }
     }
 
     /// PTS (100 ナノ秒単位のタイムスタンプ) を取得する
-    pub fn get_pts(&self) -> sys::amf_pts {
+    pub fn get_pts(&self) -> i64 {
         let _guard = self.state.lock();
         unsafe { (self.f.get_pts)(self.ptr) }
     }
 
-    /// Duration を設定する
-    pub fn set_duration(&self, duration: sys::amf_pts) {
+    /// Duration (100 ナノ秒単位) を設定する
+    pub fn set_duration(&self, duration: i64) {
         let _guard = self.state.lock();
         unsafe { (self.f.set_duration)(self.ptr, duration) }
     }
@@ -407,9 +412,9 @@ impl Surface {
     ///
     /// # Errors
     /// 指定したプレーンを取得できない場合にエラーを返す。
-    pub fn get_plane(&self, plane_type: sys::AMF_PLANE_TYPE) -> Result<Plane<'_>, Error> {
+    pub fn get_plane(&self, plane_type: PlaneType) -> Result<Plane<'_>, Error> {
         let _guard = self.state.lock();
-        let plane = unsafe { (self.f.get_plane)(self.ptr, plane_type) };
+        let plane = unsafe { (self.f.get_plane)(self.ptr, plane_type.to_amf()) };
         if plane.is_null() {
             return Err(Error::new_custom("Surface::get_plane", "plane is null"));
         }
@@ -420,7 +425,7 @@ impl Surface {
     ///
     /// # Errors
     /// `index` に対応するプレーンを取得できない場合にエラーを返す。
-    pub fn get_plane_at(&self, index: sys::amf_size) -> Result<Plane<'_>, Error> {
+    pub fn get_plane_at(&self, index: usize) -> Result<Plane<'_>, Error> {
         let _guard = self.state.lock();
         let plane = unsafe { (self.f.get_plane_at)(self.ptr, index) };
         if plane.is_null() {
@@ -433,7 +438,7 @@ impl Surface {
     ///
     /// # Errors
     /// [`Plane`] が生存している場合、または AMF の変換に失敗した場合にエラーを返す。
-    pub fn convert(&self, type_: sys::AMF_MEMORY_TYPE) -> Result<(), Error> {
+    pub fn convert(&self, memory_type: MemoryType) -> Result<(), Error> {
         let _guard = self.state.lock();
         if self.has_planes() {
             return Err(Error::new_custom(
@@ -442,7 +447,7 @@ impl Surface {
             ));
         }
         Error::check(
-            unsafe { (self.f.convert)(self.ptr, type_) },
+            unsafe { (self.f.convert)(self.ptr, memory_type.to_amf()) },
             "AMFData::Convert",
         )
     }
@@ -498,9 +503,11 @@ struct BufferFuncs {
     release: unsafe extern "C" fn(*mut sys::AMFBuffer) -> sys::amf_long,
     get_native: unsafe extern "C" fn(*mut sys::AMFBuffer) -> *mut std::ffi::c_void,
     get_size: unsafe extern "C" fn(*mut sys::AMFBuffer) -> sys::amf_size,
+    set_size: unsafe extern "C" fn(*mut sys::AMFBuffer, sys::amf_size) -> sys::AMF_RESULT,
     set_pts: unsafe extern "C" fn(*mut sys::AMFBuffer, sys::amf_pts),
     get_pts: unsafe extern "C" fn(*mut sys::AMFBuffer) -> sys::amf_pts,
     get_duration: unsafe extern "C" fn(*mut sys::AMFBuffer) -> sys::amf_pts,
+    get_memory_type: unsafe extern "C" fn(*mut sys::AMFBuffer) -> sys::AMF_MEMORY_TYPE,
     get_property: unsafe extern "C" fn(
         *mut sys::AMFBuffer,
         *const sys::wchar_t,
@@ -537,9 +544,11 @@ impl Buffer {
             release: require_vtbl_fn(vtbl.Release, "AMFBuffer::Release")?,
             get_native: require_vtbl_fn(vtbl.GetNative, "AMFBuffer::GetNative")?,
             get_size: require_vtbl_fn(vtbl.GetSize, "AMFBuffer::GetSize")?,
+            set_size: require_vtbl_fn(vtbl.SetSize, "AMFBuffer::SetSize")?,
             set_pts: require_vtbl_fn(vtbl.SetPts, "AMFBuffer::SetPts")?,
             get_pts: require_vtbl_fn(vtbl.GetPts, "AMFBuffer::GetPts")?,
             get_duration: require_vtbl_fn(vtbl.GetDuration, "AMFBuffer::GetDuration")?,
+            get_memory_type: require_vtbl_fn(vtbl.GetMemoryType, "AMFBuffer::GetMemoryType")?,
             get_property: require_vtbl_fn(vtbl.GetProperty, "AMFBuffer::GetProperty")?,
         };
         if acquire {
@@ -595,32 +604,97 @@ impl Buffer {
         ptr
     }
 
-    /// バッファのネイティブポインタを取得する
+    /// バッファのネイティブポインタを返す
+    ///
+    /// 返されるポインタはこのハンドルが生存している間だけ有効である。
+    /// ポインタ経由の読み書きは呼び出し元の責任であり、Rust のスライスとして
+    /// 扱う場合は [`Buffer::as_slice`] / [`Buffer::as_mut_slice`] を使う。
     pub fn get_native(&self) -> *mut std::ffi::c_void {
         let _guard = self.state.lock();
         unsafe { (self.f.get_native)(self.ptr) }
     }
 
-    /// バッファサイズを取得する
-    pub fn get_size(&self) -> sys::amf_size {
+    /// バッファのサイズ (バイト数) を返す
+    pub fn get_size(&self) -> usize {
         let _guard = self.state.lock();
         unsafe { (self.f.get_size)(self.ptr) }
     }
 
+    /// バッファのサイズ (バイト数) を設定する
+    ///
+    /// # Errors
+    /// AMF がサイズの変更を受け付けない場合にエラーを返す。
+    pub fn set_size(&self, size: usize) -> Result<(), Error> {
+        let _guard = self.state.lock();
+        Error::check(
+            unsafe { (self.f.set_size)(self.ptr, size) },
+            "AMFBuffer::SetSize",
+        )
+    }
+
+    /// バッファがホストメモリにあることを確認する
+    fn check_host_memory(&self, function: &'static str) -> Result<(), Error> {
+        let memory_type = unsafe { (self.f.get_memory_type)(self.ptr) };
+        if memory_type != sys::AMF_MEMORY_TYPE::AMF_MEMORY_HOST {
+            return Err(Error::new_custom(function, "buffer is not in host memory"));
+        }
+        Ok(())
+    }
+
+    /// ホストメモリのバッファの内容をバイトスライスとして返す
+    ///
+    /// 返されるスライスの長さは [`Buffer::get_size`] が返すサイズと同じである。
+    /// このスライスが有効な間は、同じ AMF オブジェクトのサイズ変更や解放を
+    /// 他のハンドルから行ってはならない。
+    ///
+    /// # Errors
+    /// バッファの内容を Rust のスライスとして扱えない場合にエラーを返す。
+    pub fn as_slice(&self) -> Result<&[u8], Error> {
+        let _guard = self.state.lock();
+        self.check_host_memory("Buffer::as_slice")?;
+        let ptr = unsafe { (self.f.get_native)(self.ptr) } as *const u8;
+        let size = unsafe { (self.f.get_size)(self.ptr) };
+        validate_slice_ptr("Buffer::as_slice", ptr)?;
+        validate_slice_len("Buffer::as_slice", size)?;
+        // SAFETY: ptr は null でなく、size はスライスの長さとして有効な範囲にあり、
+        // バッファは self が生きている間有効である。
+        Ok(unsafe { std::slice::from_raw_parts(ptr, size) })
+    }
+
+    /// ホストメモリのバッファの内容を書き込み用のバイトスライスとして返す
+    ///
+    /// 返されるスライスの長さは [`Buffer::get_size`] が返すサイズと同じである。
+    /// このスライスが有効な間は、同じ AMF オブジェクトへのアクセスを
+    /// 他のハンドルから行ってはならない。
+    ///
+    /// # Errors
+    /// バッファの内容を Rust のスライスとして扱えない場合にエラーを返す。
+    pub fn as_mut_slice(&mut self) -> Result<&mut [u8], Error> {
+        let _guard = self.state.lock();
+        self.check_host_memory("Buffer::as_mut_slice")?;
+        let ptr = unsafe { (self.f.get_native)(self.ptr) } as *mut u8;
+        let size = unsafe { (self.f.get_size)(self.ptr) };
+        validate_slice_ptr("Buffer::as_mut_slice", ptr)?;
+        validate_slice_len("Buffer::as_mut_slice", size)?;
+        // SAFETY: ptr は null でなく、size はスライスの長さとして有効な範囲にあり、
+        // バッファは self が生きている間有効である。
+        Ok(unsafe { std::slice::from_raw_parts_mut(ptr, size) })
+    }
+
     /// PTS (100 ナノ秒単位のタイムスタンプ) を設定する
-    pub fn set_pts(&self, pts: sys::amf_pts) {
+    pub fn set_pts(&self, pts: i64) {
         let _guard = self.state.lock();
         unsafe { (self.f.set_pts)(self.ptr, pts) }
     }
 
     /// PTS (100 ナノ秒単位のタイムスタンプ) を取得する
-    pub fn get_pts(&self) -> sys::amf_pts {
+    pub fn get_pts(&self) -> i64 {
         let _guard = self.state.lock();
         unsafe { (self.f.get_pts)(self.ptr) }
     }
 
-    /// Duration を取得する
-    pub fn get_duration(&self) -> sys::amf_pts {
+    /// Duration (100 ナノ秒単位) を取得する
+    pub fn get_duration(&self) -> i64 {
         let _guard = self.state.lock();
         unsafe { (self.f.get_duration)(self.ptr) }
     }
@@ -777,22 +851,26 @@ impl<'a> Plane<'a> {
         ptr
     }
 
-    /// プレーンのネイティブポインタを取得する
+    /// プレーンのネイティブポインタを返す
     ///
     /// 返されるポインタは取得元の `Surface` が生存している間だけ有効である。
+    /// ポインタ経由の読み書きは呼び出し元の責任であり、Rust のスライスとして
+    /// 扱う場合は [`Plane::as_slice`] / [`Plane::as_mut_slice`] を使う。
     pub fn get_native(&self) -> *mut std::ffi::c_void {
         let _guard = self.surface.state.lock();
         unsafe { (self.f.get_native)(self.ptr) }
     }
 
     /// 水平ピッチ (行あたりのバイト数) を取得する
-    pub fn get_hpitch(&self) -> sys::amf_int32 {
+    ///
+    /// 行の先頭から次の行の先頭までのバイト数であり、幅 (画素数) とは異なる。
+    pub fn get_hpitch(&self) -> i32 {
         let _guard = self.surface.state.lock();
         unsafe { (self.f.get_hpitch)(self.ptr) }
     }
 
     /// 垂直ピッチ (行数) を取得する
-    pub fn get_vpitch(&self) -> sys::amf_int32 {
+    pub fn get_vpitch(&self) -> i32 {
         let _guard = self.surface.state.lock();
         unsafe { (self.f.get_vpitch)(self.ptr) }
     }
@@ -801,7 +879,7 @@ impl<'a> Plane<'a> {
     ///
     /// crop region の幅をピクセル単位で返す。crop region が未設定の場合は、
     /// サーフェスの幅とピクセルフォーマットに基づく。
-    pub fn get_width(&self) -> sys::amf_int32 {
+    pub fn get_width(&self) -> i32 {
         let _guard = self.surface.state.lock();
         unsafe { (self.f.get_width)(self.ptr) }
     }
@@ -810,9 +888,64 @@ impl<'a> Plane<'a> {
     ///
     /// crop region の高さをピクセル単位で返す。crop region が未設定の場合は、
     /// サーフェスの高さとピクセルフォーマットに基づく。
-    pub fn get_height(&self) -> sys::amf_int32 {
+    pub fn get_height(&self) -> i32 {
         let _guard = self.surface.state.lock();
         unsafe { (self.f.get_height)(self.ptr) }
+    }
+
+    /// 取得元の `Surface` がホストメモリにあることを確認する
+    fn check_host_memory(&self, function: &'static str) -> Result<(), Error> {
+        let memory_type = unsafe { (self.surface.f.get_memory_type)(self.surface.ptr) };
+        if memory_type != sys::AMF_MEMORY_TYPE::AMF_MEMORY_HOST {
+            return Err(Error::new_custom(function, "surface is not in host memory"));
+        }
+        Ok(())
+    }
+
+    /// ホストメモリにあるプレーンのメモリをバイトスライスとして返す
+    ///
+    /// 返されるスライスの長さは `get_hpitch() * get_vpitch()` バイトである。
+    /// 各行の先頭は [`Plane::get_hpitch`] バイト間隔で並び、幅方向の有効な
+    /// バイト数は [`Plane::get_width`] とピクセルフォーマットから決まる。
+    /// このスライスが有効な間は、取得元の `Surface` の変換や解放を
+    /// 他のハンドルから行ってはならない。
+    ///
+    /// # Errors
+    /// プレーンの内容を Rust のスライスとして扱えない場合にエラーを返す。
+    pub fn as_slice(&self) -> Result<&[u8], Error> {
+        let _guard = self.surface.state.lock();
+        self.check_host_memory("Plane::as_slice")?;
+        let ptr = unsafe { (self.f.get_native)(self.ptr) } as *const u8;
+        let hpitch = unsafe { (self.f.get_hpitch)(self.ptr) };
+        let vpitch = unsafe { (self.f.get_vpitch)(self.ptr) };
+        let size = plane_slice_len("Plane::as_slice", hpitch, vpitch)?;
+        validate_slice_ptr("Plane::as_slice", ptr)?;
+        // SAFETY: ptr は null でなく、size は hpitch と vpitch から計算した
+        // スライスの長さとして有効な範囲にあり、プレーンは Surface が生きている間有効である。
+        Ok(unsafe { std::slice::from_raw_parts(ptr, size) })
+    }
+
+    /// ホストメモリにあるプレーンのメモリを書き込み用のバイトスライスとして返す
+    ///
+    /// 返されるスライスの長さは `get_hpitch() * get_vpitch()` バイトである。
+    /// 各行の先頭は [`Plane::get_hpitch`] バイト間隔で並び、幅方向の有効な
+    /// バイト数は [`Plane::get_width`] とピクセルフォーマットから決まる。
+    /// このスライスが有効な間は、取得元の `Surface` の変換や解放を
+    /// 他のハンドルから行ってはならない。
+    ///
+    /// # Errors
+    /// プレーンの内容を Rust のスライスとして扱えない場合にエラーを返す。
+    pub fn as_mut_slice(&mut self) -> Result<&mut [u8], Error> {
+        let _guard = self.surface.state.lock();
+        self.check_host_memory("Plane::as_mut_slice")?;
+        let ptr = unsafe { (self.f.get_native)(self.ptr) } as *mut u8;
+        let hpitch = unsafe { (self.f.get_hpitch)(self.ptr) };
+        let vpitch = unsafe { (self.f.get_vpitch)(self.ptr) };
+        let size = plane_slice_len("Plane::as_mut_slice", hpitch, vpitch)?;
+        validate_slice_ptr("Plane::as_mut_slice", ptr)?;
+        // SAFETY: ptr は null でなく、size は hpitch と vpitch から計算した
+        // スライスの長さとして有効な範囲にあり、プレーンは Surface が生きている間有効である。
+        Ok(unsafe { std::slice::from_raw_parts_mut(ptr, size) })
     }
 }
 
@@ -843,6 +976,43 @@ impl Drop for Plane<'_> {
         // 観測して AMF Convert を実行しうるため、release 後に減らす。
         self.surface.dec_plane();
     }
+}
+
+/// スライスの生成に使うポインタが null でないことを検証する
+fn validate_slice_ptr(function: &'static str, ptr: *const u8) -> Result<(), Error> {
+    if ptr.is_null() {
+        return Err(Error::new_custom(function, "native pointer is null"));
+    }
+    Ok(())
+}
+
+/// スライスの長さが Rust のスライスの不変条件を満たすことを検証する
+fn validate_slice_len(function: &'static str, len: usize) -> Result<(), Error> {
+    if len > isize::MAX as usize {
+        return Err(Error::new_custom(
+            function,
+            "slice length exceeds isize::MAX",
+        ));
+    }
+    Ok(())
+}
+
+/// プレーンのピッチからスライスの長さを計算する
+fn plane_slice_len(function: &'static str, hpitch: i32, vpitch: i32) -> Result<usize, Error> {
+    let hpitch =
+        usize::try_from(hpitch).map_err(|_| Error::new_custom(function, "hpitch is negative"))?;
+    let vpitch =
+        usize::try_from(vpitch).map_err(|_| Error::new_custom(function, "vpitch is negative"))?;
+    checked_mul_len(function, hpitch, vpitch)
+}
+
+/// 2 つの長さの積をスライスの長さとして計算する
+fn checked_mul_len(function: &'static str, a: usize, b: usize) -> Result<usize, Error> {
+    let len = a
+        .checked_mul(b)
+        .ok_or_else(|| Error::new_custom(function, "plane size overflows usize"))?;
+    validate_slice_len(function, len)?;
+    Ok(len)
 }
 
 // ---------------------------------------------------------------------------
@@ -938,16 +1108,23 @@ impl Context {
     /// Surface を確保できない場合にエラーを返す。
     pub fn alloc_surface(
         &self,
-        type_: sys::AMF_MEMORY_TYPE,
-        format: sys::AMF_SURFACE_FORMAT,
-        width: sys::amf_int32,
-        height: sys::amf_int32,
+        memory_type: MemoryType,
+        format: SurfaceFormat,
+        width: i32,
+        height: i32,
     ) -> Result<Surface, Error> {
         let surface = {
             let _guard = self.state.lock();
             let mut surface: *mut sys::AMFSurface = std::ptr::null_mut();
             let result = unsafe {
-                (self.f.alloc_surface)(self.ptr, type_, format, width, height, &mut surface)
+                (self.f.alloc_surface)(
+                    self.ptr,
+                    memory_type.to_amf(),
+                    format.to_amf(),
+                    width,
+                    height,
+                    &mut surface,
+                )
             };
             Error::check(result, "AMFContext::AllocSurface")?;
 
@@ -969,15 +1146,12 @@ impl Context {
     ///
     /// # Errors
     /// Buffer を確保できない場合にエラーを返す。
-    pub fn alloc_buffer(
-        &self,
-        type_: sys::AMF_MEMORY_TYPE,
-        size: sys::amf_size,
-    ) -> Result<Buffer, Error> {
+    pub fn alloc_buffer(&self, memory_type: MemoryType, size: usize) -> Result<Buffer, Error> {
         let buffer = {
             let _guard = self.state.lock();
             let mut buffer: *mut sys::AMFBuffer = std::ptr::null_mut();
-            let result = unsafe { (self.f.alloc_buffer)(self.ptr, type_, size, &mut buffer) };
+            let result =
+                unsafe { (self.f.alloc_buffer)(self.ptr, memory_type.to_amf(), size, &mut buffer) };
             Error::check(result, "AMFContext::AllocBuffer")?;
 
             if buffer.is_null() {
@@ -1185,18 +1359,13 @@ impl Component {
     }
 
     /// コンポーネントを初期化する
-    pub fn init(
-        &self,
-        format: sys::AMF_SURFACE_FORMAT,
-        width: sys::amf_int32,
-        height: sys::amf_int32,
-    ) -> sys::AMF_RESULT {
+    pub fn init(&self, format: SurfaceFormat, width: i32, height: i32) -> sys::AMF_RESULT {
         let _guard = self.process_state.lock();
-        unsafe { (self.f.init)(self.ptr, format, width, height) }
+        unsafe { (self.f.init)(self.ptr, format.to_amf(), width, height) }
     }
 
     /// コンポーネントを再初期化する (解像度変更)
-    pub fn re_init(&self, width: sys::amf_int32, height: sys::amf_int32) -> sys::AMF_RESULT {
+    pub fn re_init(&self, width: i32, height: i32) -> sys::AMF_RESULT {
         let _guard = self.process_state.lock();
         unsafe { (self.f.re_init)(self.ptr, width, height) }
     }
@@ -1689,6 +1858,7 @@ mod tests {
 
     use super::*;
     use crate::AmfLibrary;
+    use crate::types::FrameFormat;
 
     /// テスト用の Context を作成する
     fn create_context() -> Context {
@@ -1701,8 +1871,8 @@ mod tests {
     fn create_surface(context: &Context) -> Surface {
         context
             .alloc_surface(
-                sys::AMF_MEMORY_TYPE::AMF_MEMORY_HOST,
-                sys::AMF_SURFACE_FORMAT::AMF_SURFACE_NV12,
+                MemoryType::Host,
+                SurfaceFormat::from(FrameFormat::Nv12),
                 320,
                 240,
             )
@@ -1712,7 +1882,7 @@ mod tests {
     /// テスト用の Buffer を作成する
     fn create_buffer(context: &Context) -> Buffer {
         context
-            .alloc_buffer(sys::AMF_MEMORY_TYPE::AMF_MEMORY_HOST, 4096)
+            .alloc_buffer(MemoryType::Host, 4096)
             .expect("Buffer の確保に失敗")
     }
 
@@ -1783,7 +1953,7 @@ mod tests {
             "Plane を取得する前の Surface が共有扱いになっている"
         );
         let plane = surface
-            .get_plane(sys::AMF_PLANE_TYPE::AMF_PLANE_Y)
+            .get_plane(PlaneType::Y)
             .expect("Y プレーンの取得に失敗");
         assert!(
             surface.is_shared(),
@@ -1861,12 +2031,12 @@ mod tests {
 
         // 元のハンドルと Clone は引き続き利用できる
         let plane = surface
-            .get_plane(sys::AMF_PLANE_TYPE::AMF_PLANE_Y)
+            .get_plane(PlaneType::Y)
             .expect("Y プレーンの取得に失敗");
         assert_eq!(plane.get_width(), 320, "幅が一致しない");
         drop(plane);
         let plane = clone
-            .get_plane(sys::AMF_PLANE_TYPE::AMF_PLANE_Y)
+            .get_plane(PlaneType::Y)
             .expect("Y プレーンの取得に失敗");
         assert_eq!(plane.get_width(), 320, "幅が一致しない");
         drop(plane);
@@ -1875,7 +2045,7 @@ mod tests {
         drop(clone);
         drop(surface);
         let plane = other
-            .get_plane(sys::AMF_PLANE_TYPE::AMF_PLANE_Y)
+            .get_plane(PlaneType::Y)
             .expect("Y プレーンの取得に失敗");
         assert_eq!(plane.get_width(), 320, "幅が一致しない");
     }
@@ -1944,12 +2114,65 @@ mod tests {
                     for i in 0..100 {
                         surface.set_pts(i);
                         let plane = surface
-                            .get_plane(sys::AMF_PLANE_TYPE::AMF_PLANE_Y)
+                            .get_plane(PlaneType::Y)
                             .expect("Y プレーンの取得に失敗");
-                        assert!(!plane.get_native().is_null(), "Y プレーンが null");
+                        assert!(
+                            plane.as_slice().is_ok(),
+                            "Y プレーンをスライスとして取得できない"
+                        );
                     }
                 });
             }
         });
+    }
+
+    /// null ポインタがスライス生成の対象にならないことを確認する
+    #[test]
+    fn test_validate_slice_ptr_rejects_null() {
+        assert!(
+            validate_slice_ptr("test", std::ptr::null()).is_err(),
+            "null ポインタが受け入れられた"
+        );
+
+        let data = [0u8; 1];
+        assert!(
+            validate_slice_ptr("test", data.as_ptr()).is_ok(),
+            "null でないポインタが拒否された"
+        );
+    }
+
+    /// isize::MAX を超える長さがスライスの長さとして拒否されることを確認する
+    #[test]
+    fn test_validate_slice_len_rejects_too_long() {
+        assert!(
+            validate_slice_len("test", isize::MAX as usize).is_ok(),
+            "isize::MAX の長さが拒否された"
+        );
+        assert!(
+            validate_slice_len("test", isize::MAX as usize + 1).is_err(),
+            "isize::MAX を超える長さが受け入れられた"
+        );
+    }
+
+    /// 負のピッチと積のオーバーフローが拒否されることを確認する
+    #[test]
+    fn test_plane_slice_len_validates_pitch() {
+        assert_eq!(
+            plane_slice_len("test", 4, 3).expect("正のピッチが拒否された"),
+            12,
+            "ピッチの積が一致しない"
+        );
+        assert!(
+            plane_slice_len("test", -1, 3).is_err(),
+            "負の hpitch が受け入れられた"
+        );
+        assert!(
+            plane_slice_len("test", 4, -1).is_err(),
+            "負の vpitch が受け入れられた"
+        );
+        assert!(
+            checked_mul_len("test", usize::MAX, 2).is_err(),
+            "長さの積のオーバーフローが受け入れられた"
+        );
     }
 }

@@ -43,6 +43,15 @@
   - `EncoderConfig` の `qpb` は `Encoder::new` がエラーを返す
   - `ReconfigureParams` の `qpb` / `gop_pic_size` は `Encoder::reconfigure` がエラーを返す
   - @melpon
+- [CHANGE] `amf` モジュールのフレームデータ API から `ffi` の型を排除する
+  - `Surface::get_plane` が `PlaneType` を、`Surface::convert` / `Context::alloc_surface` / `Context::alloc_buffer` が `MemoryType` を、`Context::alloc_surface` / `Component::init` が `SurfaceFormat` を受け取るように変更する
+  - @melpon
+- [ADD] `PlaneType` を追加する
+  - @melpon
+- [ADD] `amf::Buffer::as_slice` / `as_mut_slice` / `set_size` と `amf::Plane::as_slice` / `as_mut_slice` を追加する
+  - null、サイズ、ピッチを検証し、スライスとして扱えない場合はエラーを返す
+  - `Plane` のスライスは `hpitch * vpitch` バイトで、各行の先頭は `hpitch` バイト間隔になる
+  - @melpon
 - [ADD] `amf::Buffer::set_pts` と `amf::Surface::get_pts` を追加する
   - @melpon
 - [FIX] `Decoder::decode` の `user_data` が B フレームを含むストリームで誤ったフレームに付く問題を修正する

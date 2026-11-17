@@ -87,9 +87,8 @@ use error::require_vtbl_fn;
 use sys::{AMF_DLL_NAME, AMF_FULL_VERSION, AMFFactory, AmfInitFn, AmfQueryVersionFn, amf_uint64};
 
 pub use codec_info::{
-    AccelerationType, CodecInfo, DecodingInfo, EncodingInfo, IoCapabilities, MemoryType,
-    MemoryTypeCapability, Property, SurfaceFormat, SurfaceFormatCapability, Value, VideoCodecType,
-    VideoProfile, supported_codecs,
+    AccelerationType, CodecInfo, DecodingInfo, EncodingInfo, IoCapabilities, MemoryTypeCapability,
+    Property, SurfaceFormatCapability, Value, VideoCodecType, VideoProfile, supported_codecs,
 };
 pub use decode::{
     DecodeHandler, DecodedFrame, Decoder, DecoderCodec, DecoderConfig, FnDecodeHandler,
@@ -100,7 +99,9 @@ pub use encode::{
     RateControlMode, ReconfigureParams, frame_type,
 };
 pub use error::Error;
-pub use types::{Av1Profile, FrameFormat, H264Profile, HevcProfile};
+pub use types::{
+    Av1Profile, FrameFormat, H264Profile, HevcProfile, MemoryType, PlaneType, SurfaceFormat,
+};
 
 /// ビルド時の AMF バージョン文字列
 pub const BUILD_VERSION: &str = sys::BUILD_METADATA_VERSION;

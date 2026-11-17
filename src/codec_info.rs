@@ -6,7 +6,7 @@ use crate::AmfLibrary;
 use crate::Error;
 use crate::amf::{Caps, Context, IoCaps};
 use crate::sys;
-use crate::types::{Av1Profile, FrameFormat, H264Profile, HevcProfile};
+use crate::types::{Av1Profile, H264Profile, HevcProfile, MemoryType, SurfaceFormat};
 
 // ---------------------------------------------------------------------------
 // 公開型
@@ -141,95 +141,6 @@ impl VideoProfile {
                     Some(Self::Unknown(value))
                 }
             }
-        }
-    }
-}
-
-/// AMF が報告する surface format
-///
-/// `FrameFormat` に写像できる値は [`SurfaceFormat::Known`] に、写像できない値は
-/// [`SurfaceFormat::Unknown`] に AMF の生値を保持する。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SurfaceFormat {
-    /// `FrameFormat` に写像できる形式
-    Known(FrameFormat),
-    /// `FrameFormat` に写像できない形式
-    Unknown(i32),
-}
-
-impl SurfaceFormat {
-    /// `AMF_SURFACE_FORMAT` の値から変換する
-    fn from_amf(format: sys::AMF_SURFACE_FORMAT) -> Self {
-        if format == sys::AMF_SURFACE_FORMAT::AMF_SURFACE_NV12 {
-            Self::Known(FrameFormat::Nv12)
-        } else if format == sys::AMF_SURFACE_FORMAT::AMF_SURFACE_YV12 {
-            Self::Known(FrameFormat::Yv12)
-        } else if format == sys::AMF_SURFACE_FORMAT::AMF_SURFACE_YUV420P {
-            Self::Known(FrameFormat::I420)
-        } else if format == sys::AMF_SURFACE_FORMAT::AMF_SURFACE_BGRA {
-            Self::Known(FrameFormat::Bgra)
-        } else if format == sys::AMF_SURFACE_FORMAT::AMF_SURFACE_ARGB {
-            Self::Known(FrameFormat::Argb)
-        } else if format == sys::AMF_SURFACE_FORMAT::AMF_SURFACE_RGBA {
-            Self::Known(FrameFormat::Rgba)
-        } else if format == sys::AMF_SURFACE_FORMAT::AMF_SURFACE_YUY2 {
-            Self::Known(FrameFormat::Yuy2)
-        } else if format == sys::AMF_SURFACE_FORMAT::AMF_SURFACE_UYVY {
-            Self::Known(FrameFormat::Uyvy)
-        } else if format == sys::AMF_SURFACE_FORMAT::AMF_SURFACE_P010 {
-            Self::Known(FrameFormat::P010)
-        } else if format == sys::AMF_SURFACE_FORMAT::AMF_SURFACE_P012 {
-            Self::Known(FrameFormat::P012)
-        } else if format == sys::AMF_SURFACE_FORMAT::AMF_SURFACE_P016 {
-            Self::Known(FrameFormat::P016)
-        } else if format == sys::AMF_SURFACE_FORMAT::AMF_SURFACE_Y210 {
-            Self::Known(FrameFormat::Y210)
-        } else if format == sys::AMF_SURFACE_FORMAT::AMF_SURFACE_AYUV {
-            Self::Known(FrameFormat::Ayuv)
-        } else if format == sys::AMF_SURFACE_FORMAT::AMF_SURFACE_Y410 {
-            Self::Known(FrameFormat::Y410)
-        } else if format == sys::AMF_SURFACE_FORMAT::AMF_SURFACE_Y416 {
-            Self::Known(FrameFormat::Y416)
-        } else {
-            Self::Unknown(format.0 as i32)
-        }
-    }
-}
-
-/// AMF が報告する memory type
-///
-/// Linux で使う値だけを型にし、それ以外は [`MemoryType::Unknown`] に生値を保持する。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum MemoryType {
-    /// ホストメモリ
-    Host,
-    /// OpenCL メモリ
-    OpenCl,
-    /// OpenGL メモリ
-    OpenGl,
-    /// X Video メモリ
-    Xv,
-    /// Vulkan メモリ
-    Vulkan,
-    /// 本クレートが型として持たない memory type
-    Unknown(i32),
-}
-
-impl MemoryType {
-    /// `AMF_MEMORY_TYPE` の値から変換する
-    fn from_amf(memory_type: sys::AMF_MEMORY_TYPE) -> Self {
-        if memory_type == sys::AMF_MEMORY_TYPE::AMF_MEMORY_HOST {
-            Self::Host
-        } else if memory_type == sys::AMF_MEMORY_TYPE::AMF_MEMORY_OPENCL {
-            Self::OpenCl
-        } else if memory_type == sys::AMF_MEMORY_TYPE::AMF_MEMORY_OPENGL {
-            Self::OpenGl
-        } else if memory_type == sys::AMF_MEMORY_TYPE::AMF_MEMORY_XV {
-            Self::Xv
-        } else if memory_type == sys::AMF_MEMORY_TYPE::AMF_MEMORY_VULKAN {
-            Self::Vulkan
-        } else {
-            Self::Unknown(memory_type.0 as i32)
         }
     }
 }
@@ -786,6 +697,8 @@ fn collect_properties(caps: &Caps) -> Result<Vec<Property>, Error> {
 mod tests {
     use super::*;
 
+    use crate::types::FrameFormat;
+
     /// テスト用の Context を作成する
     fn create_context() -> Context {
         AmfLibrary::instance()
@@ -823,7 +736,7 @@ mod tests {
             sys::AMF_MEMORY_TYPE::AMF_MEMORY_OPENGL => MemoryType::OpenGl,
             sys::AMF_MEMORY_TYPE::AMF_MEMORY_XV => MemoryType::Xv,
             sys::AMF_MEMORY_TYPE::AMF_MEMORY_VULKAN => MemoryType::Vulkan,
-            other => MemoryType::Unknown(other.0 as i32),
+            other => MemoryType::Unknown(other.0),
         }
     }
 

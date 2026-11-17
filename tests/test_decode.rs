@@ -2,11 +2,9 @@
 //!
 //! このファイルのテストは実 GPU と AMF ランタイムを必要とする。
 
-use std::ptr;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use shiguredo_amf::ffi::amf_pts;
 use shiguredo_amf::{DecodedFrame, Decoder, DecoderCodec, DecoderConfig, Error, FnDecodeHandler};
 
 #[expect(dead_code, reason = "test_decode では create_context だけを使う")]
@@ -31,8 +29,8 @@ const H264_PRESENTATION_ORDER: [usize; 50] = [
 /// 入力フレームに設定する PTS を返す
 ///
 /// 入力 PTS が復元されることを確認できるよう、フレームごとに異なる値を返す。
-fn input_pts(index: usize) -> amf_pts {
-    1_000_000 + index as amf_pts * 7
+fn input_pts(index: usize) -> i64 {
+    1_000_000 + index as i64 * 7
 }
 
 /// Annex B 形式のビットストリームをアクセスユニット単位に分割する
@@ -156,22 +154,19 @@ fn decode_access_units(
     .expect("デコーダーの作成に失敗");
 
     for (index, access_unit) in access_units.iter().enumerate() {
-        let buffer = decoder
+        let mut buffer = decoder
             .alloc_buffer(access_unit.len())
             .expect("Buffer の確保に失敗");
-        let native = buffer.get_native() as *mut u8;
-        assert!(!native.is_null(), "Buffer の native ポインターが null");
-        assert!(
-            buffer.get_size() >= access_unit.len(),
-            "Buffer のサイズ {} がアクセスユニットのサイズ {} より小さい",
-            buffer.get_size(),
-            access_unit.len()
-        );
         // テスト用の入力 Buffer は他から共有されていないため、AMF に渡す前に
         // ビットストリームを書き込んでよい。
-        unsafe {
-            ptr::copy_nonoverlapping(access_unit.as_ptr(), native, access_unit.len());
-        }
+        let buffer_data = buffer.as_mut_slice().expect("Buffer のスライス取得に失敗");
+        assert!(
+            buffer_data.len() >= access_unit.len(),
+            "Buffer のサイズ {} がアクセスユニットのサイズ {} より小さい",
+            buffer_data.len(),
+            access_unit.len()
+        );
+        buffer_data[..access_unit.len()].copy_from_slice(access_unit);
 
         // 入力時の PTS がデコード結果に保持されることを確認できるよう、内部の
         // 対応付け用 ID とは異なる値を設定する。
@@ -307,14 +302,15 @@ fn test_decode_rejects_multi_frame_buffer() {
     )
     .expect("デコーダーの作成に失敗");
 
-    let buffer = decoder
+    let mut buffer = decoder
         .alloc_buffer(data.len())
         .expect("Buffer の確保に失敗");
     // テスト用の入力 Buffer は他から共有されていないため、AMF に渡す前に
     // ビットストリームを書き込んでよい。
-    unsafe {
-        ptr::copy_nonoverlapping(data.as_ptr(), buffer.get_native() as *mut u8, data.len());
-    }
+    buffer
+        .as_mut_slice()
+        .expect("Buffer のスライス取得に失敗")
+        .copy_from_slice(&data);
 
     let error = decoder
         .decode(buffer, 0)
@@ -380,16 +376,13 @@ fn test_drop_decoder_without_finish() {
     )
     .expect("デコーダーの作成に失敗");
 
-    let buffer = decoder
+    let mut buffer = decoder
         .alloc_buffer(access_unit.len())
         .expect("Buffer の確保に失敗");
-    unsafe {
-        ptr::copy_nonoverlapping(
-            access_unit.as_ptr(),
-            buffer.get_native() as *mut u8,
-            access_unit.len(),
-        );
-    }
+    buffer
+        .as_mut_slice()
+        .expect("Buffer のスライス取得に失敗")
+        .copy_from_slice(access_unit);
     decoder.decode(buffer, 0).expect("デコードの投入に失敗");
 
     let started = Instant::now();
@@ -428,16 +421,13 @@ fn test_decode_preserves_duplicate_zero_pts() {
     .expect("デコーダーの作成に失敗");
 
     for (index, access_unit) in access_units.iter().take(frame_count).enumerate() {
-        let buffer = decoder
+        let mut buffer = decoder
             .alloc_buffer(access_unit.len())
             .expect("Buffer の確保に失敗");
-        unsafe {
-            ptr::copy_nonoverlapping(
-                access_unit.as_ptr(),
-                buffer.get_native() as *mut u8,
-                access_unit.len(),
-            );
-        }
+        buffer
+            .as_mut_slice()
+            .expect("Buffer のスライス取得に失敗")
+            .copy_from_slice(access_unit);
         // すべての入力に同じ PTS 0 を設定する。PTS が重複しても内部の
         // 対応付け用 ID で区別できることを確認する。
         buffer.set_pts(0);
@@ -500,16 +490,13 @@ fn test_decode_reports_input_without_output() {
     )
     .expect("デコーダーの作成に失敗");
 
-    let buffer = decoder
+    let mut buffer = decoder
         .alloc_buffer(parameter_sets.len())
         .expect("Buffer の確保に失敗");
-    unsafe {
-        ptr::copy_nonoverlapping(
-            parameter_sets.as_ptr(),
-            buffer.get_native() as *mut u8,
-            parameter_sets.len(),
-        );
-    }
+    buffer
+        .as_mut_slice()
+        .expect("Buffer のスライス取得に失敗")
+        .copy_from_slice(&parameter_sets);
     // 利用者が設定した PTS が、未対応入力のエラーメッセージに使われることを確認する。
     buffer.set_pts(100_000);
     decoder.decode(buffer, 0).expect("SPS/PPS だけの投入に失敗");

@@ -14,37 +14,16 @@ use crate::amf::{Buffer, Component, Context, PropertyStorage, Surface};
 use crate::error::Error;
 use crate::query_output::{DrainStatus, QueryOutputKind, classify_query_output};
 use crate::sys::{
-    self, AMF_MEMORY_TYPE, AMF_RESULT, AMF_SECOND, AMF_SURFACE_FORMAT, AMFBuffer, AMFData,
-    AMFVariantStruct, amf_int32, amf_int64, amf_pts,
+    self, AMF_RESULT, AMF_SECOND, AMFBuffer, AMFData, AMFVariantStruct, amf_int32, amf_int64,
+    amf_pts,
 };
-use crate::types::{Av1Profile, FrameFormat, H264Profile, HevcProfile};
+use crate::types::{Av1Profile, FrameFormat, H264Profile, HevcProfile, MemoryType, SurfaceFormat};
 
 // ---------------------------------------------------------------------------
 // 公開型
 // ---------------------------------------------------------------------------
 
 impl FrameFormat {
-    /// AMF_SURFACE_FORMAT に変換する
-    fn to_amf(self) -> AMF_SURFACE_FORMAT {
-        match self {
-            FrameFormat::Nv12 => AMF_SURFACE_FORMAT::AMF_SURFACE_NV12,
-            FrameFormat::Yv12 => AMF_SURFACE_FORMAT::AMF_SURFACE_YV12,
-            FrameFormat::I420 => AMF_SURFACE_FORMAT::AMF_SURFACE_YUV420P,
-            FrameFormat::Bgra => AMF_SURFACE_FORMAT::AMF_SURFACE_BGRA,
-            FrameFormat::Argb => AMF_SURFACE_FORMAT::AMF_SURFACE_ARGB,
-            FrameFormat::Rgba => AMF_SURFACE_FORMAT::AMF_SURFACE_RGBA,
-            FrameFormat::Yuy2 => AMF_SURFACE_FORMAT::AMF_SURFACE_YUY2,
-            FrameFormat::Uyvy => AMF_SURFACE_FORMAT::AMF_SURFACE_UYVY,
-            FrameFormat::P010 => AMF_SURFACE_FORMAT::AMF_SURFACE_P010,
-            FrameFormat::P012 => AMF_SURFACE_FORMAT::AMF_SURFACE_P012,
-            FrameFormat::P016 => AMF_SURFACE_FORMAT::AMF_SURFACE_P016,
-            FrameFormat::Y210 => AMF_SURFACE_FORMAT::AMF_SURFACE_Y210,
-            FrameFormat::Ayuv => AMF_SURFACE_FORMAT::AMF_SURFACE_AYUV,
-            FrameFormat::Y410 => AMF_SURFACE_FORMAT::AMF_SURFACE_Y410,
-            FrameFormat::Y416 => AMF_SURFACE_FORMAT::AMF_SURFACE_Y416,
-        }
-    }
-
     /// このフレームフォーマットに対応する出力ビット深度を返す
     ///
     /// AMF が扱えない 12bit / 16bit のフォーマットでは `None` を返し、
@@ -439,7 +418,7 @@ struct DynamicPropertyNames {
 pub struct Encoder<H: EncodeHandler> {
     component: Component,
     context: Context,
-    surface_format: AMF_SURFACE_FORMAT,
+    surface_format: SurfaceFormat,
     width: i32,
     height: i32,
     frame_count: u64,
@@ -527,7 +506,7 @@ impl<H: EncodeHandler> Encoder<H> {
         // コンポーネントを作成する
         let component = lib.create_component(&context, component_id)?;
 
-        let surface_format = config.frame_format.to_amf();
+        let surface_format = SurfaceFormat::from(config.frame_format);
 
         // プロパティを設定する
         let prop = component.property_storage()?;
@@ -1006,7 +985,7 @@ impl<H: EncodeHandler> Encoder<H> {
     /// [`Encoder::encode`] に渡す。
     pub fn alloc_surface(&self) -> Result<Surface, Error> {
         self.context.alloc_surface(
-            AMF_MEMORY_TYPE::AMF_MEMORY_HOST,
+            MemoryType::Host,
             self.surface_format,
             self.width,
             self.height,
@@ -1469,13 +1448,8 @@ fn extract_encoded_output(
             "buffer size is 0",
         ));
     }
-    let buf_native = buffer.get_native() as *const u8;
-    if buf_native.is_null() {
-        return Err(Error::new_custom(
-            "extract_encoded_output",
-            "buffer native is null",
-        ));
-    }
+    // 出力バッファをスライスとして扱えることを確認する。
+    buffer.as_slice()?;
     let picture_type = get_output_picture_type(&buffer, codec_config)?;
     Ok((buffer, picture_type))
 }

@@ -1,10 +1,10 @@
 use std::sync::mpsc;
 
 use shiguredo_amf::amf::Surface;
-use shiguredo_amf::ffi::{AMF_PLANE_TYPE, AMF_RESULT};
+use shiguredo_amf::ffi::AMF_RESULT;
 use shiguredo_amf::{
     Av1EncoderConfig, Av1Profile, CodecConfig, EncodeOptions, Encoder, EncoderConfig, Error,
-    FnEncodeHandler, FrameFormat, HevcEncoderConfig, HevcProfile, RateControlMode,
+    FnEncodeHandler, FrameFormat, HevcEncoderConfig, HevcProfile, PlaneType, RateControlMode,
     ReconfigureParams,
 };
 
@@ -90,33 +90,37 @@ fn test_encoder_finish_without_input() {
 ///
 /// Y プレーンはフレーム番号に応じたグラデーション、UV プレーンは 0x8000 固定にする。
 fn write_p010_surface(surface: &Surface, width: usize, height: usize, frame_index: usize) {
-    let y_plane = surface
-        .get_plane(AMF_PLANE_TYPE::AMF_PLANE_Y)
+    let mut y_plane = surface
+        .get_plane(PlaneType::Y)
         .expect("Y プレーンの取得に失敗");
-    let y_native = y_plane.get_native() as *mut u16;
-    // get_hpitch() はバイト単位なので、16bit サンプルの要素数に変換する
-    let y_pitch = y_plane.get_hpitch() as usize / 2;
+    // get_hpitch() はバイト単位なので、そのまま行の先頭位置の計算に使う
+    let y_pitch = y_plane.get_hpitch() as usize;
+    let y_data = y_plane
+        .as_mut_slice()
+        .expect("Y プレーンのスライス取得に失敗");
     for row in 0..height {
-        for col in 0..width {
+        let row_start = row * y_pitch;
+        let row_bytes = &mut y_data[row_start..row_start + width * 2];
+        for (col, sample) in row_bytes.chunks_exact_mut(2).enumerate() {
             // 10bit サンプルを 16bit ワードの上位ビットに格納する
             let value = (((col + row + frame_index * 7) % 256) as u16) << 6;
-            unsafe {
-                *y_native.add(row * y_pitch + col) = value;
-            }
+            sample.copy_from_slice(&value.to_ne_bytes());
         }
     }
 
-    let uv_plane = surface
-        .get_plane(AMF_PLANE_TYPE::AMF_PLANE_UV)
+    let mut uv_plane = surface
+        .get_plane(PlaneType::Uv)
         .expect("UV プレーンの取得に失敗");
-    let uv_native = uv_plane.get_native() as *mut u16;
-    let uv_pitch = uv_plane.get_hpitch() as usize / 2;
+    let uv_pitch = uv_plane.get_hpitch() as usize;
+    let uv_data = uv_plane
+        .as_mut_slice()
+        .expect("UV プレーンのスライス取得に失敗");
     for row in 0..height / 2 {
-        for col in 0..width {
+        let row_start = row * uv_pitch;
+        let row_bytes = &mut uv_data[row_start..row_start + width * 2];
+        for sample in row_bytes.chunks_exact_mut(2) {
             // 10bit の無彩色 (512) を 16bit ワードの上位ビットに格納する
-            unsafe {
-                *uv_native.add(row * uv_pitch + col) = 512 << 6;
-            }
+            sample.copy_from_slice(&(512u16 << 6).to_ne_bytes());
         }
     }
 }

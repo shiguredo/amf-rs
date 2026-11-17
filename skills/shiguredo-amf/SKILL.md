@@ -97,7 +97,7 @@ AMD GPU 向けハードウェアアクセラレーションによるビデオエ
 | `VideoProfile` | `H264(H264Profile)`, `Hevc(HevcProfile)`, `Av1(Av1Profile)`, `Unknown(i64)` |
 | `IoCapabilities` | 幅・高さの範囲、垂直アライメント、`SurfaceFormatCapability`、`MemoryTypeCapability`、インターレース対応 |
 | `SurfaceFormat` | `Known(FrameFormat)`, `Unknown(i32)` |
-| `MemoryType` | `Host`, `OpenCl`, `OpenGl`, `Xv`, `Vulkan`, `Unknown(i32)` |
+| `MemoryType` | `Host`, `OpenCl`, `OpenGl`, `Xv`, `Vulkan`, `Unknown(u32)` |
 | `Property` / `Value` | AMF が返した全ケーパビリティプロパティの名前と値。値の確認用 |
 
 ## ハンドラートレイト
@@ -132,13 +132,15 @@ AMD GPU 向けハードウェアアクセラレーションによるビデオエ
 
 `*mut AMFSurface` などの生ポインタを `Acquire` / `Release` で RAII 管理するラッパー。vtable の関数ポインタは初期化時にすべて取り出して構造体メンバーに保持するため、メソッド呼び出しのたびに vtable 検証は行われない。
 
+`PlaneType` は `Surface::get_plane` に指定するプレーン種別 (`Packed`, `Y`, `Uv`, `U`, `V`)。
+
 | 型 | 説明 | 主要メソッド |
 |----|------|-------------|
-| `Context` | `AMFContext` の参照カウントを管理する Clone 可能なハンドル | `alloc_surface(memory_type, format, width, height)`, `alloc_buffer(memory_type, size)`, `as_ptr()` |
-| `Component` | `AMFComponent` のラッパー | `init(format, width, height)`, `re_init(width, height)`, `terminate()`, `drain()`, `flush()`, `unsafe submit_input(*mut AMFData)`, `unsafe query_output(*mut *mut AMFData)`, `get_context()`, `context()`, `property_storage() -> Result<PropertyStorage, Error>` |
-| `Surface` | `AMFSurface` のラッパー | `context()`, `set_pts(amf_pts)`, `get_pts() -> amf_pts`, `set_duration(amf_pts)`, `get_plane(AMF_PLANE_TYPE) -> Result<Plane<'_>, Error>`, `get_plane_at(index) -> Result<Plane<'_>, Error>`, `convert(AMF_MEMORY_TYPE) -> Result<(), Error>`, `property_storage()`, `as_ptr()`, `into_raw()` |
-| `Buffer` | `AMFBuffer` のラッパー | `context()`, `get_native() -> *mut c_void`, `get_size() -> amf_size`, `set_pts(amf_pts)`, `get_pts() -> amf_pts`, `get_duration() -> amf_pts`, `unsafe get_property(name_w, *mut AMFVariantStruct)`, `as_ptr()`, `into_raw()` |
-| `Plane<'a>` | `AMFPlane` の RAII ラッパー。取得元の `Surface` を借用する | `context()`, `get_native() -> *mut c_void`, `get_hpitch() -> amf_int32`, `get_vpitch() -> amf_int32`, `get_width() -> amf_int32`, `get_height() -> amf_int32`, `as_ptr()`, `into_raw()` |
+| `Context` | `AMFContext` の参照カウントを管理する Clone 可能なハンドル | `alloc_surface(MemoryType, SurfaceFormat, width, height)`, `alloc_buffer(MemoryType, size)`, `as_ptr()` |
+| `Component` | `AMFComponent` のラッパー | `init(SurfaceFormat, width, height)`, `re_init(width, height)`, `terminate()`, `drain()`, `flush()`, `unsafe submit_input(*mut AMFData)`, `unsafe query_output(*mut *mut AMFData)`, `get_context()`, `context()`, `property_storage() -> Result<PropertyStorage, Error>` |
+| `Surface` | `AMFSurface` のラッパー | `context()`, `set_pts(i64)`, `get_pts() -> i64`, `set_duration(i64)`, `get_plane(PlaneType) -> Result<Plane<'_>, Error>`, `get_plane_at(index) -> Result<Plane<'_>, Error>`, `convert(MemoryType) -> Result<(), Error>`, `property_storage()`, `as_ptr()`, `into_raw()` |
+| `Buffer` | `AMFBuffer` のラッパー | `context()`, `get_native() -> *mut c_void`, `get_size() -> usize`, `set_size(usize) -> Result<(), Error>`, `as_slice() -> Result<&[u8], Error>`, `as_mut_slice() -> Result<&mut [u8], Error>`, `set_pts(i64)`, `get_pts() -> i64`, `get_duration() -> i64`, `unsafe get_property(name_w, *mut AMFVariantStruct)`, `as_ptr()`, `into_raw()` |
+| `Plane<'a>` | `AMFPlane` の RAII ラッパー。取得元の `Surface` を借用する | `context()`, `get_native() -> *mut c_void`, `get_hpitch() -> i32`, `get_vpitch() -> i32`, `get_width() -> i32`, `get_height() -> i32`, `as_slice() -> Result<&[u8], Error>`, `as_mut_slice() -> Result<&mut [u8], Error>`, `as_ptr()`, `into_raw()` |
 | `PropertyStorage` | `AMFPropertyStorage` のラッパー | `context()`, `set_property_int64(name, value)`, `set_property_size(name, width, height)`, `set_property_rate(name, num, den)`, `unsafe set_property(name_w, AMFVariantStruct)`, `as_ptr()`, `into_raw()` |
 
 `Context::alloc_surface` / `alloc_buffer` は `&self` に対して呼び出す。`Context` の `Clone` は
@@ -165,6 +167,12 @@ AMFContext が破棄され、そのデストラクタが `Terminate` を呼ぶ�
 
 `Surface::convert` は `Plane` が生存している間はエラーを返す。`Surface` の `Clone` や
 `PropertyStorage` が存在するだけでは失敗しない。
+
+`Buffer` / `Plane` のフレームデータは `as_slice` / `as_mut_slice` で読み書きする。`Buffer` の
+スライスは `get_size()` バイト、`Plane` のスライスは `get_hpitch() * get_vpitch()` バイトで、
+`Plane` の各行の先頭は `get_hpitch()` バイト間隔になる。ホストメモリ以外のオブジェクトと、
+null、サイズ、ピッチがスライスの前提を満たさないオブジェクトは `Err` を返す。
+スライスが有効な間は、同じ AMF オブジェクトへのアクセスを他のハンドルから行わないこと。
 
 `Clone` したハンドルは同じ AMF オブジェクトを指す。コンポーネントに投入する `Surface` / `Buffer` は、
 投入前に他のハンドルを破棄する必要がある。`Encoder::encode` / `Decoder::decode` は、投入する
@@ -288,22 +296,20 @@ let mut decoder = Decoder::new(
 let bitstream_data = std::fs::read("input.h264")?;
 
 // Buffer を確保してビットストリームデータをコピーし、デコードする
-let buffer = decoder.alloc_buffer(bitstream_data.len())?;
-// ここで buffer.get_native() に bitstream_data を書き込む...
+let mut buffer = decoder.alloc_buffer(bitstream_data.len())?;
+buffer.as_mut_slice()?.copy_from_slice(&bitstream_data);
 decoder.decode(buffer, ())?;
 
 // 残りのフレームをすべて取得する (Drain → ワーカー完了待ち)
 decoder.finish()?;
 
 for frame in frame_rx.try_iter() {
-    let y_plane = frame
-        .surface()
-        .get_plane(shiguredo_amf::ffi::AMF_PLANE_TYPE::AMF_PLANE_Y)?;
+    let y_plane = frame.surface().get_plane(shiguredo_amf::PlaneType::Y)?;
     println!("decoded: {}x{}", y_plane.get_width(), y_plane.get_height());
 }
 ```
 
-デコーダーは初期化時に解像度 `0x0` で AMF コンポーネントを Init するため、ビットストリームのシーケンスヘッダーから解像度が自動検出される。出力 `Surface` は内部で `convert(AMF_MEMORY_HOST)` 済みのため、`get_plane()` 経由でホストメモリから直接読み出せる。
+デコーダーは初期化時に解像度 `0x0` で AMF コンポーネントを Init するため、ビットストリームのシーケンスヘッダーから解像度が自動検出される。出力 `Surface` は内部で `convert(MemoryType::Host)` 済みのため、`get_plane()` 経由でホストメモリから直接読み出せる。
 
 `decode()` には 1 フレーム分のビットストリームを格納した `Buffer` を渡す。複数フレームを含むバッファは未対応で、`AMF_REPEAT` が返された場合はエラーになる。B フレームを含むストリームでは出力順が入力順と異なるが、`decode()` に渡した `UserData` は対応する出力フレームに付く。`decode()` は入力 `Buffer` に設定した PTS を対応する出力 `Surface` に引き継ぐ。PTS を設定していない場合は 0 になる。B フレームを含むストリームでは出力 `Surface` の PTS も入力順には並ばない。
 
