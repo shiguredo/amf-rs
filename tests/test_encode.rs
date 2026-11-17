@@ -95,9 +95,7 @@ fn write_p010_surface(surface: &Surface, width: usize, height: usize, frame_inde
         .expect("Y プレーンの取得に失敗");
     // get_hpitch() はバイト単位なので、そのまま行の先頭位置の計算に使う
     let y_pitch = y_plane.get_hpitch() as usize;
-    let y_data = y_plane
-        .as_mut_slice()
-        .expect("Y プレーンのスライス取得に失敗");
+    let y_data = unsafe { y_plane.as_mut_slice() }.expect("Y プレーンのスライス取得に失敗");
     for row in 0..height {
         let row_start = row * y_pitch;
         let row_bytes = &mut y_data[row_start..row_start + width * 2];
@@ -112,9 +110,7 @@ fn write_p010_surface(surface: &Surface, width: usize, height: usize, frame_inde
         .get_plane(PlaneType::Uv)
         .expect("UV プレーンの取得に失敗");
     let uv_pitch = uv_plane.get_hpitch() as usize;
-    let uv_data = uv_plane
-        .as_mut_slice()
-        .expect("UV プレーンのスライス取得に失敗");
+    let uv_data = unsafe { uv_plane.as_mut_slice() }.expect("UV プレーンのスライス取得に失敗");
     for row in 0..height / 2 {
         let row_start = row * uv_pitch;
         let row_bytes = &mut uv_data[row_start..row_start + width * 2];

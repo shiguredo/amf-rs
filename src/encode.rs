@@ -1449,7 +1449,7 @@ fn extract_encoded_output(
         ));
     }
     // 出力バッファをスライスとして扱えることを確認する。
-    buffer.as_slice()?;
+    unsafe { buffer.as_slice() }?;
     let picture_type = get_output_picture_type(&buffer, codec_config)?;
     Ok((buffer, picture_type))
 }

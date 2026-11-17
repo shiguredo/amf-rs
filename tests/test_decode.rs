@@ -159,7 +159,7 @@ fn decode_access_units(
             .expect("Buffer の確保に失敗");
         // テスト用の入力 Buffer は他から共有されていないため、AMF に渡す前に
         // ビットストリームを書き込んでよい。
-        let buffer_data = buffer.as_mut_slice().expect("Buffer のスライス取得に失敗");
+        let buffer_data = unsafe { buffer.as_mut_slice() }.expect("Buffer のスライス取得に失敗");
         assert!(
             buffer_data.len() >= access_unit.len(),
             "Buffer のサイズ {} がアクセスユニットのサイズ {} より小さい",
@@ -307,8 +307,7 @@ fn test_decode_rejects_multi_frame_buffer() {
         .expect("Buffer の確保に失敗");
     // テスト用の入力 Buffer は他から共有されていないため、AMF に渡す前に
     // ビットストリームを書き込んでよい。
-    buffer
-        .as_mut_slice()
+    unsafe { buffer.as_mut_slice() }
         .expect("Buffer のスライス取得に失敗")
         .copy_from_slice(&data);
 
@@ -379,8 +378,7 @@ fn test_drop_decoder_without_finish() {
     let mut buffer = decoder
         .alloc_buffer(access_unit.len())
         .expect("Buffer の確保に失敗");
-    buffer
-        .as_mut_slice()
+    unsafe { buffer.as_mut_slice() }
         .expect("Buffer のスライス取得に失敗")
         .copy_from_slice(access_unit);
     decoder.decode(buffer, 0).expect("デコードの投入に失敗");
@@ -424,8 +422,7 @@ fn test_decode_preserves_duplicate_zero_pts() {
         let mut buffer = decoder
             .alloc_buffer(access_unit.len())
             .expect("Buffer の確保に失敗");
-        buffer
-            .as_mut_slice()
+        unsafe { buffer.as_mut_slice() }
             .expect("Buffer のスライス取得に失敗")
             .copy_from_slice(access_unit);
         // すべての入力に同じ PTS 0 を設定する。PTS が重複しても内部の
@@ -493,8 +490,7 @@ fn test_decode_reports_input_without_output() {
     let mut buffer = decoder
         .alloc_buffer(parameter_sets.len())
         .expect("Buffer の確保に失敗");
-    buffer
-        .as_mut_slice()
+    unsafe { buffer.as_mut_slice() }
         .expect("Buffer のスライス取得に失敗")
         .copy_from_slice(&parameter_sets);
     // 利用者が設定した PTS が、未対応入力のエラーメッセージに使われることを確認する。

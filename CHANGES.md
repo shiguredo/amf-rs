@@ -49,6 +49,7 @@
 - [ADD] `PlaneType` を追加する
   - @melpon
 - [ADD] `amf::Buffer::as_slice` / `as_mut_slice` / `set_size` と `amf::Plane::as_slice` / `as_mut_slice` を追加する
+  - `as_slice` / `as_mut_slice` は unsafe 関数とし、メモリの初期化と排他アクセスを呼び出し側の責任にする
   - null、サイズ、ピッチを検証し、スライスとして扱えない場合はエラーを返す
   - `Plane` のスライスは `hpitch * vpitch` バイトで、各行の先頭は `hpitch` バイト間隔になる
   - @melpon

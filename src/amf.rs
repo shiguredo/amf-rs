@@ -24,10 +24,11 @@
 //!
 //! ## フレームデータ
 //!
-//! `Buffer` / `Plane` の内容は `as_slice` / `as_mut_slice` でバイトスライスとして
+//! `Buffer` / `Plane` の内容は unsafe な `as_slice` / `as_mut_slice` でバイトスライスとして
 //! 読み書きできる。対象はホストメモリのオブジェクトに限る。`Plane` のスライスは
 //! `hpitch * vpitch` バイトで、各行の先頭は `hpitch` バイト間隔になる。
 //! スライスが有効な間は、同じ AMF オブジェクトへのアクセスを他のハンドルから行わないこと。
+//! また、返される範囲のメモリが初期化済みであることを呼び出し側が保証すること。
 //!
 //! ## コンポーネントへの投入
 //!
@@ -644,12 +645,20 @@ impl Buffer {
     /// ホストメモリのバッファの内容をバイトスライスとして返す
     ///
     /// 返されるスライスの長さは [`Buffer::get_size`] が返すサイズと同じである。
-    /// このスライスが有効な間は、同じ AMF オブジェクトのサイズ変更や解放を
-    /// 他のハンドルから行ってはならない。
+    ///
+    /// # Safety
+    ///
+    /// 次の条件をすべて満たすこと。
+    ///
+    /// - 返される範囲のメモリが初期化済みであること
+    /// - このスライスが有効な間、同じ AMF オブジェクトへのアクセスを
+    ///   他のハンドルから行わないこと
+    /// - このスライスが有効な間、同じ AMF オブジェクトのサイズ変更や解放を
+    ///   行わないこと
     ///
     /// # Errors
     /// バッファの内容を Rust のスライスとして扱えない場合にエラーを返す。
-    pub fn as_slice(&self) -> Result<&[u8], Error> {
+    pub unsafe fn as_slice(&self) -> Result<&[u8], Error> {
         let _guard = self.state.lock();
         self.check_host_memory("Buffer::as_slice")?;
         let ptr = unsafe { (self.f.get_native)(self.ptr) } as *const u8;
@@ -664,12 +673,20 @@ impl Buffer {
     /// ホストメモリのバッファの内容を書き込み用のバイトスライスとして返す
     ///
     /// 返されるスライスの長さは [`Buffer::get_size`] が返すサイズと同じである。
-    /// このスライスが有効な間は、同じ AMF オブジェクトへのアクセスを
-    /// 他のハンドルから行ってはならない。
+    ///
+    /// # Safety
+    ///
+    /// 次の条件をすべて満たすこと。
+    ///
+    /// - 返される範囲のメモリが初期化済みであること
+    /// - このスライスが有効な間、同じメモリを指す他の参照やハンドルが
+    ///   存在しないこと
+    /// - このスライスが有効な間、同じ AMF オブジェクトへのアクセスや
+    ///   サイズ変更、解放を行わないこと
     ///
     /// # Errors
     /// バッファの内容を Rust のスライスとして扱えない場合にエラーを返す。
-    pub fn as_mut_slice(&mut self) -> Result<&mut [u8], Error> {
+    pub unsafe fn as_mut_slice(&mut self) -> Result<&mut [u8], Error> {
         let _guard = self.state.lock();
         self.check_host_memory("Buffer::as_mut_slice")?;
         let ptr = unsafe { (self.f.get_native)(self.ptr) } as *mut u8;
@@ -907,12 +924,19 @@ impl<'a> Plane<'a> {
     /// 返されるスライスの長さは `get_hpitch() * get_vpitch()` バイトである。
     /// 各行の先頭は [`Plane::get_hpitch`] バイト間隔で並び、幅方向の有効な
     /// バイト数は [`Plane::get_width`] とピクセルフォーマットから決まる。
-    /// このスライスが有効な間は、取得元の `Surface` の変換や解放を
-    /// 他のハンドルから行ってはならない。
+    ///
+    /// # Safety
+    ///
+    /// 次の条件をすべて満たすこと。
+    ///
+    /// - 返される範囲のメモリが初期化済みであること
+    /// - このスライスが有効な間、取得元の `Surface` やプレーンへのアクセスを
+    ///   他のハンドルから行わないこと
+    /// - このスライスが有効な間、取得元の `Surface` の変換や解放を行わないこと
     ///
     /// # Errors
     /// プレーンの内容を Rust のスライスとして扱えない場合にエラーを返す。
-    pub fn as_slice(&self) -> Result<&[u8], Error> {
+    pub unsafe fn as_slice(&self) -> Result<&[u8], Error> {
         let _guard = self.surface.state.lock();
         self.check_host_memory("Plane::as_slice")?;
         let ptr = unsafe { (self.f.get_native)(self.ptr) } as *const u8;
@@ -930,12 +954,20 @@ impl<'a> Plane<'a> {
     /// 返されるスライスの長さは `get_hpitch() * get_vpitch()` バイトである。
     /// 各行の先頭は [`Plane::get_hpitch`] バイト間隔で並び、幅方向の有効な
     /// バイト数は [`Plane::get_width`] とピクセルフォーマットから決まる。
-    /// このスライスが有効な間は、取得元の `Surface` の変換や解放を
-    /// 他のハンドルから行ってはならない。
+    ///
+    /// # Safety
+    ///
+    /// 次の条件をすべて満たすこと。
+    ///
+    /// - 返される範囲のメモリが初期化済みであること
+    /// - このスライスが有効な間、同じメモリを指す他の参照やハンドルが
+    ///   存在しないこと
+    /// - このスライスが有効な間、取得元の `Surface` やプレーンへのアクセス、
+    ///   変換、解放を行わないこと
     ///
     /// # Errors
     /// プレーンの内容を Rust のスライスとして扱えない場合にエラーを返す。
-    pub fn as_mut_slice(&mut self) -> Result<&mut [u8], Error> {
+    pub unsafe fn as_mut_slice(&mut self) -> Result<&mut [u8], Error> {
         let _guard = self.surface.state.lock();
         self.check_host_memory("Plane::as_mut_slice")?;
         let ptr = unsafe { (self.f.get_native)(self.ptr) } as *mut u8;
@@ -2117,7 +2149,7 @@ mod tests {
                             .get_plane(PlaneType::Y)
                             .expect("Y プレーンの取得に失敗");
                         assert!(
-                            plane.as_slice().is_ok(),
+                            unsafe { plane.as_slice() }.is_ok(),
                             "Y プレーンをスライスとして取得できない"
                         );
                     }

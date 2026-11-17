@@ -45,9 +45,7 @@ pub fn write_nv12_rows(
         .get_plane(PlaneType::Y)
         .expect("Y プレーンの取得に失敗");
     let y_hpitch = y_plane.get_hpitch() as usize;
-    let y_data = y_plane
-        .as_mut_slice()
-        .expect("Y プレーンのスライス取得に失敗");
+    let y_data = unsafe { y_plane.as_mut_slice() }.expect("Y プレーンのスライス取得に失敗");
     for row in 0..height {
         let start = row * y_hpitch;
         write_y(row, &mut y_data[start..start + width]);
@@ -57,9 +55,7 @@ pub fn write_nv12_rows(
         .get_plane(PlaneType::Uv)
         .expect("UV プレーンの取得に失敗");
     let uv_hpitch = uv_plane.get_hpitch() as usize;
-    let uv_data = uv_plane
-        .as_mut_slice()
-        .expect("UV プレーンのスライス取得に失敗");
+    let uv_data = unsafe { uv_plane.as_mut_slice() }.expect("UV プレーンのスライス取得に失敗");
     for row in 0..height / 2 {
         let start = row * uv_hpitch;
         write_uv(row, &mut uv_data[start..start + width]);

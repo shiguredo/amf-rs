@@ -184,7 +184,7 @@ fn test_surface_clone_concurrent_access() {
                         "水平ピッチが幅より小さい"
                     );
                     assert!(
-                        y_plane.as_slice().is_ok(),
+                        unsafe { y_plane.as_slice() }.is_ok(),
                         "Y プレーンをスライスとして取得できない"
                     );
 
@@ -256,7 +256,7 @@ fn test_buffer_clone_concurrent_access() {
                 for _ in 0..iterations {
                     assert_eq!(buffer.get_size(), BUFFER_SIZE, "サイズが一致しない");
                     assert!(
-                        buffer.as_slice().is_ok(),
+                        unsafe { buffer.as_slice() }.is_ok(),
                         "バッファをスライスとして取得できない"
                     );
                     assert_eq!(buffer.get_pts(), pts, "PTS が変化した");
@@ -292,9 +292,7 @@ fn test_buffer_as_slice_and_set_size() {
     assert_eq!(buffer.get_pts(), pts, "Buffer の PTS が一致しない");
 
     // 書き込み用スライスの長さと、書き込んだ内容が読み取り用スライスで得られることを確認する
-    let data = buffer
-        .as_mut_slice()
-        .expect("Buffer の書き込み用スライス取得に失敗");
+    let data = unsafe { buffer.as_mut_slice() }.expect("Buffer の書き込み用スライス取得に失敗");
     assert_eq!(
         data.len(),
         BUFFER_SIZE,
@@ -304,9 +302,7 @@ fn test_buffer_as_slice_and_set_size() {
         *byte = (index % 256) as u8;
     }
 
-    let data = buffer
-        .as_slice()
-        .expect("Buffer の読み取り用スライス取得に失敗");
+    let data = unsafe { buffer.as_slice() }.expect("Buffer の読み取り用スライス取得に失敗");
     for (index, byte) in data.iter().enumerate() {
         assert_eq!(
             *byte,
@@ -324,9 +320,7 @@ fn test_buffer_as_slice_and_set_size() {
         REDUCED_SIZE,
         "サイズ変更後の Buffer のサイズが一致しない"
     );
-    let data = buffer
-        .as_slice()
-        .expect("サイズ変更後の Buffer のスライス取得に失敗");
+    let data = unsafe { buffer.as_slice() }.expect("サイズ変更後の Buffer のスライス取得に失敗");
     assert_eq!(
         data.len(),
         REDUCED_SIZE,
@@ -357,9 +351,7 @@ fn test_plane_as_slice_and_as_mut_slice() {
     assert!(hpitch >= WIDTH, "水平ピッチが幅より小さい");
     assert!(vpitch >= HEIGHT, "垂直ピッチが高さより小さい");
 
-    let data = plane
-        .as_mut_slice()
-        .expect("プレーンの書き込み用スライス取得に失敗");
+    let data = unsafe { plane.as_mut_slice() }.expect("プレーンの書き込み用スライス取得に失敗");
     assert_eq!(
         data.len(),
         hpitch * vpitch,
@@ -371,9 +363,7 @@ fn test_plane_as_slice_and_as_mut_slice() {
         }
     }
 
-    let data = plane
-        .as_slice()
-        .expect("プレーンの読み取り用スライス取得に失敗");
+    let data = unsafe { plane.as_slice() }.expect("プレーンの読み取り用スライス取得に失敗");
     for row in 0..HEIGHT {
         for col in 0..WIDTH {
             let index = row * hpitch + col;
@@ -403,7 +393,7 @@ fn test_plane_as_slice_and_as_mut_slice() {
         .get_plane(PlaneType::Packed)
         .expect("パック形式のプレーンの取得に失敗");
     assert!(
-        packed_plane.as_slice().is_ok(),
+        unsafe { packed_plane.as_slice() }.is_ok(),
         "パック形式のプレーンをスライスとして取得できない"
     );
 }
@@ -433,7 +423,7 @@ fn test_handlers_can_access_frames() {
             let observation = match result {
                 Ok(frame) => {
                     let size = frame.buffer().get_size();
-                    let slice_ok = frame.buffer().as_slice().is_ok();
+                    let slice_ok = unsafe { frame.buffer().as_slice() }.is_ok();
                     e.lock()
                         .expect("エンコード結果の記録用 Mutex がポイズンされた")
                         .push(frame.into_parts().0);
@@ -500,7 +490,7 @@ fn test_handlers_can_access_frames() {
                     Ok(plane) => Ok((
                         plane.get_width(),
                         plane.get_height(),
-                        plane.as_slice().is_ok(),
+                        unsafe { plane.as_slice() }.is_ok(),
                     )),
                     Err(err) => Err(format!("Y プレーンの取得に失敗: {err}")),
                 },
@@ -607,7 +597,7 @@ fn test_buffer_into_raw_and_from_raw() {
     let buffer = unsafe { Buffer::from_raw(ptr, context.clone()) }.expect("Buffer の再構築に失敗");
     assert_eq!(buffer.get_size(), BUFFER_SIZE, "サイズが一致しない");
     assert!(
-        buffer.as_slice().is_ok(),
+        unsafe { buffer.as_slice() }.is_ok(),
         "バッファをスライスとして取得できない"
     );
 
@@ -917,7 +907,7 @@ fn test_vulkan_surface_convert_after_context_dropped() {
     assert_eq!(plane.get_width(), 320, "変換後の幅が一致しない");
     assert_eq!(plane.get_height(), 240, "変換後の高さが一致しない");
     assert!(
-        plane.as_slice().is_ok(),
+        unsafe { plane.as_slice() }.is_ok(),
         "変換後の Y プレーンをスライスとして取得できない"
     );
     assert!(
@@ -966,11 +956,11 @@ fn test_vulkan_plane_as_slice_is_rejected() {
         .expect("Y プレーンの取得に失敗");
 
     assert!(
-        plane.as_slice().is_err(),
+        unsafe { plane.as_slice() }.is_err(),
         "Vulkan Surface のプレーンが読み取り用スライスとして取得できた"
     );
     assert!(
-        plane.as_mut_slice().is_err(),
+        unsafe { plane.as_mut_slice() }.is_err(),
         "Vulkan Surface のプレーンが書き込み用スライスとして取得できた"
     );
 }
@@ -1129,7 +1119,7 @@ fn test_buffer_outlives_decoder_and_context_handle() {
     // Buffer が Context を保持しているため、引き続きアクセスできる
     assert_eq!(buffer.get_size(), BUFFER_SIZE, "サイズが一致しない");
     assert!(
-        buffer.as_slice().is_ok(),
+        unsafe { buffer.as_slice() }.is_ok(),
         "バッファをスライスとして取得できない"
     );
 }
@@ -1176,7 +1166,7 @@ fn test_buffer_keeps_context_alive() {
     // Buffer が Context を保持しているため、引き続き利用できる
     assert_eq!(buffer.get_size(), 4096, "サイズが一致しない");
     assert!(
-        buffer.as_slice().is_ok(),
+        unsafe { buffer.as_slice() }.is_ok(),
         "バッファをスライスとして取得できない"
     );
 }

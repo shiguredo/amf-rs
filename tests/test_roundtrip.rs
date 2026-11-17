@@ -26,9 +26,7 @@ fn copy_i420_to_surface(surface: &Surface, data: &[u8], width: usize, height: us
         .get_plane(PlaneType::Y)
         .expect("Y プレーンの取得に失敗");
     let y_hpitch = y_plane.get_hpitch() as usize;
-    let y_data = y_plane
-        .as_mut_slice()
-        .expect("Y プレーンのスライス取得に失敗");
+    let y_data = unsafe { y_plane.as_mut_slice() }.expect("Y プレーンのスライス取得に失敗");
     for row in 0..height {
         let src = &data[row * width..row * width + width];
         let dst = &mut y_data[row * y_hpitch..row * y_hpitch + width];
@@ -40,9 +38,7 @@ fn copy_i420_to_surface(surface: &Surface, data: &[u8], width: usize, height: us
         .get_plane(PlaneType::U)
         .expect("U プレーンの取得に失敗");
     let u_hpitch = u_plane.get_hpitch() as usize;
-    let u_data = u_plane
-        .as_mut_slice()
-        .expect("U プレーンのスライス取得に失敗");
+    let u_data = unsafe { u_plane.as_mut_slice() }.expect("U プレーンのスライス取得に失敗");
     for row in 0..uv_height {
         let src = &data[y_size + row * uv_width..y_size + row * uv_width + uv_width];
         let dst = &mut u_data[row * u_hpitch..row * u_hpitch + uv_width];
@@ -54,9 +50,7 @@ fn copy_i420_to_surface(surface: &Surface, data: &[u8], width: usize, height: us
         .get_plane(PlaneType::V)
         .expect("V プレーンの取得に失敗");
     let v_hpitch = v_plane.get_hpitch() as usize;
-    let v_data = v_plane
-        .as_mut_slice()
-        .expect("V プレーンのスライス取得に失敗");
+    let v_data = unsafe { v_plane.as_mut_slice() }.expect("V プレーンのスライス取得に失敗");
     for row in 0..uv_height {
         let start = y_size + uv_plane_size + row * uv_width;
         let src = &data[start..start + uv_width];
@@ -71,9 +65,8 @@ fn copy_packed_to_surface(surface: &Surface, data: &[u8], width: usize, height: 
         .get_plane_at(0)
         .expect("インデックス 0 のプレーンの取得に失敗");
     let hpitch = plane.get_hpitch() as usize;
-    let plane_data = plane
-        .as_mut_slice()
-        .expect("インデックス 0 のプレーンのスライス取得に失敗");
+    let plane_data =
+        unsafe { plane.as_mut_slice() }.expect("インデックス 0 のプレーンのスライス取得に失敗");
     let row_bytes = width * bpp;
     for row in 0..height {
         let src = &data[row * row_bytes..row * row_bytes + row_bytes];
@@ -113,7 +106,7 @@ fn read_y_plane_from_surface(surface: &Surface, width: usize, height: usize) -> 
         .get_plane(PlaneType::Y)
         .expect("Y プレーンの取得に失敗");
     let y_hpitch = y_plane.get_hpitch() as usize;
-    let y_data = y_plane.as_slice().expect("Y プレーンのスライス取得に失敗");
+    let y_data = unsafe { y_plane.as_slice() }.expect("Y プレーンのスライス取得に失敗");
     let mut result = vec![0u8; width * height];
     for row in 0..height {
         let src = &y_data[row * y_hpitch..row * y_hpitch + width];
@@ -125,7 +118,7 @@ fn read_y_plane_from_surface(surface: &Surface, width: usize, height: usize) -> 
 
 /// Buffer からデータを読み取る
 fn buffer_to_slice(buffer: &shiguredo_amf::amf::Buffer) -> &[u8] {
-    buffer.as_slice().expect("バッファのスライス取得に失敗")
+    unsafe { buffer.as_slice() }.expect("バッファのスライス取得に失敗")
 }
 
 /// Surface から幅を取得する
