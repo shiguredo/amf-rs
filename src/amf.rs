@@ -403,6 +403,13 @@ impl Surface {
         unsafe { (self.f.get_pts)(self.ptr) }
     }
 
+    /// このサーフェスのメモリ種別を返す
+    pub fn get_memory_type(&self) -> MemoryType {
+        let _guard = self.state.lock();
+        let memory_type = unsafe { (self.f.get_memory_type)(self.ptr) };
+        MemoryType::from_amf(memory_type)
+    }
+
     /// Duration (100 ナノ秒単位) を設定する
     pub fn set_duration(&self, duration: i64) {
         let _guard = self.state.lock();
@@ -621,6 +628,13 @@ impl Buffer {
         unsafe { (self.f.get_size)(self.ptr) }
     }
 
+    /// このバッファのメモリ種別を返す
+    pub fn get_memory_type(&self) -> MemoryType {
+        let _guard = self.state.lock();
+        let memory_type = unsafe { (self.f.get_memory_type)(self.ptr) };
+        MemoryType::from_amf(memory_type)
+    }
+
     /// バッファのサイズ (バイト数) を設定する
     ///
     /// # Errors
@@ -771,6 +785,7 @@ struct PlaneFuncs {
     get_vpitch: unsafe extern "C" fn(*mut sys::AMFPlane) -> sys::amf_int32,
     get_width: unsafe extern "C" fn(*mut sys::AMFPlane) -> sys::amf_int32,
     get_height: unsafe extern "C" fn(*mut sys::AMFPlane) -> sys::amf_int32,
+    is_tiled: unsafe extern "C" fn(*mut sys::AMFPlane) -> sys::amf_bool,
 }
 
 /// `AMFPlane` の RAII ラッパー
@@ -809,6 +824,7 @@ impl<'a> Plane<'a> {
             get_vpitch: require_vtbl_fn(vtbl.GetVPitch, "AMFPlane::GetVPitch")?,
             get_width: require_vtbl_fn(vtbl.GetWidth, "AMFPlane::GetWidth")?,
             get_height: require_vtbl_fn(vtbl.GetHeight, "AMFPlane::GetHeight")?,
+            is_tiled: require_vtbl_fn(vtbl.IsTiled, "AMFPlane::IsTiled")?,
         };
         if acquire {
             unsafe { (f.acquire)(ptr) };
@@ -910,6 +926,16 @@ impl<'a> Plane<'a> {
         unsafe { (self.f.get_height)(self.ptr) }
     }
 
+    /// 物理メモリがタイル状に並んでいるかを返す
+    ///
+    /// `true` の場合、メモリは連続したスキャンラインとしてアクセスできない。
+    /// タイル状のプレーンは [`Plane::as_slice`] / [`Plane::as_mut_slice`] の
+    /// 対象にならない。
+    pub fn is_tiled(&self) -> bool {
+        let _guard = self.surface.state.lock();
+        unsafe { (self.f.is_tiled)(self.ptr) != 0 }
+    }
+
     /// 取得元の `Surface` がホストメモリにあることを確認する
     fn check_host_memory(&self, function: &'static str) -> Result<(), Error> {
         let memory_type = unsafe { (self.surface.f.get_memory_type)(self.surface.ptr) };
@@ -919,7 +945,7 @@ impl<'a> Plane<'a> {
         Ok(())
     }
 
-    /// ホストメモリにあるプレーンのメモリをバイトスライスとして返す
+    /// ホストメモリにあり、タイル状でないプレーンのメモリをバイトスライスとして返す
     ///
     /// 返されるスライスの長さは `get_hpitch() * get_vpitch()` バイトである。
     /// 各行の先頭は [`Plane::get_hpitch`] バイト間隔で並び、幅方向の有効な
@@ -942,14 +968,15 @@ impl<'a> Plane<'a> {
         let ptr = unsafe { (self.f.get_native)(self.ptr) } as *const u8;
         let hpitch = unsafe { (self.f.get_hpitch)(self.ptr) };
         let vpitch = unsafe { (self.f.get_vpitch)(self.ptr) };
-        let size = plane_slice_len("Plane::as_slice", hpitch, vpitch)?;
+        let is_tiled = unsafe { (self.f.is_tiled)(self.ptr) } != 0;
+        let size = plane_slice_len("Plane::as_slice", is_tiled, hpitch, vpitch)?;
         validate_slice_ptr("Plane::as_slice", ptr)?;
         // SAFETY: ptr は null でなく、size は hpitch と vpitch から計算した
         // スライスの長さとして有効な範囲にあり、プレーンは Surface が生きている間有効である。
         Ok(unsafe { std::slice::from_raw_parts(ptr, size) })
     }
 
-    /// ホストメモリにあるプレーンのメモリを書き込み用のバイトスライスとして返す
+    /// ホストメモリにあり、タイル状でないプレーンのメモリを書き込み用のバイトスライスとして返す
     ///
     /// 返されるスライスの長さは `get_hpitch() * get_vpitch()` バイトである。
     /// 各行の先頭は [`Plane::get_hpitch`] バイト間隔で並び、幅方向の有効な
@@ -973,7 +1000,8 @@ impl<'a> Plane<'a> {
         let ptr = unsafe { (self.f.get_native)(self.ptr) } as *mut u8;
         let hpitch = unsafe { (self.f.get_hpitch)(self.ptr) };
         let vpitch = unsafe { (self.f.get_vpitch)(self.ptr) };
-        let size = plane_slice_len("Plane::as_mut_slice", hpitch, vpitch)?;
+        let is_tiled = unsafe { (self.f.is_tiled)(self.ptr) } != 0;
+        let size = plane_slice_len("Plane::as_mut_slice", is_tiled, hpitch, vpitch)?;
         validate_slice_ptr("Plane::as_mut_slice", ptr)?;
         // SAFETY: ptr は null でなく、size は hpitch と vpitch から計算した
         // スライスの長さとして有効な範囲にあり、プレーンは Surface が生きている間有効である。
@@ -1029,8 +1057,16 @@ fn validate_slice_len(function: &'static str, len: usize) -> Result<(), Error> {
     Ok(())
 }
 
-/// プレーンのピッチからスライスの長さを計算する
-fn plane_slice_len(function: &'static str, hpitch: i32, vpitch: i32) -> Result<usize, Error> {
+/// プレーンのレイアウトを検証し、スライスの長さを計算する
+fn plane_slice_len(
+    function: &'static str,
+    is_tiled: bool,
+    hpitch: i32,
+    vpitch: i32,
+) -> Result<usize, Error> {
+    if is_tiled {
+        return Err(Error::new_custom(function, "plane is tiled"));
+    }
     let hpitch =
         usize::try_from(hpitch).map_err(|_| Error::new_custom(function, "hpitch is negative"))?;
     let vpitch =
@@ -2190,21 +2226,25 @@ mod tests {
     #[test]
     fn test_plane_slice_len_validates_pitch() {
         assert_eq!(
-            plane_slice_len("test", 4, 3).expect("正のピッチが拒否された"),
+            plane_slice_len("test", false, 4, 3).expect("正のピッチが拒否された"),
             12,
             "ピッチの積が一致しない"
         );
         assert!(
-            plane_slice_len("test", -1, 3).is_err(),
+            plane_slice_len("test", false, -1, 3).is_err(),
             "負の hpitch が受け入れられた"
         );
         assert!(
-            plane_slice_len("test", 4, -1).is_err(),
+            plane_slice_len("test", false, 4, -1).is_err(),
             "負の vpitch が受け入れられた"
         );
         assert!(
             checked_mul_len("test", usize::MAX, 2).is_err(),
             "長さの積のオーバーフローが受け入れられた"
+        );
+        assert!(
+            plane_slice_len("test", true, 4, 3).is_err(),
+            "タイル状のプレーンが受け入れられた"
         );
     }
 }

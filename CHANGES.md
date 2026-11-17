@@ -52,6 +52,9 @@
   - `as_slice` / `as_mut_slice` は unsafe 関数とし、メモリの初期化と排他アクセスを呼び出し側の責任にする
   - null、サイズ、ピッチを検証し、スライスとして扱えない場合はエラーを返す
   - `Plane` のスライスは `hpitch * vpitch` バイトで、各行の先頭は `hpitch` バイト間隔になる
+  - タイル状のプレーンはエラーを返す
+  - @melpon
+- [ADD] `amf::Plane::is_tiled` と `amf::Buffer::get_memory_type` / `amf::Surface::get_memory_type` を追加する
   - @melpon
 - [ADD] `amf::Buffer::set_pts` と `amf::Surface::get_pts` を追加する
   - @melpon

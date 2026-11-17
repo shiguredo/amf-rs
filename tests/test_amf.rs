@@ -285,6 +285,11 @@ fn test_buffer_as_slice_and_set_size() {
         BUFFER_SIZE,
         "確保直後の Buffer のサイズが一致しない"
     );
+    assert_eq!(
+        buffer.get_memory_type(),
+        MemoryType::Host,
+        "Buffer のメモリ種別が Host でない"
+    );
 
     // PTS が設定した値のまま取得できることを確認する
     let pts = 6_789;
@@ -343,9 +348,18 @@ fn test_plane_as_slice_and_as_mut_slice() {
 
     let context = helpers::create_context();
     let surface = create_nv12_host_surface(&context);
+    assert_eq!(
+        surface.get_memory_type(),
+        MemoryType::Host,
+        "Surface のメモリ種別が Host でない"
+    );
     let mut plane = surface
         .get_plane(PlaneType::Y)
         .expect("Y プレーンの取得に失敗");
+    assert!(
+        !plane.is_tiled(),
+        "ホストメモリの Y プレーンがタイル状と報告された"
+    );
     let hpitch = plane.get_hpitch() as usize;
     let vpitch = plane.get_vpitch() as usize;
     assert!(hpitch >= WIDTH, "水平ピッチが幅より小さい");
@@ -873,6 +887,11 @@ fn test_vulkan_surface_convert_after_context_dropped() {
             240,
         )
         .expect("Vulkan Surface の確保に失敗");
+    assert_eq!(
+        surface.get_memory_type(),
+        MemoryType::Vulkan,
+        "Vulkan Surface のメモリ種別が Vulkan でない"
+    );
 
     // 複数のプレーンが生存している間は convert できない
     let y_plane = surface
@@ -899,6 +918,11 @@ fn test_vulkan_surface_convert_after_context_dropped() {
     surface
         .convert(MemoryType::Host)
         .expect("Context を drop した後に Vulkan Surface の convert が失敗した");
+    assert_eq!(
+        surface.get_memory_type(),
+        MemoryType::Host,
+        "convert 後の Surface のメモリ種別が Host でない"
+    );
 
     // 変換後はプレーンを取り直して利用できる
     let plane = surface

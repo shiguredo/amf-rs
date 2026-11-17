@@ -225,8 +225,9 @@ B フレームを含むストリームでは出力 `Surface` の PTS も入力�
 
 フレームデータは unsafe な `Plane::as_slice` / `Plane::as_mut_slice` で、ビットストリームは
 unsafe な `Buffer::as_slice` / `Buffer::as_mut_slice` で読み書きします。`Plane` のスライスは
-`hpitch * vpitch` バイトで、各行の先頭は `hpitch` バイト間隔です。`Buffer::set_size`
-でバッファのサイズを変更できます。PTS と Duration の単位は 100 ナノ秒です。
+`hpitch * vpitch` バイトで、各行の先頭は `hpitch` バイト間隔です。
+ホストメモリかつタイル状でないプレーンだけが対象です。`Buffer::set_size` で
+バッファのサイズを変更できます。PTS と Duration の単位は 100 ナノ秒です。
 
 ### コーデック対応状況の確認
 
