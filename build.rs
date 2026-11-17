@@ -105,11 +105,12 @@ fn main() {
         .allowlist_function("amf_.*")
         // 列挙型を Rust enum として生成する
         .rustified_enum("AMF_RESULT")
-        .rustified_enum("AMF_SURFACE_FORMAT")
-        .rustified_enum("AMF_MEMORY_TYPE")
+        // AMF が将来追加した値も保持できるよう、caps で受け取る列挙型は newtype にする
+        .newtype_enum("AMF_SURFACE_FORMAT")
+        .newtype_enum("AMF_MEMORY_TYPE")
         .rustified_enum("AMF_DATA_TYPE")
         .rustified_enum("AMF_PLANE_TYPE")
-        .rustified_enum("AMF_VARIANT_TYPE")
+        .newtype_enum("AMF_VARIANT_TYPE")
         .rustified_enum("AMF_DX_VERSION")
         // dl.rs の get<T> で使用するため Option でラップしない型を除外する
         .blocklist_type("AMFInit_Fn")
@@ -176,21 +177,21 @@ pub const AMF_VERSION_BUILD_NUM: u32 = 0;
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AMF_RESULT { AMF_OK = 0, AMF_FAIL = 1 }
-#[repr(C)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum AMF_SURFACE_FORMAT { AMF_SURFACE_UNKNOWN = 0, AMF_SURFACE_NV12 = 1 }
-#[repr(C)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum AMF_MEMORY_TYPE { AMF_MEMORY_UNKNOWN = 0, AMF_MEMORY_HOST = 1 }
+#[repr(transparent)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct AMF_SURFACE_FORMAT(pub amf_uint);
+#[repr(transparent)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct AMF_MEMORY_TYPE(pub amf_uint);
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AMF_DATA_TYPE { AMF_DATA_BUFFER = 0, AMF_DATA_SURFACE = 1 }
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AMF_PLANE_TYPE { AMF_PLANE_UNKNOWN = 0, AMF_PLANE_PACKED = 1, AMF_PLANE_Y = 2, AMF_PLANE_UV = 3, AMF_PLANE_U = 4, AMF_PLANE_V = 5 }
-#[repr(C)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum AMF_VARIANT_TYPE { AMF_VARIANT_EMPTY = 0, AMF_VARIANT_BOOL = 1, AMF_VARIANT_INT64 = 2, AMF_VARIANT_DOUBLE = 3, AMF_VARIANT_RATE = 7, AMF_VARIANT_SIZE = 5, AMF_VARIANT_RATIO = 8, AMF_VARIANT_FLOAT = 13 }
+#[repr(transparent)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct AMF_VARIANT_TYPE(pub amf_uint);
 pub type AMF_VIDEO_ENCODER_OUTPUT_DATA_TYPE_ENUM = amf_uint;
 pub const AMF_VIDEO_ENCODER_OUTPUT_DATA_TYPE_ENUM_AMF_VIDEO_ENCODER_OUTPUT_DATA_TYPE_IDR: AMF_VIDEO_ENCODER_OUTPUT_DATA_TYPE_ENUM = 0;
 pub const AMF_VIDEO_ENCODER_OUTPUT_DATA_TYPE_ENUM_AMF_VIDEO_ENCODER_OUTPUT_DATA_TYPE_I: AMF_VIDEO_ENCODER_OUTPUT_DATA_TYPE_ENUM = 1;
@@ -223,21 +224,86 @@ pub struct AMFRatio { pub num: amf_uint32, pub den: amf_uint32 }
 pub struct AMFGuid { pub data1: amf_uint32, pub data2: amf_uint16, pub data3: amf_uint16, pub data41: amf_uint8, pub data42: amf_uint8, pub data43: amf_uint8, pub data44: amf_uint8, pub data45: amf_uint8, pub data46: amf_uint8, pub data47: amf_uint8, pub data48: amf_uint8 }
 
 #[repr(C)]
+#[derive(Debug, Clone, Copy, Default)]
+pub struct AMFPoint { pub x: amf_int32, pub y: amf_int32 }
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct AMFColor { pub __bindgen_anon_1: AMFColor__bindgen_ty_1 }
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub union AMFColor__bindgen_ty_1 { pub rgba: amf_uint32 }
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default)]
+pub struct AMFFloatSize { pub width: amf_float, pub height: amf_float }
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default)]
+pub struct AMFFloatPoint2D { pub x: amf_float, pub y: amf_float }
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default)]
+pub struct AMFFloatPoint3D { pub x: amf_float, pub y: amf_float, pub z: amf_float }
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default)]
+pub struct AMFFloatVector4D { pub x: amf_float, pub y: amf_float, pub z: amf_float, pub w: amf_float }
+#[repr(C)]
+pub struct AMFInterface { pub pVtbl: *const std::ffi::c_void }
+
+#[repr(C)]
 #[derive(Clone, Copy)]
 pub union AMFVariantStruct__bindgen_ty_1 {
     pub boolValue: amf_bool,
     pub int64Value: amf_int64,
     pub doubleValue: amf_double,
     pub floatValue: amf_float,
-    pub rateValue: AMFRate,
+    pub stringValue: *mut std::os::raw::c_char,
+    pub wstringValue: *mut wchar_t,
+    pub pInterface: *mut AMFInterface,
+    pub rectValue: AMFRect,
     pub sizeValue: AMFSize,
+    pub pointValue: AMFPoint,
+    pub rateValue: AMFRate,
     pub ratioValue: AMFRatio,
+    pub colorValue: AMFColor,
+    pub floatSizeValue: AMFFloatSize,
+    pub floatPoint2DValue: AMFFloatPoint2D,
+    pub floatPoint3DValue: AMFFloatPoint3D,
+    pub floatVector4DValue: AMFFloatVector4D,
 }
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct AMFVariantStruct {
     pub type_: AMF_VARIANT_TYPE,
     pub __bindgen_anon_1: AMFVariantStruct__bindgen_ty_1,
+}
+
+pub type AMF_ACCELERATION_TYPE = std::ffi::c_int;
+
+#[repr(C)]
+pub struct AMFCaps { pub pVtbl: *const AMFCapsVtbl }
+#[repr(C)]
+#[derive(Default, Copy, Clone)]
+pub struct AMFCapsVtbl {
+    pub Release: Option<unsafe extern "C" fn(*mut AMFCaps) -> amf_long>,
+    pub GetAccelerationType: Option<unsafe extern "C" fn(*mut AMFCaps) -> AMF_ACCELERATION_TYPE>,
+    pub GetInputCaps: Option<unsafe extern "C" fn(*mut AMFCaps, *mut *mut AMFIOCaps) -> AMF_RESULT>,
+    pub GetOutputCaps: Option<unsafe extern "C" fn(*mut AMFCaps, *mut *mut AMFIOCaps) -> AMF_RESULT>,
+    pub GetPropertyCount: Option<unsafe extern "C" fn(*mut AMFCaps) -> amf_size>,
+    pub GetPropertyAt: Option<unsafe extern "C" fn(*mut AMFCaps, amf_size, *mut wchar_t, amf_size, *mut AMFVariantStruct) -> AMF_RESULT>,
+    pub GetProperty: Option<unsafe extern "C" fn(*mut AMFCaps, *const wchar_t, *mut AMFVariantStruct) -> AMF_RESULT>,
+}
+#[repr(C)]
+pub struct AMFIOCaps { pub pVtbl: *const AMFIOCapsVtbl }
+#[repr(C)]
+#[derive(Default, Copy, Clone)]
+pub struct AMFIOCapsVtbl {
+    pub Release: Option<unsafe extern "C" fn(*mut AMFIOCaps) -> amf_long>,
+    pub GetWidthRange: Option<unsafe extern "C" fn(*mut AMFIOCaps, *mut amf_int32, *mut amf_int32)>,
+    pub GetHeightRange: Option<unsafe extern "C" fn(*mut AMFIOCaps, *mut amf_int32, *mut amf_int32)>,
+    pub GetVertAlign: Option<unsafe extern "C" fn(*mut AMFIOCaps) -> amf_int32>,
+    pub GetNumOfFormats: Option<unsafe extern "C" fn(*mut AMFIOCaps) -> amf_int32>,
+    pub GetFormatAt: Option<unsafe extern "C" fn(*mut AMFIOCaps, amf_int32, *mut AMF_SURFACE_FORMAT, *mut amf_bool) -> AMF_RESULT>,
+    pub GetNumOfMemoryTypes: Option<unsafe extern "C" fn(*mut AMFIOCaps) -> amf_int32>,
+    pub GetMemoryTypeAt: Option<unsafe extern "C" fn(*mut AMFIOCaps, amf_int32, *mut AMF_MEMORY_TYPE, *mut amf_bool) -> AMF_RESULT>,
+    pub IsInterlacedSupported: Option<unsafe extern "C" fn(*mut AMFIOCaps) -> amf_bool>,
 }
 
 #[repr(C)]

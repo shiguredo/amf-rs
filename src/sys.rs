@@ -170,6 +170,14 @@ impl AMFVariantStruct {
 // ワイド文字列ヘルパー (Linux: wchar_t = i32 = UTF-32)
 // ---------------------------------------------------------------------------
 
+/// ヌル終端の UTF-32 (Linux wchar_t) 文字列を Rust 文字列に変換する
+pub fn from_wstring(buf: &[amf_int32]) -> String {
+    buf.iter()
+        .take_while(|&&c| c != 0)
+        .filter_map(|&c| char::from_u32(c as u32))
+        .collect()
+}
+
 /// Rust 文字列をヌル終端の UTF-32 (Linux wchar_t) 配列に変換する
 pub fn to_wstring(s: &str) -> Vec<amf_int32> {
     s.chars()

@@ -1,7 +1,7 @@
 # `codec_info` の能力情報を実機と一致させる
 
 - Created: 2026-11-10
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-11-17
 - Branch: feature/fix-codec-info
 - Polished: {YYYY-MM-DD}
 - Reporter: @melpon
@@ -39,7 +39,7 @@ AMF が返した値を Rust の型に無理やり押し込めない。`AMFCaps` 
 ### AMF の能力照会
 
 - `amf` モジュールに `Component::get_caps()` と、`Caps` / `IoCaps` の RAII ラッパーを追加する。0022 ではクレート内公開に留める。
-- `ComponentFuncs` に `GetCaps` を追加する。古い AMF ランタイムで `GetCaps` が存在しない場合でもエンコーダー/デコーダー自体は使えるように、`GetCaps` は `Option` で保持し、呼び出し時に無ければエラーにする。
+- `ComponentFuncs` に `GetCaps` を追加する。`GetCaps` は使用する AMF 1.5 のコンポーネント vtable に存在するため、`require_vtbl_fn` で取得する。
 - `Caps` は `Release` を `Drop` で呼ぶ。`GetCaps` の呼び出しは `Component` の他の操作と同じプロセスロックで直列化する。
 - `Caps` に次の機能を追加する。
   - `get_acceleration_type()`
@@ -52,10 +52,9 @@ AMF が返した値を Rust の型に無理やり押し込めない。`AMFCaps` 
   - `formats()`（`AMF_SURFACE_FORMAT` と native フラグ）
   - `memory_types()`（`AMF_MEMORY_TYPE` と native フラグ）
   - `interlaced()`
-- `AMFIOCaps` が公開するアライメントは `GetVertAlign` の縦方向だけである。したがって `IoCaps.vertical_alignment` は `AMFIOCaps::GetVertAlign` の値（行数の倍数制約）を表し、横方向のアライメントは `IoCaps` には含めない。
+- `AMFIOCaps` が公開するアライメントは `GetVertAlign` の縦方向だけである。したがって `IoCapabilities.vertical_alignment` は `AMFIOCaps::GetVertAlign` の値（行数の倍数制約）を表し、横方向のアライメントは `IoCapabilities` には含めない。
 - `GetPropertyAt` は `AMFVariantCopy` で値をコピーするため、`STRING` / `WSTRING` は AMF が確保した領域を `free` し、`INTERFACE` は `Release` する。Linux では AMF の variant 文字列が `malloc` で確保されるため `free` で解放できる。
 - `GetPropertyAt`、`GetFormatAt`、`GetMemoryTypeAt` のいずれかが途中で失敗した場合は、その `Caps` / `IoCaps` の取得全体をエラーにする。取得できた分だけを返して情報を黙って落とさない。
-- `GetCaps` が返した `AMFCaps` はコンポーネントを `Terminate` する前に破棄する。
 
 ### FFI の未知値
 
@@ -116,10 +115,10 @@ AMF が返した値を Rust の型に無理やり押し込めない。`AMFCaps` 
 
   `DX9` / `DX11` / `DX12` / `GRALLOC` / `COMPUTE_FOR_DX9` / `COMPUTE_FOR_DX11` はこのクレートでは使わないため `Unknown(raw)` にする。`AMF_MEMORY_UNKNOWN` (0) も `Unknown(0)` である。
 
-- `IoCaps` を追加する。AMF が返した順序を維持する。
+- `IoCapabilities` を追加する。AMF が返した順序を維持する。
 
   ```rust
-  pub struct IoCaps {
+  pub struct IoCapabilities {
       pub min_width: i32,
       pub max_width: i32,
       pub min_height: i32,
@@ -185,8 +184,8 @@ AMF が返した値を Rust の型に無理やり押し込めない。`AMFCaps` 
 
   pub struct DecodingInfo {
       pub acceleration: Option<AccelerationType>,
-      pub input: Option<IoCaps>,
-      pub output: Option<IoCaps>,
+      pub input: Option<IoCapabilities>,
+      pub output: Option<IoCapabilities>,
       pub properties: Vec<Property>,
   }
 
@@ -195,8 +194,8 @@ AMF が返した値を Rust の型に無理やり押し込めない。`AMFCaps` 
       pub max_profile: Option<VideoProfile>,
       pub max_level: Option<i64>,
       pub supports_frame_reordering: Option<bool>,
-      pub input: Option<IoCaps>,
-      pub output: Option<IoCaps>,
+      pub input: Option<IoCapabilities>,
+      pub output: Option<IoCapabilities>,
       pub properties: Vec<Property>,
   }
   ```
@@ -209,18 +208,14 @@ AMF が返した値を Rust の型に無理やり押し込めない。`AMFCaps` 
 
 ### `supported_codecs`
 
-- 戻り値を `Result<Vec<CodecInfo>, Error>` に変更する。AMF ランタイムのロードまたは `Context` の作成に失敗した場合は `Err` を返す。個々のコーデックの `CreateComponent` または `Init` に失敗した場合は、その方向を `None` として返す。
-- 返す順序は H.264 / HEVC / AV1 のままにする。
+- 戻り値を `Result<Vec<CodecInfo>, Error>` に変更する。AMF ランタイムのロードまたは `Context` の作成に失敗した場合は `Err` を返す。個々のコーデックの `CreateComponent` に失敗した場合は、その方向を `None` として返す。
 - 処理手順は次の通り。
   1. `Context` を 1 つ作る。
   2. コーデックごとに `CreateComponent` する。
-  3. `GetCaps` を呼ぶ。成功した場合は入力 caps の最小幅・最小高さ、全プロパティ、入出力の `IoCaps` を取得する。
-  4. エンコーダーは `NV12` と入力 caps の最小サイズで `Init` する。入力 caps を取得できない場合は 640x480 で `Init` する。デコーダーは `NV12`、0x0 で `Init` する。
-  5. `Init` に成功したら `DecodingInfo` / `EncodingInfo` を作る。`GetCaps` が `Init` 前に失敗していた場合は、`Init` 後にもう一度 `GetCaps` を呼ぶ。
-  6. `Terminate` してコンポーネントを解放する。
-- `GetCaps` が `Init` 前に成功するかは AMF のバージョンに依存し得るため、`Init` 前の取得に失敗しても `Init` 後に再試行する手順にして、どちらの挙動でも動作させる。
-- `AMFCaps` / `AMFIOCaps` の値は AMF が報告する能力であり、実際のエンコード・デコードの成功を保証しない。`supported_codecs` の doc に書く。
-
+  3. `GetCaps` を呼ぶ。成功した場合は全プロパティと入出力の能力情報を取得する。
+  4. `DecodingInfo` / `EncodingInfo` を作る。
+- `GetCaps` は `Context` を初期化した後、コンポーネントの `Init` 前に呼ぶ。`Init` は設定依存なので、コーデック対応の判定には使わない。
+- `GetCaps` が失敗した場合もコンポーネント自体は利用できるため `Some` を返し、能力情報の各フィールドは `None`、`properties` は空にする。
 ### 0040 との関係
 
 - 0040 は 0022 に統合する。`supported_codecs` が全コーデック分の `CodecInfo` を返し、1 コーデックだけ必要な場合も結果を codec で絞れるため、`query_encoder_caps` / `query_decoder_caps` は追加しない。
@@ -228,12 +223,12 @@ AMF が返した値を Rust の型に無理やり押し込めない。`AMFCaps` 
 
 ### ドキュメントとテスト
 
-- `EncodingInfo` / `DecodingInfo` / `IoCaps` / `Property` の各フィールドに、値の出所、単位、`None` の条件、順序を書く。
+- `EncodingInfo` / `DecodingInfo` / `IoCapabilities` / `Property` の各フィールドに、値の出所、単位、`None` の条件、順序を書く。
 - `max_level` はコーデックごとのレベル enum の値であり、コーデック間で比較できないことを書く。
-- 実機テストを追加する。`AMFCaps` から取得したプロパティ数、各プロパティの名前と値、`IoCaps` の幅・高さ、フォーマット数、メモリタイプ数、native フラグ、インターレース対応を `supported_codecs` の出力と比較する。
+- 実機テストを追加する。`AMFCaps` から取得したプロパティ数、各プロパティの名前と値、`IoCapabilities` の幅・高さ、フォーマット数、メモリタイプ数、native フラグ、インターレース対応を `supported_codecs` の出力と比較する。
 - `properties` に `MaxProfile` / `MaxLevel` / `BFrames` など、構造体のフィールドに写像したプロパティも含まれることを確認する。
 - `EncodingInfo::max_profile` / `max_level` / `supports_frame_reordering` が対応するプロパティの値と一致することを確認する。
-- `supported_codecs` が `Ok` を返すこと、要素の順序、`Some(encoding)` の `max_profile` の variant が `codec` と一致することを確認する。
+- `supported_codecs` が `Ok` を返すこと、`Some(encoding)` の `max_profile` の variant が `codec` と一致することを確認する。
 - `HEVC` の `BFrames` が存在しない場合に `None` になることを実機で確認する。
 - `examples/amf-check`、`README.md`、`skills/shiguredo-amf/SKILL.md` を新しい API に合わせる。
 - `CHANGES.md` の `## develop` に `[CHANGE]` を追記する。
@@ -247,7 +242,15 @@ AMF が返した値を Rust の型に無理やり押し込めない。`AMFCaps` 
 - `AMFCaps` のプロパティ数と `properties.len()`、`AMFIOCaps` のフォーマット数と `formats.len()`、メモリタイプ数と `memory_types.len()` が実機で一致する。
 - `VideoProfile::Unknown`、`AccelerationType::Unknown`、`SurfaceFormat::Unknown`、`MemoryType::Unknown`、`Value::Unknown` が生値を保持する。
 - `hardware_accelerated` が削除され、`AccelerationType` で AMF の値を保持する。
-- `GetCaps` が `Init` 前後どちらでも動く手順になっている。
+- `supported_codecs` は `CreateComponent` と `GetCaps` だけでコーデック対応を判定し、`Init` を使わない。
 - 実機テストが追加され、`cargo test --workspace` が通る。
 - `examples/amf-check`、`README.md`、`skills/shiguredo-amf/SKILL.md` が新しい API に追従している。
 - `CHANGES.md` の `## develop` に変更が追記されている。
+
+## 解決方法
+
+`supported_codecs` は `CreateComponent` と `GetCaps` だけでコーデック対応を判定し、AMF が返す能力情報を `CodecInfo` / `DecodingInfo` / `EncodingInfo` に写像するようにした。`Init` は設定依存のため対応判定には使わない。`GetCaps` が失敗した場合もコンポーネント自体が利用できれば `Some` を返し、能力情報の各フィールドを `None`、`properties` を空にしている。
+
+能力情報として、アクセラレーション種別、最大プロファイル、最大レベル、B フレーム対応、入出力の解像度範囲、垂直アライメント、surface format、memory type、インターレース対応、および AMF が返した全プロパティを保持する。未知の値は `Unknown` に生値を保持する。
+
+テストは実機の AMD Radeon 780M / AMF 1.5.3 で既知のプロファイル・レベル・B フレーム対応を検証し、`AMFCaps` / `AMFIOCaps` の全要素と `properties` の名前・値を比較する。`examples/amf-check`、`README.md`、`skills/shiguredo-amf/SKILL.md`、`CHANGES.md` も新しい API に合わせて更新し、`cargo test --workspace` が成功することを確認した。
