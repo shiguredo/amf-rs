@@ -1,7 +1,7 @@
 # フレームデータとビットストリームを安全に読み書きする API を追加し、公開 API から `ffi` 型を排除する
 
 - Created: 2026-11-10
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-11-17
 - Branch: feature/change-safe-frame-api
 - Polished: {YYYY-MM-DD}
 - Reporter: @melpon
@@ -39,3 +39,13 @@
 - README とテストが新しい API に追随する。
 - `cargo clippy --workspace --all-targets -- -D warnings` と `cargo test --workspace` が通る。
 - `CHANGES.md` の `## develop` に `[CHANGE]` を追記する。
+
+
+## 解決方法
+
+- `amf::Buffer` に `as_slice` / `as_mut_slice` / `set_size` を追加し、`amf::Plane` に `as_slice` / `as_mut_slice` を追加した。スライスの生成前に null、サイズ、`hpitch`、`vpitch`、長さのオーバーフローを検証し、ホストメモリ以外のオブジェクトは `Err` にした。
+- `PlaneType` / `MemoryType` / `SurfaceFormat` を公開型にし、`Surface::get_plane`、`Surface::convert`、`Context::alloc_surface`、`Context::alloc_buffer`、`Component::init` から `ffi` 型を除去した。`SurfaceFormat` は `FrameFormat` に写像できる値を `Known`、写像できない値を `Unknown` に保持する形にした。
+- 100 ナノ秒単位の PTS / Duration の扱いを doc に明記した。`Buffer::set_pts` と `Surface::get_pts` は既に追加済みだったため、そのまま利用する。
+- null、サイズ、ピッチの検証テストと、実 GPU 上でのスライス読み書き・`set_size`・Vulkan Surface の拒否テストを追加した。
+- README、`lib.rs` の doc 例、`skills/shiguredo-amf/SKILL.md` を新しい API に追随させ、`CHANGES.md` の `## develop` に `[CHANGE]` と `[ADD]` を追記した。
+- `ssh shiguredo-amd-um790` の `~/melpon/amf-rs` で `cargo test --workspace` を実行し、全テストが成功することを確認した。
