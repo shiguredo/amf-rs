@@ -108,6 +108,11 @@
   - `KEY` / `INTRA_ONLY` / `INTER` を `Idr` / `I` / `P` に対応付ける
   - `SWITCH` / `SHOW_EXISTING` と未知の値は `Unknown` にする
   - @melpon
+- [FIX] `finish` 後の操作を拒否し、`Drop` で破棄する入出力の扱いを明確にする
+  - `Encoder::encode()` / `Encoder::reconfigure()` / `Encoder::finish()` は `finish` 済みの場合に AMF を呼ばずにエラーを返す
+  - `Encoder::finish()` / `Decoder::finish()` はワーカーの終了を join まで待つ
+  - `Drop` では通知前の入出力を破棄し、ハンドラーの panic と `Component::terminate` の失敗を `tracing::error!` で記録する
+  - @melpon
 
 ### misc
 
@@ -126,6 +131,9 @@
   - @voluntas
 - [UPDATE] `rust-toolchain.toml` のツールチェインを MSRV の 1.95 に固定し、CI と devcontainer のツールチェインも 1.95 に統一する
   - @voluntas
+- [UPDATE] `examples/amf-check` の `supported_codecs` 呼び出しを 1 回にまとめる
+  - Vulkan デバイスの初期化とコーデックのプローブの重複をなくす
+  - @melpon
 
 ## 2026.3.0
 
