@@ -116,6 +116,9 @@
 
 ### misc
 
+- [UPDATE] レート制御メソッドの設定に bindgen の enum を使うようにする
+  - H.264 / HEVC / AV1 のレート制御メソッドをコーデック別の enum へ変換して設定する
+  - @melpon
 - [UPDATE] `ffi` の `AMF_SURFACE_FORMAT` / `AMF_MEMORY_TYPE` / `AMF_VARIANT_TYPE` を newtype enum に変更する
   - @melpon
 - [UPDATE] shiguredo-rust と AGENTS.md の規約に合わせて lint 抑制・`.unwrap()`・ログ出力・コメントを整理する

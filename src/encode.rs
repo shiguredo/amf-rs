@@ -101,6 +101,89 @@ pub enum RateControlMode {
     HighQualityCbr,
 }
 
+impl RateControlMode {
+    /// H.264 エンコーダーのレート制御メソッドへ変換する
+    fn to_h264(self) -> sys::AMF_VIDEO_ENCODER_RATE_CONTROL_METHOD_ENUM {
+        match self {
+            RateControlMode::Cqp => {
+                sys::AMF_VIDEO_ENCODER_RATE_CONTROL_METHOD_ENUM::AMF_VIDEO_ENCODER_RATE_CONTROL_METHOD_CONSTANT_QP
+            }
+            RateControlMode::Cbr => {
+                sys::AMF_VIDEO_ENCODER_RATE_CONTROL_METHOD_ENUM::AMF_VIDEO_ENCODER_RATE_CONTROL_METHOD_CBR
+            }
+            RateControlMode::Vbr => {
+                sys::AMF_VIDEO_ENCODER_RATE_CONTROL_METHOD_ENUM::AMF_VIDEO_ENCODER_RATE_CONTROL_METHOD_PEAK_CONSTRAINED_VBR
+            }
+            RateControlMode::LatencyConstrainedVbr => {
+                sys::AMF_VIDEO_ENCODER_RATE_CONTROL_METHOD_ENUM::AMF_VIDEO_ENCODER_RATE_CONTROL_METHOD_LATENCY_CONSTRAINED_VBR
+            }
+            RateControlMode::QualityVbr => {
+                sys::AMF_VIDEO_ENCODER_RATE_CONTROL_METHOD_ENUM::AMF_VIDEO_ENCODER_RATE_CONTROL_METHOD_QUALITY_VBR
+            }
+            RateControlMode::HighQualityVbr => {
+                sys::AMF_VIDEO_ENCODER_RATE_CONTROL_METHOD_ENUM::AMF_VIDEO_ENCODER_RATE_CONTROL_METHOD_HIGH_QUALITY_VBR
+            }
+            RateControlMode::HighQualityCbr => {
+                sys::AMF_VIDEO_ENCODER_RATE_CONTROL_METHOD_ENUM::AMF_VIDEO_ENCODER_RATE_CONTROL_METHOD_HIGH_QUALITY_CBR
+            }
+        }
+    }
+
+    /// HEVC エンコーダーのレート制御メソッドへ変換する
+    fn to_hevc(self) -> sys::AMF_VIDEO_ENCODER_HEVC_RATE_CONTROL_METHOD_ENUM {
+        match self {
+            RateControlMode::Cqp => {
+                sys::AMF_VIDEO_ENCODER_HEVC_RATE_CONTROL_METHOD_ENUM::AMF_VIDEO_ENCODER_HEVC_RATE_CONTROL_METHOD_CONSTANT_QP
+            }
+            RateControlMode::Cbr => {
+                sys::AMF_VIDEO_ENCODER_HEVC_RATE_CONTROL_METHOD_ENUM::AMF_VIDEO_ENCODER_HEVC_RATE_CONTROL_METHOD_CBR
+            }
+            RateControlMode::Vbr => {
+                sys::AMF_VIDEO_ENCODER_HEVC_RATE_CONTROL_METHOD_ENUM::AMF_VIDEO_ENCODER_HEVC_RATE_CONTROL_METHOD_PEAK_CONSTRAINED_VBR
+            }
+            RateControlMode::LatencyConstrainedVbr => {
+                sys::AMF_VIDEO_ENCODER_HEVC_RATE_CONTROL_METHOD_ENUM::AMF_VIDEO_ENCODER_HEVC_RATE_CONTROL_METHOD_LATENCY_CONSTRAINED_VBR
+            }
+            RateControlMode::QualityVbr => {
+                sys::AMF_VIDEO_ENCODER_HEVC_RATE_CONTROL_METHOD_ENUM::AMF_VIDEO_ENCODER_HEVC_RATE_CONTROL_METHOD_QUALITY_VBR
+            }
+            RateControlMode::HighQualityVbr => {
+                sys::AMF_VIDEO_ENCODER_HEVC_RATE_CONTROL_METHOD_ENUM::AMF_VIDEO_ENCODER_HEVC_RATE_CONTROL_METHOD_HIGH_QUALITY_VBR
+            }
+            RateControlMode::HighQualityCbr => {
+                sys::AMF_VIDEO_ENCODER_HEVC_RATE_CONTROL_METHOD_ENUM::AMF_VIDEO_ENCODER_HEVC_RATE_CONTROL_METHOD_HIGH_QUALITY_CBR
+            }
+        }
+    }
+
+    /// AV1 エンコーダーのレート制御メソッドへ変換する
+    fn to_av1(self) -> sys::AMF_VIDEO_ENCODER_AV1_RATE_CONTROL_METHOD_ENUM {
+        match self {
+            RateControlMode::Cqp => {
+                sys::AMF_VIDEO_ENCODER_AV1_RATE_CONTROL_METHOD_ENUM::AMF_VIDEO_ENCODER_AV1_RATE_CONTROL_METHOD_CONSTANT_QP
+            }
+            RateControlMode::Cbr => {
+                sys::AMF_VIDEO_ENCODER_AV1_RATE_CONTROL_METHOD_ENUM::AMF_VIDEO_ENCODER_AV1_RATE_CONTROL_METHOD_CBR
+            }
+            RateControlMode::Vbr => {
+                sys::AMF_VIDEO_ENCODER_AV1_RATE_CONTROL_METHOD_ENUM::AMF_VIDEO_ENCODER_AV1_RATE_CONTROL_METHOD_PEAK_CONSTRAINED_VBR
+            }
+            RateControlMode::LatencyConstrainedVbr => {
+                sys::AMF_VIDEO_ENCODER_AV1_RATE_CONTROL_METHOD_ENUM::AMF_VIDEO_ENCODER_AV1_RATE_CONTROL_METHOD_LATENCY_CONSTRAINED_VBR
+            }
+            RateControlMode::QualityVbr => {
+                sys::AMF_VIDEO_ENCODER_AV1_RATE_CONTROL_METHOD_ENUM::AMF_VIDEO_ENCODER_AV1_RATE_CONTROL_METHOD_QUALITY_VBR
+            }
+            RateControlMode::HighQualityVbr => {
+                sys::AMF_VIDEO_ENCODER_AV1_RATE_CONTROL_METHOD_ENUM::AMF_VIDEO_ENCODER_AV1_RATE_CONTROL_METHOD_HIGH_QUALITY_VBR
+            }
+            RateControlMode::HighQualityCbr => {
+                sys::AMF_VIDEO_ENCODER_AV1_RATE_CONTROL_METHOD_ENUM::AMF_VIDEO_ENCODER_AV1_RATE_CONTROL_METHOD_HIGH_QUALITY_CBR
+            }
+        }
+    }
+}
+
 /// ピクチャタイプ
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PictureType {
@@ -861,18 +944,10 @@ impl<H: EncodeHandler> Encoder<H> {
             config.height as amf_int32,
         )?;
 
-        // レート制御
-        // AMF_VIDEO_ENCODER_RATE_CONTROL_METHOD_ENUM の値
-        let rc_method: amf_int64 = match config.rate_control_mode {
-            RateControlMode::Cqp => 0, // AMF_VIDEO_ENCODER_RATE_CONTROL_METHOD_CONSTANT_QP
-            RateControlMode::Cbr => 1, // AMF_VIDEO_ENCODER_RATE_CONTROL_METHOD_CBR
-            RateControlMode::Vbr => 2, // AMF_VIDEO_ENCODER_RATE_CONTROL_METHOD_PEAK_CONSTRAINED_VBR
-            RateControlMode::LatencyConstrainedVbr => 3, // AMF_VIDEO_ENCODER_RATE_CONTROL_METHOD_LATENCY_CONSTRAINED_VBR
-            RateControlMode::QualityVbr => 4, // AMF_VIDEO_ENCODER_RATE_CONTROL_METHOD_QUALITY_VBR
-            RateControlMode::HighQualityVbr => 5, // AMF_VIDEO_ENCODER_RATE_CONTROL_METHOD_HIGH_QUALITY_VBR
-            RateControlMode::HighQualityCbr => 6, // AMF_VIDEO_ENCODER_RATE_CONTROL_METHOD_HIGH_QUALITY_CBR
-        };
-        prop.set_property_int64(sys::str::AMF_VIDEO_ENCODER_RATE_CONTROL_METHOD, rc_method)?;
+        prop.set_property_int64(
+            sys::str::AMF_VIDEO_ENCODER_RATE_CONTROL_METHOD,
+            config.rate_control_mode.to_h264() as amf_int64,
+        )?;
 
         let params = ReconfigureParams {
             target_kbps: config.target_kbps,
@@ -940,20 +1015,9 @@ impl<H: EncodeHandler> Encoder<H> {
             config.height as amf_int32,
         )?;
 
-        // HEVC のレート制御は列挙値の順序が H.264 と異なる
-        // AMF_VIDEO_ENCODER_HEVC_RATE_CONTROL_METHOD_ENUM の値
-        let rc_method: amf_int64 = match config.rate_control_mode {
-            RateControlMode::Cqp => 0, // AMF_VIDEO_ENCODER_HEVC_RATE_CONTROL_METHOD_CONSTANT_QP
-            RateControlMode::LatencyConstrainedVbr => 1, // AMF_VIDEO_ENCODER_HEVC_RATE_CONTROL_METHOD_LATENCY_CONSTRAINED_VBR
-            RateControlMode::Vbr => 2, // AMF_VIDEO_ENCODER_HEVC_RATE_CONTROL_METHOD_PEAK_CONSTRAINED_VBR
-            RateControlMode::Cbr => 3, // AMF_VIDEO_ENCODER_HEVC_RATE_CONTROL_METHOD_CBR
-            RateControlMode::QualityVbr => 4, // AMF_VIDEO_ENCODER_HEVC_RATE_CONTROL_METHOD_QUALITY_VBR
-            RateControlMode::HighQualityVbr => 5, // AMF_VIDEO_ENCODER_HEVC_RATE_CONTROL_METHOD_HIGH_QUALITY_VBR
-            RateControlMode::HighQualityCbr => 6, // AMF_VIDEO_ENCODER_HEVC_RATE_CONTROL_METHOD_HIGH_QUALITY_CBR
-        };
         prop.set_property_int64(
             sys::str::AMF_VIDEO_ENCODER_HEVC_RATE_CONTROL_METHOD,
-            rc_method,
+            config.rate_control_mode.to_hevc() as amf_int64,
         )?;
 
         let params = ReconfigureParams {
@@ -1009,20 +1073,9 @@ impl<H: EncodeHandler> Encoder<H> {
             config.height as amf_int32,
         )?;
 
-        // AMF_VIDEO_ENCODER_AV1_RATE_CONTROL_METHOD_ENUM の値
-        // (HEVC と同じ順序)
-        let rc_method: amf_int64 = match config.rate_control_mode {
-            RateControlMode::Cqp => 0, // AMF_VIDEO_ENCODER_AV1_RATE_CONTROL_METHOD_CONSTANT_QP
-            RateControlMode::LatencyConstrainedVbr => 1, // AMF_VIDEO_ENCODER_AV1_RATE_CONTROL_METHOD_LATENCY_CONSTRAINED_VBR
-            RateControlMode::Vbr => 2, // AMF_VIDEO_ENCODER_AV1_RATE_CONTROL_METHOD_PEAK_CONSTRAINED_VBR
-            RateControlMode::Cbr => 3, // AMF_VIDEO_ENCODER_AV1_RATE_CONTROL_METHOD_CBR
-            RateControlMode::QualityVbr => 4, // AMF_VIDEO_ENCODER_AV1_RATE_CONTROL_METHOD_QUALITY_VBR
-            RateControlMode::HighQualityVbr => 5, // AMF_VIDEO_ENCODER_AV1_RATE_CONTROL_METHOD_HIGH_QUALITY_VBR
-            RateControlMode::HighQualityCbr => 6, // AMF_VIDEO_ENCODER_AV1_RATE_CONTROL_METHOD_HIGH_QUALITY_CBR
-        };
         prop.set_property_int64(
             sys::str::AMF_VIDEO_ENCODER_AV1_RATE_CONTROL_METHOD,
-            rc_method,
+            config.rate_control_mode.to_av1() as amf_int64,
         )?;
 
         let params = ReconfigureParams {
