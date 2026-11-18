@@ -543,8 +543,9 @@ impl<H: EncodeHandler> Encoder<H> {
             };
             if pattern > 0 {
                 let capability = component
-                    .get_caps()?
-                    .get_property(cap_name)
+                    .get_caps()
+                    .ok()
+                    .and_then(|caps| caps.get_property(cap_name))
                     .and_then(|value| value.as_bool());
                 if capability == Some(false) {
                     return Err(Error::new_custom(
@@ -1065,13 +1066,13 @@ impl<H: EncodeHandler> Encoder<H> {
     /// 入力 1 つにつき出力 1 つを前提とし、対応が取れない入出力はハンドラーへ `Err` として
     /// 通知する。
     ///
-    /// `surface` はこのエンコーダーと同じ `Context` から確保した、未共有ものでなければならない。
+    /// `surface` はこのエンコーダーと同じ `Context` から確保し、他のハンドルと
+    /// 共有されていない Surface であること。
     /// 別の Context の Surface や、他のハンドルと共有されている Surface はエラーになる。
     ///
     /// # Errors
     ///
-    /// `surface` の状態が操作に適していない、または AMF の操作に失敗した場合
-    /// 場合にエラーを返す。
+    /// `surface` の状態が操作に適していない、または AMF の操作に失敗した場合にエラーを返す。
     pub fn encode(
         &mut self,
         surface: Surface,
@@ -1520,10 +1521,10 @@ fn report_unmatched_inputs<H: EncodeHandler>(
 ) {
     let mut frame_ids: Vec<_> = pending.drain().map(|(frame_id, _)| frame_id).collect();
     frame_ids.sort_unstable();
-    for _ in frame_ids {
+    for frame_id in frame_ids {
         handler.on_encoded(Err(Error::new_custom(
             function,
-            "encoder did not output a frame for a submitted input",
+            &format!("encoder did not output a frame for submitted input with frame ID {frame_id}"),
         )
         .into()));
     }
@@ -1570,15 +1571,12 @@ fn extract_encoded_output(
         frame_id: None,
         error,
     })?;
-    let Some(frame_id) = property.get_property_int64(FRAME_ID_PROPERTY) else {
-        return Err(OutputError {
+    let frame_id = property
+        .get_property_int64(FRAME_ID_PROPERTY)
+        .map_err(|error| OutputError {
             frame_id: None,
-            error: Error::new_custom(
-                "extract_encoded_output",
-                "frame ID property is not available",
-            ),
-        });
-    };
+            error,
+        })?;
     let buf_size = buffer.get_size();
     if buf_size == 0 {
         return Err(OutputError {
@@ -1615,12 +1613,7 @@ fn get_output_picture_type(
     };
     let property = buffer.property_storage()?;
     // AMF の出力フレーム種別は amf_int64 のプロパティとして定義されている。
-    let type_val = property.get_property_int64(prop_name).ok_or_else(|| {
-        Error::new_custom(
-            "get_output_picture_type",
-            &format!("property {prop_name} is not available"),
-        )
-    })?;
+    let type_val = property.get_property_int64(prop_name)?;
     Ok(picture_type_from_output_value(codec_config, type_val))
 }
 

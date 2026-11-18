@@ -121,9 +121,6 @@ struct PropertyStorageFuncs {
 }
 
 /// `AMFPropertyStorage` の RAII ラッパー
-///
-/// `Surface` や `Component` から `property_storage()` で取得すると参照カウントが増え、
-/// `Drop` で減る。
 pub struct PropertyStorage {
     ptr: *mut sys::AMFPropertyStorage,
     f: PropertyStorageFuncs,
@@ -256,17 +253,20 @@ impl PropertyStorage {
 
     /// Int64 プロパティを取得する
     ///
-    /// プロパティが存在しない場合と、値が Int64 でない場合は `None` を返す。
-    pub fn get_property_int64(&self, name: &str) -> Option<i64> {
+    /// # Errors
+    ///
+    /// プロパティを取得できない場合、または値が Int64 でない場合にエラーを返す。
+    pub fn get_property_int64(&self, name: &str) -> Result<i64, Error> {
         let name_w = sys::to_wstring(name);
-        let mut var = sys::AMFVariantStruct::empty();
-        let result = unsafe { self.get_property(name_w.as_ptr(), &mut var) };
-        if result != sys::AMF_RESULT::AMF_OK
-            || var.type_ != sys::AMF_VARIANT_TYPE::AMF_VARIANT_INT64
-        {
-            return None;
-        }
-        Some(unsafe { var.__bindgen_anon_1.int64Value })
+        let mut value = Variant::empty();
+        let result = unsafe { self.get_property(name_w.as_ptr(), value.as_ptr()) };
+        Error::check(result, format!("GetProperty({name})"))?;
+        value.as_int64().ok_or_else(|| {
+            Error::new_custom(
+                "AMFPropertyStorage::GetProperty",
+                &format!("property {name} is not int64"),
+            )
+        })
     }
 }
 

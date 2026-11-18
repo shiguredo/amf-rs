@@ -53,13 +53,16 @@
   - 出力 `Buffer` の PTS は AMF が付けた値のままになる
   - 時刻が必要な場合は `user_data` などで利用者が管理する
   - @melpon
-- [ADD] `EncoderConfig` に `b_pic_pattern` を追加し、B フレームを有効にできるようにする
+- [CHANGE] `EncoderConfig` に `b_pic_pattern` を追加し、B フレームを有効にできるようにする
+  - `EncoderConfig` の公開フィールドを追加するため、構造体リテラルでの構築はコンパイルエラーになる
   - AMF の仕様上の値域は H.264 が 0-3、AV1 が 0-127 で、`0` は B フレームなし
   - B フレームに対応していない GPU で 1 以上を指定した場合と、B フレームを扱わない HEVC で指定した場合は `Encoder::new` がエラーを返す
   - `AMF_NEED_MORE_INPUT` を入力の受理として扱う
   - 入力フレームに一意な値を設定して入出力を対応付け、入力順と出力順が異なっても `user_data` を対応するフレームへ付ける
   - @melpon
 - [ADD] `PlaneType` を追加する
+  - @melpon
+- [ADD] `amf::Buffer::property_storage` と `amf::PropertyStorage::get_property` / `get_property_int64` を追加する
   - @melpon
 - [ADD] `amf::Buffer::as_slice` / `as_mut_slice` / `set_size` と `amf::Plane::as_slice` / `as_mut_slice` を追加する
   - `as_slice` / `as_mut_slice` は unsafe 関数とし、メモリの初期化と排他アクセスを呼び出し側の責任にする
@@ -108,8 +111,6 @@
 
 ### misc
 
-- [ADD] `amf::Buffer::property_storage` と `amf::PropertyStorage::get_property` / `get_property_int64` を追加する
-  - @melpon
 - [UPDATE] `ffi` の `AMF_SURFACE_FORMAT` / `AMF_MEMORY_TYPE` / `AMF_VARIANT_TYPE` を newtype enum に変更する
   - @melpon
 - [UPDATE] shiguredo-rust と AGENTS.md の規約に合わせて lint 抑制・`.unwrap()`・ログ出力・コメントを整理する
