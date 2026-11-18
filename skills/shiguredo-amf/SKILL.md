@@ -50,7 +50,7 @@ AMD GPU 向けハードウェアアクセラレーションによるビデオエ
 | `supported_codecs() -> Result<Vec<CodecInfo>, Error>` | このバックエンドで利用可能なコーデック情報の一覧を返す (AMF ランタイムを初期化できない場合はエラー) | - |
 | `BUILD_VERSION` | ビルド時の AMF バージョン文字列 (`&'static str`) | - |
 
-`Encoder` / `Decoder` は内部でワーカースレッドを起動し、`encode()` / `decode()` で投入したフレームの結果は `EncodeHandler::on_encoded` / `DecodeHandler::on_decoded` に非同期で通知される。`finish()` は残りのフレームをハンドラーが受け取り終わるまで待機する。
+`Encoder` / `Decoder` は内部でワーカースレッドを起動し、`encode()` / `decode()` で投入したフレームの結果は `EncodeHandler::on_encoded` / `DecodeHandler::on_decoded` に非同期で通知される。`finish()` は残りのフレームをハンドラーが受け取り終わるまで待機する。`finish()` が成功した後に `encode()` / `reconfigure()` / `decode()` を呼ぶとエラーになる。2 回目の `finish()` もエラーになる。`finish()` を呼ばずに drop すると、ワーカーが保持する通知前の入出力は破棄される。
 
 `AmfLibrary::instance().create_context()` は呼び出しごとに新しい `Context` を作成する。
 同じ `Context` を Clone して Encoder と Decoder に渡すと、Decoder の `on_decoded` で受け取った
@@ -498,9 +498,8 @@ H.264 / HEVC / AV1 で AMF SDK 内部の enum 値順序が異なるが、`shigur
 - `Encoder<H>` / `Decoder<H>` は内部で `amf-encoder-worker` / `amf-decoder-worker` という名前のワーカースレッドを起動し、`mpsc::channel` で `Submit` / `Finish` コマンドを受け取る。
 - `encode()` はメインスレッドから `SubmitInput` を呼び、`AMF_INPUT_FULL` / `AMF_REPEAT` / `AMF_DECODER_NO_FREE_SURFACES` で 1ms スリープしながら最大 100 回までリトライする。`decode()` も `AMF_INPUT_FULL` / `AMF_DECODER_NO_FREE_SURFACES` ではリトライするが、`AMF_REPEAT` は複数フレームを含むバッファとしてエラーにする。どちらも投入に成功した後で `UserData` をワーカーへ送る。`decode()` は対応付け用 PTS と元の PTS も一緒に送る。
 - デコーダーのワーカーは、`decode()` が入力ごとに割り当てた PTS をキーに `UserData` を保持し、`QueryOutput` が返す `Surface` の PTS と一致した時点で `on_decoded` を呼ぶ。`Submit` コマンドの処理が出力の取得より遅れた場合は、`UserData` が登録されるまで出力を保持する。`finish()` で出力が得られなかった入力や、対応する入力がない出力はエラーとして通知する。`QueryOutput` が終端エラーを返した場合は、そのエラーをハンドラーへ通知してワーカーを終了する。`Finish` を受け取った後は入力フレームを受け付けない。`finish()` が成功した後に `decode()` を呼ぶとエラーを返す。
-- エンコーダーのワーカーは `pending` キューと `QueryOutput` の出力を FIFO で対応付け、対応が取れたところで `on_encoded` を呼ぶ。エンコーダーは B フレームを生成しないため、この対応付けは投入順と一致する。`QueryOutput` が終端エラーを返した場合は、そのエラーをハンドラーへ通知してワーカーを終了する。`finish()` では、対応する入力がない出力と、出力が得られなかった入力をエラーとして通知する。
-- `finish()` は `Drain` を呼んだあと `Finish(sync_channel)` をワーカーに送り、ワーカーの完了まで待つ。
-- `Drop` 実装は `cmd_tx` を落としてワーカーを停止させ、`Component::terminate()` を呼んでから AMF オブジェクトを解放する。`Context` は保持している `Context` の Clone がなくなった時点で破棄される。
+- エンコーダーのワーカーは `pending` キューと `QueryOutput` の出力を FIFO で対応付け、対応が取れたところで `on_encoded` を呼ぶ。エンコーダーは B フレームを生成しないため、この対応付けは投入順と一致する。`QueryOutput` が終端エラーを返した場合は、そのエラーをハンドラーへ通知してワーカーを終了する。`finish()` では、対応する入力がない出力と、出力が得られなかった入力をエラーとして通知する。`finish()` が成功した後に `encode()` / `reconfigure()` を呼ぶとエラーを返す。2 回目の `finish()` もエラーを返す。
+- `finish()` は `Drain` を呼んだあと `Finish(sync_channel)` をワーカーに送り、ワーカーの終了を `join` まで待つ。`Drop` 実装は `cmd_tx` を落としてワーカーを停止させ、ワーカーが保持する通知前の入出力を破棄し、`Component::terminate()` を呼んでから AMF オブジェクトを解放する。`Context` は保持している `Context` の Clone がなくなった時点で破棄される。
 
 ## 公開モジュール
 

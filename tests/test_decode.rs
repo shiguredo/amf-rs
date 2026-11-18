@@ -360,27 +360,40 @@ fn test_decode_after_finish_is_rejected() {
     );
 }
 
-/// finish を呼ばずに Decoder を drop しても、ワーカーの停止が完了することを確認する
+/// finish を呼ばずに Decoder を drop すると、保留中の入力が通知されないことを確認する
 #[test]
-fn test_drop_decoder_without_finish() {
+fn test_drop_decoder_without_finish_does_not_notify_pending_input() {
     let access_units = split_access_units(H264_BFRAME_STREAM, is_h264_vcl);
-    let access_unit = &access_units[0];
+    // パラメータセットだけではデコード出力が生成されないため、drop による通知の
+    // 有無を確実に確認できる。
+    let parameter_sets = without_vcl_nals(&access_units[0], is_h264_vcl);
+    assert!(
+        !parameter_sets.is_empty(),
+        "先頭のアクセスユニットから SPS/PPS を取得できない"
+    );
 
+    let results = Arc::new(Mutex::new(Vec::new()));
+    let received = Arc::clone(&results);
     let mut decoder = Decoder::new(
         create_context(),
         DecoderConfig {
             codec: DecoderCodec::H264,
         },
-        FnDecodeHandler::<usize>::new(|_| {}),
+        FnDecodeHandler::<usize>::new(move |result| {
+            received
+                .lock()
+                .expect("結果一覧のロックに失敗")
+                .push(result);
+        }),
     )
     .expect("デコーダーの作成に失敗");
 
     let mut buffer = decoder
-        .alloc_buffer(access_unit.len())
+        .alloc_buffer(parameter_sets.len())
         .expect("Buffer の確保に失敗");
     unsafe { buffer.as_mut_slice() }
         .expect("Buffer のスライス取得に失敗")
-        .copy_from_slice(access_unit);
+        .copy_from_slice(&parameter_sets);
     decoder.decode(buffer, 0).expect("デコードの投入に失敗");
 
     let started = Instant::now();
@@ -389,6 +402,15 @@ fn test_drop_decoder_without_finish() {
         started.elapsed() < Duration::from_secs(1),
         "Decoder の drop に時間がかかりすぎた: {:?}",
         started.elapsed()
+    );
+
+    let results = Arc::try_unwrap(results)
+        .expect("結果一覧の Arc の参照が残っている")
+        .into_inner()
+        .expect("結果一覧のロックに失敗");
+    assert!(
+        results.is_empty(),
+        "finish を呼ばずに drop したのに保留中の入力が通知された"
     );
 }
 
