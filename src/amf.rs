@@ -113,6 +113,11 @@ struct PropertyStorageFuncs {
         *const sys::wchar_t,
         sys::AMFVariantStruct,
     ) -> sys::AMF_RESULT,
+    get_property: unsafe extern "C" fn(
+        *mut sys::AMFPropertyStorage,
+        *const sys::wchar_t,
+        *mut sys::AMFVariantStruct,
+    ) -> sys::AMF_RESULT,
 }
 
 /// `AMFPropertyStorage` の RAII ラッパー
@@ -145,6 +150,7 @@ impl PropertyStorage {
             acquire: require_vtbl_fn(vtbl.Acquire, "AMFPropertyStorage::Acquire")?,
             release: require_vtbl_fn(vtbl.Release, "AMFPropertyStorage::Release")?,
             set_property: require_vtbl_fn(vtbl.SetProperty, "AMFPropertyStorage::SetProperty")?,
+            get_property: require_vtbl_fn(vtbl.GetProperty, "AMFPropertyStorage::GetProperty")?,
         };
         if acquire {
             unsafe { (f.acquire)(ptr) };
@@ -232,6 +238,35 @@ impl PropertyStorage {
         let var = sys::AMFVariantStruct::from_rate(num, den);
         let result = unsafe { self.set_property(name_w.as_ptr(), var) };
         Error::check(result, format!("SetProperty({name})"))
+    }
+
+    /// プロパティを取得する
+    ///
+    /// # Safety
+    /// `name` は有効なヌル終端ワイド文字列を指すこと。
+    /// `p_value` は有効な AMFVariantStruct を指すこと。
+    pub unsafe fn get_property(
+        &self,
+        name: *const sys::wchar_t,
+        p_value: *mut sys::AMFVariantStruct,
+    ) -> sys::AMF_RESULT {
+        let _guard = self.state.lock();
+        unsafe { (self.f.get_property)(self.ptr, name, p_value) }
+    }
+
+    /// Int64 プロパティを取得する
+    ///
+    /// プロパティが存在しない場合と、値が Int64 でない場合は `None` を返す。
+    pub fn get_property_int64(&self, name: &str) -> Option<i64> {
+        let name_w = sys::to_wstring(name);
+        let mut var = sys::AMFVariantStruct::empty();
+        let result = unsafe { self.get_property(name_w.as_ptr(), &mut var) };
+        if result != sys::AMF_RESULT::AMF_OK
+            || var.type_ != sys::AMF_VARIANT_TYPE::AMF_VARIANT_INT64
+        {
+            return None;
+        }
+        Some(unsafe { var.__bindgen_anon_1.int64Value })
     }
 }
 
@@ -516,11 +551,6 @@ struct BufferFuncs {
     get_pts: unsafe extern "C" fn(*mut sys::AMFBuffer) -> sys::amf_pts,
     get_duration: unsafe extern "C" fn(*mut sys::AMFBuffer) -> sys::amf_pts,
     get_memory_type: unsafe extern "C" fn(*mut sys::AMFBuffer) -> sys::AMF_MEMORY_TYPE,
-    get_property: unsafe extern "C" fn(
-        *mut sys::AMFBuffer,
-        *const sys::wchar_t,
-        *mut sys::AMFVariantStruct,
-    ) -> sys::AMF_RESULT,
 }
 
 /// `AMFBuffer` の RAII ラッパー
@@ -557,7 +587,6 @@ impl Buffer {
             get_pts: require_vtbl_fn(vtbl.GetPts, "AMFBuffer::GetPts")?,
             get_duration: require_vtbl_fn(vtbl.GetDuration, "AMFBuffer::GetDuration")?,
             get_memory_type: require_vtbl_fn(vtbl.GetMemoryType, "AMFBuffer::GetMemoryType")?,
-            get_property: require_vtbl_fn(vtbl.GetProperty, "AMFBuffer::GetProperty")?,
         };
         if acquire {
             unsafe { (f.acquire)(ptr) };
@@ -741,18 +770,16 @@ impl Buffer {
         unsafe { (self.f.get_duration)(self.ptr) }
     }
 
-    /// プロパティを取得する
-    ///
-    /// # Safety
-    /// `name` は有効なヌル終端ワイド文字列を指すこと。
-    /// `p_value` は有効な AMFVariantStruct を指すこと。
-    pub unsafe fn get_property(
-        &self,
-        name: *const sys::wchar_t,
-        p_value: *mut sys::AMFVariantStruct,
-    ) -> sys::AMF_RESULT {
-        let _guard = self.state.lock();
-        unsafe { (self.f.get_property)(self.ptr, name, p_value) }
+    /// AMFPropertyStorage としてアクセスする
+    pub fn property_storage(&self) -> Result<PropertyStorage, Error> {
+        unsafe {
+            PropertyStorage::from_raw_with_acquire(
+                self.ptr as *mut sys::AMFPropertyStorage,
+                true,
+                Arc::clone(&self.state),
+                self.context.clone(),
+            )
+        }
     }
 }
 

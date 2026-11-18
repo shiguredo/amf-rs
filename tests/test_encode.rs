@@ -5,7 +5,7 @@ use shiguredo_amf::ffi::AMF_RESULT;
 use shiguredo_amf::{
     Av1EncoderConfig, Av1Profile, CodecConfig, EncodeOptions, Encoder, EncoderConfig, Error,
     FnEncodeHandler, FrameFormat, HevcEncoderConfig, HevcProfile, PlaneType, RateControlMode,
-    ReconfigureParams,
+    ReconfigureParams, VideoCodecType, supported_codecs,
 };
 
 pub mod helpers;
@@ -173,6 +173,72 @@ fn test_encoder_rejects_hevc_qpb() {
     );
     assert!(
         err.to_string().contains("qpb is not supported for HEVC"),
+        "想定したエラーメッセージではない: {err}"
+    );
+}
+
+/// HEVC の AMF エンコーダーは B フレームを扱わないため、b_pic_pattern を指定すると
+/// Encoder::new がエラーになることを確認する
+#[test]
+fn test_encoder_rejects_hevc_b_pic_pattern() {
+    let mut config = test_encoder_config(hevc_main(), FrameFormat::Nv12);
+    config.b_pic_pattern = Some(2);
+    let err = create_encoder(config)
+        .err()
+        .expect("HEVC に b_pic_pattern を指定したのにエンコーダーを作成できた");
+    assert_eq!(
+        err.status(),
+        None,
+        "AMF のエラーではなく Encoder::new のエラーであるべき: {err}"
+    );
+    assert!(
+        err.to_string()
+            .contains("b_pic_pattern is not supported for HEVC"),
+        "想定したエラーメッセージではない: {err}"
+    );
+}
+
+/// B フレームに対応していない GPU では、B フレームを要求すると Encoder::new が
+/// エラーになることを確認する
+///
+/// AMF は非対応の GPU でもプロパティ設定を受理して B フレームを生成しないため、
+/// 要求が黙って無視されないことを確認する。
+#[test]
+fn test_encoder_rejects_b_frames_not_supported_by_gpu() {
+    let Some(av1_encoding) = supported_codecs()
+        .expect("コーデック対応状況の取得に失敗")
+        .into_iter()
+        .find(|info| info.codec == VideoCodecType::Av1)
+        .and_then(|info| info.encoding)
+    else {
+        eprintln!("AV1 エンコーダーに対応していないためテストをスキップする");
+        return;
+    };
+    match av1_encoding.supports_frame_reordering {
+        Some(false) => {}
+        Some(true) => {
+            eprintln!("AV1 の B フレームに対応しているためテストをスキップする");
+            return;
+        }
+        None => {
+            eprintln!("AV1 の B フレーム対応情報を取得できないためテストをスキップする");
+            return;
+        }
+    }
+
+    let mut config = test_encoder_config(av1_main(), FrameFormat::Nv12);
+    config.b_pic_pattern = Some(2);
+    let err = create_encoder(config)
+        .err()
+        .expect("B フレーム非対応の GPU なのにエンコーダーを作成できた");
+    assert_eq!(
+        err.status(),
+        None,
+        "AMF のエラーではなく Encoder::new のエラーであるべき: {err}"
+    );
+    assert!(
+        err.to_string()
+            .contains("B frames are not supported by this GPU"),
         "想定したエラーメッセージではない: {err}"
     );
 }

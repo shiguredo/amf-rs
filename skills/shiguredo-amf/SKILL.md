@@ -61,7 +61,7 @@ AMD GPU 向けハードウェアアクセラレーションによるビデオエ
 
 | 型 | 説明 | 主要メソッド |
 |----|------|-------------|
-| `EncoderConfig` | エンコーダー設定 | `new(CodecConfig, width, height, FrameFormat, framerate_num, framerate_den, RateControlMode)`, フィールド: `target_kbps`, `max_kbps`, `qpi`, `qpp`, `qpb`, `gop_pic_size` (全て `Option`) |
+| `EncoderConfig` | エンコーダー設定 | `new(CodecConfig, width, height, FrameFormat, framerate_num, framerate_den, RateControlMode)`, フィールド: `target_kbps`, `max_kbps`, `qpi`, `qpp`, `qpb`, `gop_pic_size`, `b_pic_pattern` (全て `Option`) |
 | `CodecConfig` | コーデック設定 enum | `H264(H264EncoderConfig)`, `Hevc(HevcEncoderConfig)`, `Av1(Av1EncoderConfig)` |
 | `H264EncoderConfig` | H.264 エンコーダー固有設定 | `profile: Option<H264Profile>` |
 | `HevcEncoderConfig` | HEVC エンコーダー固有設定 | `profile: Option<HevcProfile>` |
@@ -111,7 +111,7 @@ AMD GPU 向けハードウェアアクセラレーションによるビデオエ
 | `FnEncodeHandler<T, E = crate::Error>` | `FnMut(Result<EncodedFrame<T>, E>) + Send + 'static` を `EncodeHandler` にラップする |
 | `FnDecodeHandler<T, E = crate::Error>` | `FnMut(Result<DecodedFrame<T>, E>) + Send + 'static` を `DecodeHandler` にラップする |
 
-ハンドラーが `Send + 'static` を要求するのは、ワーカースレッドへ所有権を移して呼び出すため。`UserData` は `encode()` / `decode()` に渡したフレームと 1:1 で対応する。`decode()` は B フレームによる出力順の入れ替えがあっても、入力したフレームに対応する出力へ `UserData` を付ける。
+ハンドラーが `Send + 'static` を要求するのは、ワーカースレッドへ所有権を移して呼び出すため。`UserData` は `encode()` / `decode()` に渡したフレームと 1:1 で対応する。`encode()` と `decode()` は B フレームによる出力順の入れ替えがあっても、入力したフレームに対応する出力へ `UserData` を付ける。
 
 ### `frame_type` モジュール
 
@@ -126,7 +126,7 @@ AMD GPU 向けハードウェアアクセラレーションによるビデオエ
 | `IDR` | `0x0020` | IDR フレーム (キーフレーム) |
 | `REF` | `0x0040` | 参照フレーム (無視される) |
 
-`Encoder::encode` は `IDR` / `I` / `P` を `IDR`、`I`、`P` の順に優先して 1 つ使用する。`B` / `REF`、AV1 の `P`、未定義のビットは無視する。先頭フレームと GOP の境界では、エンコーダーが IDR を優先するため `I` と `P` の指定が反映されない場合がある。
+`Encoder::encode` は `IDR` / `I` / `P` を `IDR`、`I`、`P` の順に優先して 1 つ使用する。`B` / `REF`、AV1 の `P`、未定義のビットは無視する。B フレームを生成するには `EncoderConfig::b_pic_pattern` を指定する。先頭フレームと GOP の境界では、エンコーダーが IDR を優先するため `I` と `P` の指定が反映されない場合がある。
 
 ## AMF オブジェクトラッパー (`amf` モジュール)
 
@@ -139,9 +139,9 @@ AMD GPU 向けハードウェアアクセラレーションによるビデオエ
 | `Context` | `AMFContext` の参照カウントを管理する Clone 可能なハンドル | `alloc_surface(MemoryType, SurfaceFormat, width, height)`, `alloc_buffer(MemoryType, size)`, `as_ptr()` |
 | `Component` | `AMFComponent` のラッパー | `init(SurfaceFormat, width, height)`, `re_init(width, height)`, `terminate()`, `drain()`, `flush()`, `unsafe submit_input(*mut AMFData)`, `unsafe query_output(*mut *mut AMFData)`, `get_context()`, `context()`, `property_storage() -> Result<PropertyStorage, Error>` |
 | `Surface` | `AMFSurface` のラッパー | `context()`, `get_memory_type() -> MemoryType`, `set_pts(i64)`, `get_pts() -> i64`, `set_duration(i64)`, `get_plane(PlaneType) -> Result<Plane<'_>, Error>`, `get_plane_at(index) -> Result<Plane<'_>, Error>`, `convert(MemoryType) -> Result<(), Error>`, `property_storage()`, `as_ptr()`, `into_raw()` |
-| `Buffer` | `AMFBuffer` のラッパー | `context()`, `get_memory_type() -> MemoryType`, `get_native() -> *mut c_void`, `get_size() -> usize`, `set_size(usize) -> Result<(), Error>`, `unsafe as_slice() -> Result<&[u8], Error>`, `unsafe as_mut_slice() -> Result<&mut [u8], Error>`, `set_pts(i64)`, `get_pts() -> i64`, `get_duration() -> i64`, `unsafe get_property(name_w, *mut AMFVariantStruct)`, `as_ptr()`, `into_raw()` |
+| `Buffer` | `AMFBuffer` のラッパー | `context()`, `get_memory_type() -> MemoryType`, `get_native() -> *mut c_void`, `get_size() -> usize`, `set_size(usize) -> Result<(), Error>`, `unsafe as_slice() -> Result<&[u8], Error>`, `unsafe as_mut_slice() -> Result<&mut [u8], Error>`, `set_pts(i64)`, `get_pts() -> i64`, `get_duration() -> i64`, `property_storage() -> Result<PropertyStorage, Error>`, `as_ptr()`, `into_raw()` |
 | `Plane<'a>` | `AMFPlane` の RAII ラッパー。取得元の `Surface` を借用する | `context()`, `get_native() -> *mut c_void`, `get_hpitch() -> i32`, `get_vpitch() -> i32`, `get_width() -> i32`, `get_height() -> i32`, `is_tiled() -> bool`, `unsafe as_slice() -> Result<&[u8], Error>`, `unsafe as_mut_slice() -> Result<&mut [u8], Error>`, `as_ptr()`, `into_raw()` |
-| `PropertyStorage` | `AMFPropertyStorage` のラッパー | `context()`, `set_property_int64(name, value)`, `set_property_size(name, width, height)`, `set_property_rate(name, num, den)`, `unsafe set_property(name_w, AMFVariantStruct)`, `as_ptr()`, `into_raw()` |
+| `PropertyStorage` | `AMFPropertyStorage` のラッパー | `context()`, `unsafe get_property(name_w, *mut AMFVariantStruct)`, `get_property_int64(name) -> Option<i64>`, `set_property_int64(name, value)`, `set_property_size(name, width, height)`, `set_property_rate(name, num, den)`, `unsafe set_property(name_w, AMFVariantStruct)`, `as_ptr()`, `into_raw()` |
 
 `Context::alloc_surface` / `alloc_buffer` は `&self` に対して呼び出す。`Context` の `Clone` は
 `AMFContext::Acquire`、`Drop` は `AMFContext::Release` を呼ぶ。最後の参照が解放されたときに
@@ -260,12 +260,15 @@ encoder.finish()?;
 
 for frame in frame_rx.try_iter() {
     println!("encoded bytes: {}", frame.buffer().get_size());
-    println!("pts: {}", frame.buffer().get_pts());
     println!("picture type: {:?}", frame.picture_type());
 }
 ```
 
 `Encoder::new` に渡すクロージャは `FnEncodeHandler::new` でラップする。クロージャの引数は `Result<EncodedFrame<T>, E>` で、エラーもワーカースレッドから通知される。ハンドラーはワーカースレッドで呼ばれるため、結果は `mpsc::channel` の `Sender` でメインスレッドへ送る。`E` の既定値は `shiguredo_amf::Error` である。`UserData` 型 (上記の `()` の位置) はフレーム単位の任意ユーザーデータで、`encode()` で渡した値が `EncodedFrame::user_data()` から取り出せる。
+
+`EncoderConfig::b_pic_pattern` に GOP 内の連続 B フレーム数を指定すると B フレームを有効にできる。AMF の仕様上の値域は H.264 が 0-3、AV1 が 0-127 で、0 は B フレームなし、`None` は AMF の既定値 (0) になる。HEVC は B フレームを扱わないため指定できない。B フレームを有効にすると、ハンドラーへの通知順は入力順 (提示順) と異なる符号化順になるが、`encode()` に渡した `UserData` は対応する入力フレームの出力に付く。B フレームに対応していない GPU で 1 以上を指定した場合は `Encoder::new` がエラーを返す。
+
+`Encoder::encode` は入力 1 つにつき出力 1 つを前提とし、同じ入力に対応する出力が複数ある場合や、対応する入力がない出力が得られた場合はワーカーが `Err` として通知する。
 
 `Encoder::new` の第 1 引数には `AmfLibrary::instance().create_context()` で作成した `Context` を渡す。同じ `Context` を Clone して共有する `Decoder` の出力 `Surface` を、そのまま `encode()` に投入できる。
 
@@ -487,18 +490,21 @@ H.264 / HEVC / AV1 で AMF SDK 内部の enum 値順序が異なるが、`shigur
 | `width > i32::MAX \|\| height > i32::MAX` | `invalid resolution: WxH (exceeds i32::MAX)` |
 | `width` または `height` が奇数 | `invalid resolution: WxH (must be even)` |
 | `framerate_num == 0 \|\| framerate_den == 0` | `invalid framerate: N/D (must be non-zero)` |
+| HEVC で `qpb` を指定 | `qpb is not supported for HEVC` |
+| HEVC で `b_pic_pattern` を指定 | `b_pic_pattern is not supported for HEVC` |
+| AMF が B フレーム非対応と報告した場合 (`b_pic_pattern > 0`) | `B frames are not supported by this GPU and AMF implementation` |
 | HEVC の 10bit 入力でプロファイルが `Main10` 以外 | `HEVC 10-bit input requires HevcProfile::Main10: ...` |
 
-入力フォーマットとプロファイルの組み合わせは基本的に AMF に任せるが、HEVC の 10bit 入力と Main プロファイル (プロファイル未指定を含む) の組み合わせだけは `Encoder::new` がエラーを返す。
+入力フォーマットとプロファイルの組み合わせ、および `b_pic_pattern` の値域は基本的に AMF に任せ、AMF が返すエラーをそのまま返す。B フレーム対応のケーパビリティが取得できない場合も、対応可否を決めずに AMF に任せる。HEVC の 10bit 入力と Main プロファイル (プロファイル未指定を含む) の組み合わせだけは `Encoder::new` がエラーを返す。
 
 ## スレッド設計
 
 - `AmfLibrary` はプロセスシングルトン (`LazyLock<AmfLibrary>`)。AMF ランタイムを遅延初期化し、`create_context()` で新しい `Context` を作成する。
 - `Context` は `AMFContext` の参照カウントを直接管理する Clone 可能なハンドルである。`Clone` は `AMFContext::Acquire`、`Drop` は `AMFContext::Release` を呼ぶ。最後の参照が解放されたときに AMFContext のデストラクタが `Terminate` を呼ぶ。
 - `Encoder<H>` / `Decoder<H>` は内部で `amf-encoder-worker` / `amf-decoder-worker` という名前のワーカースレッドを起動し、`mpsc::channel` で `Submit` / `Finish` コマンドを受け取る。
-- `encode()` はメインスレッドから `SubmitInput` を呼び、`AMF_INPUT_FULL` / `AMF_REPEAT` / `AMF_DECODER_NO_FREE_SURFACES` で 1ms スリープしながら最大 100 回までリトライする。`decode()` も `AMF_INPUT_FULL` / `AMF_DECODER_NO_FREE_SURFACES` ではリトライするが、`AMF_REPEAT` は複数フレームを含むバッファとしてエラーにする。どちらも投入に成功した後で `UserData` をワーカーへ送る。`decode()` は対応付け用 PTS と元の PTS も一緒に送る。
+- `encode()` はメインスレッドから `SubmitInput` を呼び、`AMF_OK` と `AMF_NEED_MORE_INPUT` を入力の受理として扱い、`AMF_INPUT_FULL` / `AMF_REPEAT` では 1ms スリープしながら最大 100 回までリトライする。`decode()` も `AMF_INPUT_FULL` / `AMF_DECODER_NO_FREE_SURFACES` ではリトライするが、`AMF_REPEAT` は複数フレームを含むバッファとしてエラーにする。どちらも投入に成功した後で `UserData` をワーカーへ送る。`encode()` は対応付け用の値、`decode()` は対応付け用 PTS と元の PTS も一緒に送る。
 - デコーダーのワーカーは、`decode()` が入力ごとに割り当てた PTS をキーに `UserData` を保持し、`QueryOutput` が返す `Surface` の PTS と一致した時点で `on_decoded` を呼ぶ。`Submit` コマンドの処理が出力の取得より遅れた場合は、`UserData` が登録されるまで出力を保持する。`finish()` で出力が得られなかった入力や、対応する入力がない出力はエラーとして通知する。`QueryOutput` が終端エラーを返した場合は、そのエラーをハンドラーへ通知してワーカーを終了する。`Finish` を受け取った後は入力フレームを受け付けない。`finish()` が成功した後に `decode()` を呼ぶとエラーを返す。
-- エンコーダーのワーカーは `pending` キューと `QueryOutput` の出力を FIFO で対応付け、対応が取れたところで `on_encoded` を呼ぶ。エンコーダーは B フレームを生成しないため、この対応付けは投入順と一致する。`QueryOutput` が終端エラーを返した場合は、そのエラーをハンドラーへ通知してワーカーを終了する。`finish()` では、対応する入力がない出力と、出力が得られなかった入力をエラーとして通知する。
+- エンコーダーのワーカーは、`encode()` が入力ごとに割り当てた対応付け用の値をキーに `UserData` を保持し、`QueryOutput` が返す `Buffer` の対応付け用プロパティと一致した時点で `on_encoded` を呼ぶ。対応付け用の値は入力 Surface のカスタムプロパティとして出力 `Buffer` へ引き継ぎ、B フレームで出力順が変わっても正しいフレームを引き当てる。`Submit` コマンドの処理が出力の取得より遅れた場合は、`UserData` が登録されるまで出力を保持する。`AMF_NEED_MORE_INPUT` は入力の受理として扱う。`finish()` で出力が得られなかった入力や、対応する入力がない出力はエラーとして通知する。`QueryOutput` が終端エラーを返した場合は、そのエラーをハンドラーへ通知してワーカーを終了する。
 - `finish()` は `Drain` を呼んだあと `Finish(sync_channel)` をワーカーに送り、ワーカーの完了まで待つ。
 - `Drop` 実装は `cmd_tx` を落としてワーカーを停止させ、`Component::terminate()` を呼んでから AMF オブジェクトを解放する。`Context` は保持している `Context` の Clone がなくなった時点で破棄される。
 

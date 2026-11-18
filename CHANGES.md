@@ -46,6 +46,19 @@
 - [CHANGE] `amf` モジュールのフレームデータ API から `ffi` の型を排除する
   - `Surface::get_plane` が `PlaneType` を、`Surface::convert` / `Context::alloc_surface` / `Context::alloc_buffer` が `MemoryType` を、`Context::alloc_surface` / `Component::init` が `SurfaceFormat` を受け取るように変更する
   - @melpon
+- [CHANGE] `amf::Buffer::get_property` を削除する
+  - プロパティの取得には `amf::Buffer::property_storage` から `amf::PropertyStorage::get_property` を使う
+  - @melpon
+- [CHANGE] `Encoder` が出力 `Buffer` の PTS を設定する挙動を削除する
+  - 出力 `Buffer` の PTS は AMF が付けた値のままになる
+  - 時刻が必要な場合は `user_data` などで利用者が管理する
+  - @melpon
+- [ADD] `EncoderConfig` に `b_pic_pattern` を追加し、B フレームを有効にできるようにする
+  - AMF の仕様上の値域は H.264 が 0-3、AV1 が 0-127 で、`0` は B フレームなし
+  - B フレームに対応していない GPU で 1 以上を指定した場合と、B フレームを扱わない HEVC で指定した場合は `Encoder::new` がエラーを返す
+  - `AMF_NEED_MORE_INPUT` を入力の受理として扱う
+  - 入力フレームに一意な値を設定して入出力を対応付け、入力順と出力順が異なっても `user_data` を対応するフレームへ付ける
+  - @melpon
 - [ADD] `PlaneType` を追加する
   - @melpon
 - [ADD] `amf::Buffer::as_slice` / `as_mut_slice` / `set_size` と `amf::Plane::as_slice` / `as_mut_slice` を追加する
@@ -95,6 +108,8 @@
 
 ### misc
 
+- [ADD] `amf::Buffer::property_storage` と `amf::PropertyStorage::get_property` / `get_property_int64` を追加する
+  - @melpon
 - [UPDATE] `ffi` の `AMF_SURFACE_FORMAT` / `AMF_MEMORY_TYPE` / `AMF_VARIANT_TYPE` を newtype enum に変更する
   - @melpon
 - [UPDATE] shiguredo-rust と AGENTS.md の規約に合わせて lint 抑制・`.unwrap()`・ログ出力・コメントを整理する
