@@ -1,7 +1,7 @@
 # `Encoder` / `Decoder` の `finish` と `Drop` の状態を明確にする
 
 - Created: 2026-11-10
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-11-18
 - Branch: feature/fix-finish-state
 - Polished: {YYYY-MM-DD}
 - Refreshed: 2026-11-18
@@ -61,3 +61,14 @@
 - `Encoder::encode()` / `Encoder::reconfigure()` / `Encoder::finish()` と `Decoder::decode()` / `Decoder::finish()` の doc に `# Errors` が追加され、`finish` 後の拒否が書かれている。
 - `CHANGES.md` の `## develop` に `[FIX]` を追記する。`Decoder` の `finish` 後の `decode` 拒否は記載済みなので、`Encoder` の状態検証と `Drop` の契約を追記する。
 - `skills/shiguredo-amf/SKILL.md` のエンコーダー側の記述に `finish` 後の入力拒否を追記する。
+
+## 解決方法
+
+- `Encoder` / `Decoder` の finish 済み状態を `cmd_tx: Option<Sender<...>>` だけで管理するようにした。`Encoder::encode` / `Encoder::reconfigure` / `Encoder::finish` と `Decoder::decode` / `Decoder::finish` は入口で状態を検証し、finish 済みなら AMF を呼ばずに `Err` を返す。
+- `finish` は `Drain` の結果を確認してから `cmd_tx` を取り出し、`Finish` の送信または完了待ちに失敗した場合もワーカーの `join` まで待つようにした。`Drain` がエラーになった場合は状態を変えずに `Err` を返すため、呼び出し側は `finish` をやり直せる。2 回目の `finish` は `Err` を返す。
+- ハンドラーが panic した場合は、panic の内容を含めずに `Err` を返す。
+- `Drop` は保留中の入力の `user_data` と出力を通知せずに破棄する。ハンドラーの panic と `Component::terminate` の失敗は `tracing::error!` で記録するが、ログ出力は公開契約にしない。
+- `Encoder` / `Decoder` の `# Drop` を追加し、`Encoder::encode` / `Encoder::reconfigure` / `Encoder::finish` と `Decoder::decode` / `Decoder::finish` の `# Errors` を追加・更新した。`# Errors` は個別の AMF 操作ではなく「AMF の操作に失敗した場合」という粒度で書いた。
+- `Encoder` の状態遷移のテストと、保留中の入力がある状態で `Encoder` / `Decoder` を `Drop` した場合に通知が行われないことを実機で検証するテストを追加した。
+- `CHANGES.md` の `## develop` に `[FIX]` を追記し、`skills/shiguredo-amf/SKILL.md` に finish 後の操作拒否と `Drop` の契約を追記した。
+- `ssh shiguredo-amd-um790` の AMD GPU 実機で `cargo test --workspace` を実行し、全 111 テストが成功することを確認した。
