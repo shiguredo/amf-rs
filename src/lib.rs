@@ -127,12 +127,14 @@ struct AmfLibraryInner {
 ///
 /// dlopen で libamfrt64.so.1 をロードし、AMFFactory を取得する。
 /// プロセス全体で単一のインスタンスのみ存在し、
-/// [`AmfLibrary::instance()`] で取得する。
+/// [`AmfLibrary::instance()`] で取得する。AMF ランタイムのロードは、最初に
+/// AMF ランタイムを必要とする呼び出し時に行う。
 pub struct AmfLibrary {
     /// プロセス全体で共有するロック
     ///
     /// AMF のインターフェースはほとんどがスレッドセーフではないため、
-    /// AMF ランタイムの Context 作成と Context / Component の操作を直列化する。
+    /// AMF ランタイムのロード、Context 作成、Context / Component の操作を
+    /// 直列化する。
     state: Arc<AmfObjectState>,
     /// AMF ランタイムの状態
     ///
@@ -161,10 +163,16 @@ impl AmfLibrary {
 
     /// プロセス全体で単一の AmfLibraryInner インスタンスを返す
     ///
-    /// 初回呼び出し時に AMF ランタイムをロードし、2 回目以降はキャッシュされた
-    /// インスタンスを返す。
+    /// 初回呼び出し時に AMF ランタイムをロードし、初期化に成功した後は
+    /// キャッシュされたインスタンスを返す。ロードに失敗した場合はその失敗を
+    /// キャッシュせず、次の呼び出しで再度ロードを試みる。
     ///
     /// `_guard` は `self.state` のロックを保持していることを示すトークンである。
+    ///
+    /// # Errors
+    ///
+    /// AMF ランタイムをロードできない場合、または AMF の初期化に失敗した場合に
+    /// エラーを返す。
     fn ensure_inner<'a>(
         &'a self,
         _guard: &MutexGuard<'a, ()>,
@@ -198,6 +206,8 @@ impl AmfLibrary {
                 ));
             }
 
+            // 初期化に成功した場合だけキャッシュする。失敗時は `inner` を
+            // `None` のままにし、次の呼び出しで再試行できるようにする。
             *inner = Some(AmfLibraryInner { lib, factory });
         }
         Ok(inner.as_ref().expect("AmfLibraryInner must be initialized"))

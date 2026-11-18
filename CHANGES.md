@@ -113,6 +113,8 @@
   - `Encoder::finish()` / `Decoder::finish()` はワーカーの終了を join まで待つ
   - `Drop` では通知前の入出力を破棄し、ハンドラーの panic と `Component::terminate` の失敗を `tracing::error!` で記録する
   - @melpon
+- [FIX] `AmfLibrary::create_context` が `AMFContext1` の `InitVulkan` を取得できない場合に参照を解放しない問題を修正する
+  - @melpon
 
 ### misc
 
