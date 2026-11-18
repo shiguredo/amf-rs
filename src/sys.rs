@@ -49,7 +49,7 @@ pub const AMF_FULL_VERSION: amf_uint64 = (AMF_VERSION_MAJOR as amf_uint64) << 48
     | (AMF_VERSION_RELEASE as amf_uint64) << 16
     | AMF_VERSION_BUILD_NUM as amf_uint64;
 
-/// Linux x86_64 での AMF ランタイムライブラリ名
+/// Linux x86_64 の AMD GPU ドライバーが提供する AMF ランタイムライブラリ名
 pub const AMF_DLL_NAME: &str = "libamfrt64.so.1";
 
 // ---------------------------------------------------------------------------
@@ -167,10 +167,15 @@ impl AMFVariantStruct {
 }
 
 // ---------------------------------------------------------------------------
-// ワイド文字列ヘルパー (Linux: wchar_t = i32 = UTF-32)
+// ワイド文字列ヘルパー
+//
+// Linux x86_64 の wchar_t は 32 ビットの符号付き整数であり、AMF の
+// ワイド文字列 (amf_int32 の配列) とそのまま相互変換できる。
 // ---------------------------------------------------------------------------
 
-/// ヌル終端の UTF-32 (Linux wchar_t) 文字列を Rust 文字列に変換する
+/// ヌル終端の AMF ワイド文字列を Rust 文字列に変換する
+///
+/// Linux x86_64 の `wchar_t` (UTF-32) を前提とする。
 pub fn from_wstring(buf: &[amf_int32]) -> String {
     buf.iter()
         .take_while(|&&c| c != 0)
@@ -178,7 +183,9 @@ pub fn from_wstring(buf: &[amf_int32]) -> String {
         .collect()
 }
 
-/// Rust 文字列をヌル終端の UTF-32 (Linux wchar_t) 配列に変換する
+/// Rust 文字列をヌル終端の AMF ワイド文字列に変換する
+///
+/// Linux x86_64 の `wchar_t` (UTF-32) を前提とする。
 pub fn to_wstring(s: &str) -> Vec<amf_int32> {
     s.chars()
         .map(|c| c as amf_int32)

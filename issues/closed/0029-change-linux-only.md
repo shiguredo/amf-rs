@@ -1,7 +1,7 @@
 # Windows / macOS の死にコードを削除し、対応プラットフォームを README に明記する
 
 - Created: 2026-11-10
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-11-19
 - Branch: feature/change-linux-only
 - Polished: {YYYY-MM-DD}
 - Reporter: @melpon
@@ -41,3 +41,11 @@ Windows 上でビルドすると bindgen が生成する `wchar_t` も `u16` に
 - README に Windows / macOS が未対応であることが書かれている。
 - `CHANGES.md` の `## develop` の `### misc` に `[UPDATE]` が追記されている。
 - Linux x86_64 で `cargo clippy --workspace --all-targets -- -D warnings` と `cargo test --workspace` が通る。
+
+## 解決方法
+
+`src/dl.rs` から Windows 向けの `#[cfg(windows)] mod windows` と macOS 向けの `RTLD_LOCAL` 分岐を削除し、`DynLib` が Linux の `dlopen` だけを使う構成にした。`AMF_DLL_NAME` と `to_wstring` / `from_wstring` のコメントには Linux x86_64 前提を明記した。
+
+README の動作要件に Windows と macOS が未対応であることを追記し、`CHANGES.md` の `## develop` の `### misc` に `[UPDATE]` を追加した。
+
+Linux x86_64 の AMD GPU 環境で `cargo clippy --workspace --all-targets -- -D warnings` と `cargo test --workspace` が通ることを確認した (114 テスト成功)。

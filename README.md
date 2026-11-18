@@ -44,6 +44,8 @@ AMF ランタイムライブラリ (libamfrt64.so.1) は AMD GPU ドライバー
 - Vulkan ドライバー
 - ビルド時: git
 
+対応プラットフォームは Linux x86_64 のみです。Windows と macOS には対応していません。
+
 ### 動作確認済み環境
 
 - AMD Ryzen 9 7940HS
