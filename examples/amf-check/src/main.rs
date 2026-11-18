@@ -5,15 +5,16 @@
 
 use shiguredo_amf::amf::Context;
 use shiguredo_amf::{
-    AmfLibrary, Av1EncoderConfig, BUILD_VERSION, CodecConfig, Decoder, DecoderCodec, DecoderConfig,
-    Encoder, EncoderConfig, FnDecodeHandler, FnEncodeHandler, FrameFormat, H264EncoderConfig,
-    HevcEncoderConfig, RateControlMode, VideoCodecType, VideoProfile, supported_codecs,
+    AmfLibrary, Av1EncoderConfig, BUILD_VERSION, CodecConfig, CodecInfo, Decoder, DecoderCodec,
+    DecoderConfig, Encoder, EncoderConfig, Error as AmfError, FnDecodeHandler, FnEncodeHandler,
+    FrameFormat, H264EncoderConfig, HevcEncoderConfig, RateControlMode, VideoCodecType,
+    VideoProfile, supported_codecs,
 };
 
 #[derive(Debug)]
 enum Error {
     Args(noargs::Error),
-    Amf(shiguredo_amf::Error),
+    Amf(AmfError),
 }
 
 impl std::fmt::Display for Error {
@@ -31,8 +32,8 @@ impl From<noargs::Error> for Error {
     }
 }
 
-impl From<shiguredo_amf::Error> for Error {
-    fn from(e: shiguredo_amf::Error) -> Self {
+impl From<AmfError> for Error {
+    fn from(e: AmfError) -> Self {
         Error::Amf(e)
     }
 }
@@ -132,10 +133,11 @@ fn check_runtime() -> bool {
     }
 }
 
-fn print_codec_support() {
+/// コーデック対応状況を表示する
+fn print_codec_support(codecs: &Result<Vec<CodecInfo>>) {
     println!();
     println!("=== Codec Support (supported_codecs) ===");
-    let codecs = match supported_codecs() {
+    let codecs = match codecs {
         Ok(codecs) => codecs,
         Err(e) => {
             println!("supported_codecs failed: {e}");
@@ -236,7 +238,8 @@ fn check_decoder_init(context: &Context, codec: VideoCodecType) -> bool {
     }
 }
 
-fn check_component_init(width: u32, height: u32) -> bool {
+/// 対応コーデックのエンコーダー / デコーダーを初期化できるか確認する
+fn check_component_init(codecs: &Result<Vec<CodecInfo>>, width: u32, height: u32) -> bool {
     println!();
     println!("=== Component Init ===");
 
@@ -249,7 +252,7 @@ fn check_component_init(width: u32, height: u32) -> bool {
     };
 
     let mut ok = true;
-    let codecs = match supported_codecs() {
+    let codecs = match codecs {
         Ok(codecs) => codecs,
         Err(e) => {
             println!("[context] supported_codecs ... NG ({e})");
@@ -286,10 +289,11 @@ fn main() -> Result<()> {
     let args = parse_args()?;
 
     let mut ok = check_runtime();
-    print_codec_support();
+    let codecs = supported_codecs().map_err(Error::Amf);
+    print_codec_support(&codecs);
 
     // ランタイムがロードできていても、エンコーダー/デコーダー初期化が失敗することがある
-    if !check_component_init(args.width, args.height) {
+    if !check_component_init(&codecs, args.width, args.height) {
         ok = false;
     }
 

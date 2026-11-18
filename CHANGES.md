@@ -115,6 +115,9 @@
   - @voluntas
 - [UPDATE] `rust-toolchain.toml` のツールチェインを MSRV の 1.95 に固定し、CI と devcontainer のツールチェインも 1.95 に統一する
   - @voluntas
+- [UPDATE] `examples/amf-check` の `supported_codecs` 呼び出しを 1 回にまとめる
+  - Vulkan デバイスの初期化とコーデックのプローブの重複をなくす
+  - @melpon
 
 ## 2026.3.0
 
