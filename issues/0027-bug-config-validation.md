@@ -1,7 +1,7 @@
 # `EncoderConfig` / `DecoderConfig` の入力値を検証する
 
 - Created: 2026-11-10
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-11-18
 - Branch: feature/fix-config-validation
 - Polished: {YYYY-MM-DD}
 - Reporter: @melpon
@@ -38,3 +38,9 @@ CODEBASE.md は「ユーザーが渡す値は検証すること」と定めて�
 - エラーメッセージから原因のフィールドが分かる。
 - `cargo test --workspace` が通る。
 - `CHANGES.md` の `## develop` に `[FIX]` を追記する。
+
+## 解決方法
+
+対応しない。CODEBASE.md の「ユーザーが渡す値は検証すること」は、FFI 境界で未定義動作や panic を起こす値を止めるための規約であり、設定値の妥当性を `Encoder::new` / `Decoder::new` の手前で検査することを求めるものではない。FFI 境界で未定義動作や panic を起こす値の検証は引き続き行う。
+
+設定値が AMF の要求を満たさない場合は、AMF の `Init` が返すエラーをそのまま返す。QP の範囲、CBR の `target_kbps`、`framerate_den` の上限、`DecoderConfig` の width / height などをフィールドごとに事前検証すると、AMF の制約を二重に管理することになり、AMF 側の仕様変更に追従できなくなる。そのため、これらの検証は追加しない。
