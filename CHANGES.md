@@ -134,6 +134,8 @@
 - [UPDATE] `examples/amf-check` の `supported_codecs` 呼び出しを 1 回にまとめる
   - Vulkan デバイスの初期化とコーデックのプローブの重複をなくす
   - @melpon
+- [UPDATE] Windows / macOS 向けの未使用の分岐を削除する
+  - @melpon
 
 ## 2026.3.0
 
