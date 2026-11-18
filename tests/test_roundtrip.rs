@@ -5,7 +5,8 @@ use shiguredo_amf::{
     Av1EncoderConfig, Av1Profile, CodecConfig, Decoder, DecoderCodec, DecoderConfig, EncodeOptions,
     EncodedFrame, Encoder, EncoderConfig, FnDecodeHandler, FnEncodeHandler, FrameFormat,
     H264EncoderConfig, H264Profile, HevcEncoderConfig, HevcProfile, MemoryType, PictureType,
-    PlaneType, RateControlMode, ReconfigureParams, SurfaceFormat, frame_type,
+    PlaneType, RateControlMode, ReconfigureParams, SurfaceFormat, VideoCodecType, frame_type,
+    supported_codecs,
 };
 
 pub mod helpers;
@@ -206,6 +207,23 @@ fn psnr_y(original: &[u8], decoded_surface: &Surface, width: usize, height: usiz
 ///
 /// 各 EncodedFrame のデータはコールバックで蓄積される。
 fn encode(context: &Context, config: EncoderConfig, frames: &[Vec<u8>]) -> Vec<EncodedFrame<()>> {
+    encode_with_user_data(context, config, frames, |_| ())
+}
+
+/// 各入力フレームのインデックスからユーザーデータを作り、エンコードして出力を返す
+///
+/// B フレームを有効にすると出力順が入力順と異なるため、どの入力に対応する出力かを
+/// `user_data` で識別するために使う。
+fn encode_with_user_data<U, F>(
+    context: &Context,
+    config: EncoderConfig,
+    frames: &[Vec<u8>],
+    mut user_data: F,
+) -> Vec<EncodedFrame<U>>
+where
+    U: Send + std::fmt::Debug + 'static,
+    F: FnMut(usize) -> U,
+{
     let width = config.width as usize;
     let height = config.height as usize;
     let format = config.frame_format;
@@ -215,7 +233,7 @@ fn encode(context: &Context, config: EncoderConfig, frames: &[Vec<u8>]) -> Vec<E
     let mut encoder = Encoder::new(
         context.clone(),
         config,
-        FnEncodeHandler::<()>::new(move |result| {
+        FnEncodeHandler::<U>::new(move |result| {
             r.lock()
                 .expect("エンコード結果を格納する Mutex のロックに失敗")
                 .push(result.expect("エンコード結果の取得に失敗"));
@@ -226,11 +244,11 @@ fn encode(context: &Context, config: EncoderConfig, frames: &[Vec<u8>]) -> Vec<E
         frame_type: frame_type::UNKNOWN,
     };
 
-    for frame in frames.iter() {
+    for (index, frame) in frames.iter().enumerate() {
         let surface = encoder.alloc_surface().expect("Surface の確保に失敗");
         copy_frame_to_surface(&surface, frame, format, width, height);
         encoder
-            .encode(surface, &options, ())
+            .encode(surface, &options, user_data(index))
             .expect("エンコードに失敗");
     }
     encoder.finish().expect("finish に失敗");
@@ -240,6 +258,47 @@ fn encode(context: &Context, config: EncoderConfig, frames: &[Vec<u8>]) -> Vec<E
         .expect("Arc の参照が残っている")
         .into_inner()
         .expect("エンコード結果を格納する Mutex がポイズンされている")
+}
+
+/// エンコード結果をフレーム単位でデコードし、エンコード時の user_data を引き継ぐ
+fn decode<U>(
+    context: &Context,
+    decoder_codec: DecoderCodec,
+    encoded_frames: Vec<EncodedFrame<U>>,
+) -> Vec<shiguredo_amf::DecodedFrame<U>>
+where
+    U: Send + std::fmt::Debug + 'static,
+{
+    let config = DecoderConfig {
+        codec: decoder_codec,
+    };
+    let result = Arc::new(Mutex::new(Vec::new()));
+    let r = result.clone();
+    let mut decoder = Decoder::new(
+        context.clone(),
+        config,
+        FnDecodeHandler::<U>::new(move |result| {
+            r.lock()
+                .expect("デコード結果を格納する Mutex のロックに失敗")
+                .push(result.expect("デコード結果の取得に失敗"));
+        }),
+    )
+    .expect("デコーダーの作成に失敗");
+
+    // 1 フレーム分のビットストリームを格納した Buffer と、エンコード時の user_data を
+    // デコーダーへ渡す。
+    for encoded in encoded_frames {
+        let (buffer, user_data) = encoded.into_parts();
+        decoder.decode(buffer, user_data).expect("デコードに失敗");
+    }
+
+    decoder.finish().expect("finish に失敗");
+    drop(decoder);
+
+    Arc::try_unwrap(result)
+        .expect("Arc の参照が残っている")
+        .into_inner()
+        .expect("デコード結果を格納する Mutex がポイズンされている")
 }
 
 /// フレームごとに指定したフレームタイプでエンコードし、出力を返す
@@ -430,46 +489,6 @@ fn av1_contains_sequence_header_obu(data: &[u8]) -> bool {
     false
 }
 
-/// エンコード済みフレームをフレーム単位でデコードして返すヘルパー
-///
-/// AMF デコーダーはフレーム単位でデータを受け取る必要がある。
-fn decode(
-    context: &Context,
-    decoder_codec: DecoderCodec,
-    encoded_frames: Vec<EncodedFrame<()>>,
-) -> Vec<shiguredo_amf::DecodedFrame<()>> {
-    let config = DecoderConfig {
-        codec: decoder_codec,
-    };
-    let result = Arc::new(Mutex::new(Vec::new()));
-    let r = result.clone();
-    let mut decoder = Decoder::new(
-        context.clone(),
-        config,
-        FnDecodeHandler::<()>::new(move |result| {
-            r.lock()
-                .expect("デコード結果を格納する Mutex のロックに失敗")
-                .push(result.expect("デコード結果の取得に失敗"));
-        }),
-    )
-    .expect("デコーダーの作成に失敗");
-
-    // フレーム単位でデコーダーに送信する
-    for encoded in encoded_frames {
-        decoder
-            .decode(encoded.into_parts().0, ())
-            .expect("デコードに失敗");
-    }
-
-    decoder.finish().expect("finish に失敗");
-    drop(decoder);
-
-    Arc::try_unwrap(result)
-        .expect("Arc の参照が残っている")
-        .into_inner()
-        .expect("デコード結果を格納する Mutex がポイズンされている")
-}
-
 /// エンコード→デコードのラウンドトリップを検証するヘルパー
 fn roundtrip(
     encoder_config: EncoderConfig,
@@ -592,6 +611,99 @@ fn test_roundtrip_h264_cqp() {
     config.gop_pic_size = Some(10);
 
     roundtrip_colorbar(config, DecoderCodec::H264, 10, 25.0);
+}
+
+/// H.264 で B フレームを有効にしたとき、全フレームが 1 回ずつ出力され、
+/// user_data が対応する入力フレームに付くことを確認する
+///
+/// B フレームに対応していない GPU ではテストをスキップする。
+#[test]
+fn test_roundtrip_h264_b_pic_pattern_user_data() {
+    let supports_b_frames = supported_codecs()
+        .expect("コーデック対応状況の取得に失敗")
+        .into_iter()
+        .find(|info| info.codec == VideoCodecType::H264)
+        .and_then(|info| info.encoding)
+        .and_then(|encoding| encoding.supports_frame_reordering)
+        .unwrap_or(false);
+    if !supports_b_frames {
+        eprintln!("H.264 の B フレームに対応していないためテストをスキップする");
+        return;
+    }
+
+    let mut config = EncoderConfig::new(
+        CodecConfig::H264(H264EncoderConfig {
+            profile: Some(H264Profile::High),
+        }),
+        320,
+        240,
+        FrameFormat::Nv12,
+        30,
+        1,
+        RateControlMode::Cbr,
+    );
+    config.target_kbps = Some(1000);
+    config.gop_pic_size = Some(30);
+    // 1 GOP に 2 枚の B フレームを含める
+    config.b_pic_pattern = Some(2);
+
+    let num_frames = 20;
+    let width = config.width as usize;
+    let height = config.height as usize;
+    let input_frames: Vec<Vec<u8>> = (0..num_frames)
+        .map(|index| generate_dummy_nv12(width, height, index))
+        .collect();
+
+    let context = create_context();
+    let encoded_frames = encode_with_user_data(&context, config, &input_frames, |index| index);
+
+    assert_eq!(
+        encoded_frames.len(),
+        num_frames,
+        "入力したフレーム数と出力フレーム数が一致しない"
+    );
+    let b_count = encoded_frames
+        .iter()
+        .filter(|frame| frame.picture_type() == PictureType::B)
+        .count();
+    assert!(b_count >= 1, "B フレームが 1 枚も出力されていない");
+
+    // 各 user_data が 1 回ずつ出力されることを確認する。
+    let mut counts = vec![0usize; num_frames];
+    for frame in &encoded_frames {
+        let index = *frame.user_data();
+        assert!(index < num_frames, "user_data {index} が範囲外");
+        counts[index] += 1;
+    }
+    for (index, count) in counts.iter().enumerate() {
+        assert_eq!(
+            *count, 1,
+            "user_data {index} のフレームが {count} 回出力された"
+        );
+    }
+
+    // デコード結果の内容と user_data を突き合わせ、対応付けが正しいことを確認する。
+    let decoded_frames = decode(&context, DecoderCodec::H264, encoded_frames);
+    assert_eq!(
+        decoded_frames.len(),
+        num_frames,
+        "デコードされたフレーム数が入力したフレーム数と一致しない"
+    );
+    for frame in &decoded_frames {
+        let index = *frame.user_data();
+        let own_psnr = psnr_y(&input_frames[index], frame.surface(), width, height);
+        for (other, other_frame) in input_frames.iter().enumerate() {
+            if other == index {
+                continue;
+            }
+            let other_psnr = psnr_y(other_frame, frame.surface(), width, height);
+            assert!(
+                own_psnr > other_psnr + 3.0,
+                "user_data {index} のフレームが入力 {other} に近い \
+                 (一致する入力との PSNR {own_psnr:.1} dB, 入力 {other} との PSNR {other_psnr:.1} dB)"
+            );
+        }
+    }
 }
 
 /// H.264 で IDR フレームを強制してラウンドトリップする

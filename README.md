@@ -31,6 +31,7 @@ AMF ランタイムライブラリ (libamfrt64.so.1) は AMD GPU ドライバー
 - エンコード入力フォーマット選択 (AMD Radeon 780M では NV12 / YV12 / I420 / BGRA / ARGB / RGBA / YUY2 / P010 を確認済み。P010 は HEVC と AV1 で利用できる)
 - デコード出力は NV12 フォーマット
 - フレーム単位のエンコードオプション (IDR フレーム強制)
+- B フレーム (H.264 / AV1、GPU と AMF が対応している場合)
 - エンコード中の動的プロパティ再設定 (`reconfigure`)
 - CQP / CBR / VBR / LCVBR / QVBR / HQVBR / HQCBR レート制御モード
 - ビルド時に GitHub から AMF ヘッダーを自動取得
@@ -146,12 +147,13 @@ encoder.finish()?;
 // エンコード済みフレームを確認
 for frame in frame_rx.try_iter() {
     println!("encoded bytes: {}", frame.buffer().get_size());
-    println!("pts: {}", frame.buffer().get_pts());
     println!("picture type: {:?}", frame.picture_type());
 }
 ```
 
 エンコード結果は `FnEncodeHandler::new` で包んだクロージャに `Result<EncodedFrame<T>, E>` として通知されます。ハンドラーはワーカースレッドで呼ばれるため、結果は `mpsc::channel` の `Sender` でメインスレッドへ送ります。`E` の既定値は `shiguredo_amf::Error` です。`T` には `encode()` に渡したユーザーデータの型を指定します。
+
+`EncoderConfig::b_pic_pattern` に GOP 内の連続 B フレーム数を指定すると、B フレームを有効にできます。AMF の仕様上の値域は H.264 が 0-3、AV1 が 0-127 で、0 は B フレームなしです。HEVC は B フレームを扱わないため指定できません。B フレームを有効にすると、ハンドラーへの通知順は入力順 (提示順) と異なる符号化順になりますが、`encode()` に渡したユーザーデータは対応する入力フレームの出力に付きます。B フレームに対応していない GPU で 1 以上を指定した場合は `Encoder::new` がエラーを返します。
 
 `reconfigure` で変更できる項目は codec ごとに異なります。
 
@@ -166,7 +168,7 @@ H.265 で `qpb` / `gop_pic_size` を指定するとエラーになります。`f
 - H.264 / H.265: `IDR` / `I` / `P`
 - AV1: `IDR` / `I`
 
-`B` と `REF`、AV1 の `P`、未定義のビットは無視します。複数指定した場合は `IDR`、`I`、`P` の順に優先して 1 つだけ使用します。先頭フレームと GOP の境界では、エンコーダーが IDR を優先するため `I` と `P` の指定が反映されない場合があります。
+`B` と `REF`、AV1 の `P`、未定義のビットは無視します。複数指定した場合は `IDR`、`I`、`P` の順に優先して 1 つだけ使用します。先頭フレームと GOP の境界では、エンコーダーが IDR を優先するため `I` と `P` の指定が反映されない場合があります。B フレームを生成するには `EncoderConfig::b_pic_pattern` を指定します。
 
 ### デコード
 

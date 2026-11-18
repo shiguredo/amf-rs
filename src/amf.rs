@@ -113,12 +113,14 @@ struct PropertyStorageFuncs {
         *const sys::wchar_t,
         sys::AMFVariantStruct,
     ) -> sys::AMF_RESULT,
+    get_property: unsafe extern "C" fn(
+        *mut sys::AMFPropertyStorage,
+        *const sys::wchar_t,
+        *mut sys::AMFVariantStruct,
+    ) -> sys::AMF_RESULT,
 }
 
 /// `AMFPropertyStorage` の RAII ラッパー
-///
-/// `Surface` や `Component` から `property_storage()` で取得すると参照カウントが増え、
-/// `Drop` で減る。
 pub struct PropertyStorage {
     ptr: *mut sys::AMFPropertyStorage,
     f: PropertyStorageFuncs,
@@ -145,6 +147,7 @@ impl PropertyStorage {
             acquire: require_vtbl_fn(vtbl.Acquire, "AMFPropertyStorage::Acquire")?,
             release: require_vtbl_fn(vtbl.Release, "AMFPropertyStorage::Release")?,
             set_property: require_vtbl_fn(vtbl.SetProperty, "AMFPropertyStorage::SetProperty")?,
+            get_property: require_vtbl_fn(vtbl.GetProperty, "AMFPropertyStorage::GetProperty")?,
         };
         if acquire {
             unsafe { (f.acquire)(ptr) };
@@ -232,6 +235,38 @@ impl PropertyStorage {
         let var = sys::AMFVariantStruct::from_rate(num, den);
         let result = unsafe { self.set_property(name_w.as_ptr(), var) };
         Error::check(result, format!("SetProperty({name})"))
+    }
+
+    /// プロパティを取得する
+    ///
+    /// # Safety
+    /// `name` は有効なヌル終端ワイド文字列を指すこと。
+    /// `p_value` は有効な AMFVariantStruct を指すこと。
+    pub unsafe fn get_property(
+        &self,
+        name: *const sys::wchar_t,
+        p_value: *mut sys::AMFVariantStruct,
+    ) -> sys::AMF_RESULT {
+        let _guard = self.state.lock();
+        unsafe { (self.f.get_property)(self.ptr, name, p_value) }
+    }
+
+    /// Int64 プロパティを取得する
+    ///
+    /// # Errors
+    ///
+    /// プロパティを取得できない場合、または値が Int64 でない場合にエラーを返す。
+    pub fn get_property_int64(&self, name: &str) -> Result<i64, Error> {
+        let name_w = sys::to_wstring(name);
+        let mut value = Variant::empty();
+        let result = unsafe { self.get_property(name_w.as_ptr(), value.as_ptr()) };
+        Error::check(result, format!("GetProperty({name})"))?;
+        value.as_int64().ok_or_else(|| {
+            Error::new_custom(
+                "AMFPropertyStorage::GetProperty",
+                &format!("property {name} is not int64"),
+            )
+        })
     }
 }
 
@@ -516,11 +551,6 @@ struct BufferFuncs {
     get_pts: unsafe extern "C" fn(*mut sys::AMFBuffer) -> sys::amf_pts,
     get_duration: unsafe extern "C" fn(*mut sys::AMFBuffer) -> sys::amf_pts,
     get_memory_type: unsafe extern "C" fn(*mut sys::AMFBuffer) -> sys::AMF_MEMORY_TYPE,
-    get_property: unsafe extern "C" fn(
-        *mut sys::AMFBuffer,
-        *const sys::wchar_t,
-        *mut sys::AMFVariantStruct,
-    ) -> sys::AMF_RESULT,
 }
 
 /// `AMFBuffer` の RAII ラッパー
@@ -557,7 +587,6 @@ impl Buffer {
             get_pts: require_vtbl_fn(vtbl.GetPts, "AMFBuffer::GetPts")?,
             get_duration: require_vtbl_fn(vtbl.GetDuration, "AMFBuffer::GetDuration")?,
             get_memory_type: require_vtbl_fn(vtbl.GetMemoryType, "AMFBuffer::GetMemoryType")?,
-            get_property: require_vtbl_fn(vtbl.GetProperty, "AMFBuffer::GetProperty")?,
         };
         if acquire {
             unsafe { (f.acquire)(ptr) };
@@ -741,18 +770,16 @@ impl Buffer {
         unsafe { (self.f.get_duration)(self.ptr) }
     }
 
-    /// プロパティを取得する
-    ///
-    /// # Safety
-    /// `name` は有効なヌル終端ワイド文字列を指すこと。
-    /// `p_value` は有効な AMFVariantStruct を指すこと。
-    pub unsafe fn get_property(
-        &self,
-        name: *const sys::wchar_t,
-        p_value: *mut sys::AMFVariantStruct,
-    ) -> sys::AMF_RESULT {
-        let _guard = self.state.lock();
-        unsafe { (self.f.get_property)(self.ptr, name, p_value) }
+    /// AMFPropertyStorage としてアクセスする
+    pub fn property_storage(&self) -> Result<PropertyStorage, Error> {
+        unsafe {
+            PropertyStorage::from_raw_with_acquire(
+                self.ptr as *mut sys::AMFPropertyStorage,
+                true,
+                Arc::clone(&self.state),
+                self.context.clone(),
+            )
+        }
     }
 }
 
