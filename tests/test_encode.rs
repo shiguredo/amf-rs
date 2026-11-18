@@ -5,8 +5,9 @@ use shiguredo_amf::amf::Surface;
 use shiguredo_amf::ffi::AMF_RESULT;
 use shiguredo_amf::{
     Av1EncoderConfig, Av1Profile, CodecConfig, EncodeHandler, EncodeOptions, EncodedFrame, Encoder,
-    EncoderConfig, Error, FnEncodeHandler, FrameFormat, HevcEncoderConfig, HevcProfile, PlaneType,
-    RateControlMode, ReconfigureParams, VideoCodecType, supported_codecs,
+    EncoderConfig, Error, FnEncodeHandler, FrameFormat, H264EncoderConfig, H264Profile,
+    HevcEncoderConfig, HevcProfile, PlaneType, RateControlMode, ReconfigureParams, VideoCodecType,
+    supported_codecs,
 };
 
 pub mod helpers;
@@ -489,6 +490,105 @@ fn test_encoder_y210_y410_initialization() {
                         "{name} {frame_format:?}: 想定していないエラー: {e}"
                     );
                 }
+            }
+        }
+    }
+}
+
+/// すべてのレート制御モードでエンコーダーを作成し、数フレームをエンコードできることを確認する
+///
+/// レート制御メソッドの enum 値は H.264 と HEVC / AV1 で並びが異なるため、
+/// H.264 / HEVC / AV1 のすべてのモードについて、実際の AMF がその値を受け付けて
+/// 出力を返すことを確認する。設定値そのものの同一性は bindgen が生成する enum の
+/// 定義で担保する。
+#[test]
+fn test_encoder_all_rate_control_modes() {
+    let context = create_context();
+    let codecs = [
+        (
+            "H.264",
+            CodecConfig::H264(H264EncoderConfig {
+                profile: Some(H264Profile::High),
+            }),
+        ),
+        ("HEVC", hevc_main()),
+        ("AV1", av1_main()),
+    ];
+    let modes = [
+        RateControlMode::Cqp,
+        RateControlMode::Cbr,
+        RateControlMode::Vbr,
+        RateControlMode::LatencyConstrainedVbr,
+        RateControlMode::QualityVbr,
+        RateControlMode::HighQualityVbr,
+        RateControlMode::HighQualityCbr,
+    ];
+
+    for (codec_name, codec) in codecs {
+        for mode in modes {
+            let mut config =
+                EncoderConfig::new(codec.clone(), 320, 240, FrameFormat::Nv12, 30, 1, mode);
+            // CQP は QP、それ以外のモードはビットレートでレートを制御する。
+            // 各モードを初期化できるよう、QP またはビットレートを指定する。
+            match mode {
+                RateControlMode::Cqp => {
+                    config.qpi = Some(26);
+                    config.qpp = Some(28);
+                }
+                _ => {
+                    config.target_kbps = Some(1000);
+                    config.max_kbps = Some(1000);
+                }
+            }
+
+            let (tx, rx) = mpsc::channel();
+            let mut encoder = Encoder::new(
+                context.clone(),
+                config,
+                FnEncodeHandler::<()>::new(move |result| {
+                    tx.send(result).expect("エンコード結果の送信に失敗");
+                }),
+            )
+            .unwrap_or_else(|error| {
+                panic!("{codec_name} {mode:?}: エンコーダーの作成に失敗: {error}")
+            });
+
+            let num_frames = 3;
+            for frame_index in 0..num_frames {
+                let surface = encoder.alloc_surface().unwrap_or_else(|error| {
+                    panic!("{codec_name} {mode:?}: Surface の確保に失敗: {error}")
+                });
+                let data = generate_dummy_nv12(320, 240, frame_index);
+                copy_nv12_to_surface(&surface, &data, 320, 240);
+                encoder
+                    .encode(surface, &EncodeOptions::default(), ())
+                    .unwrap_or_else(|error| {
+                        panic!(
+                            "{codec_name} {mode:?}: フレーム {frame_index} のエンコードに失敗: {error}"
+                        )
+                    });
+            }
+            encoder
+                .finish()
+                .unwrap_or_else(|error| panic!("{codec_name} {mode:?}: finish に失敗: {error}"));
+            drop(encoder);
+
+            let frames: Vec<_> = rx.try_iter().collect();
+            assert_eq!(
+                frames.len(),
+                num_frames,
+                "{codec_name} {mode:?}: エンコードされたフレーム数が一致しない"
+            );
+            for (frame_index, result) in frames.iter().enumerate() {
+                let frame = result.as_ref().unwrap_or_else(|error| {
+                    panic!(
+                        "{codec_name} {mode:?}: フレーム {frame_index} のエンコードに失敗: {error}"
+                    )
+                });
+                assert!(
+                    frame.buffer().get_size() > 0,
+                    "{codec_name} {mode:?}: フレーム {frame_index} のビットストリームが空"
+                );
             }
         }
     }

@@ -1,7 +1,7 @@
 # レート制御のマジックナンバーを enum 化する
 
 - Created: 2026-11-10
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-11-19
 - Branch: feature/refactor-rate-control-enums
 - Polished: {YYYY-MM-DD}
 - Reporter: @melpon
@@ -32,3 +32,13 @@
 - 既存のエンコード結果が変わらない。
 - `cargo test --workspace` が通る。
 - `CHANGES.md` の `## develop` の `### misc` にリファクタリングとして追記する。
+
+## 解決方法
+
+- `build.rs` の bindgen 設定に `AMF_VIDEO_ENCODER_RATE_CONTROL_METHOD_ENUM`、`AMF_VIDEO_ENCODER_HEVC_RATE_CONTROL_METHOD_ENUM`、`AMF_VIDEO_ENCODER_AV1_RATE_CONTROL_METHOD_ENUM` の `rustified_enum` を追加した。
+- `RateControlMode` にコーデック別の変換メソッド `to_h264` / `to_hevc` / `to_av1` を追加し、AMF の enum variant へ変換してから `AMF_VIDEO_ENCODER_*_RATE_CONTROL_METHOD` に設定するようにした。レート制御メソッドの数値リテラルは削除した。
+- 生成された enum の判別子が旧数値表と一致することを確認した。H.264 は 0-6、HEVC と AV1 は 0, 3, 2, 1, 4, 5, 6 である。
+- docs.rs ビルド用のダミーバインディングに 3 つの enum を追加した。
+- H.264 / HEVC / AV1 の全 7 レート制御モードでエンコーダーを作成し、各 3 フレームをエンコードできることを確認する実機テストを `tests/test_encode.rs` に追加した。
+- AMD GPU 実機で `cargo fmt --all -- --check`、`cargo clippy --workspace --all-targets -- -D warnings`、`cargo test --workspace` を実行し、全 115 テストが成功した。`DOCS_RS=1 cargo doc --no-deps` も成功した。
+- `CHANGES.md` の `## develop` の `### misc` に `[UPDATE]` を追記した。
