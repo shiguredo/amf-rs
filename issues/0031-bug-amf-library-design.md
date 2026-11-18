@@ -1,7 +1,7 @@
 # `AmfLibrary` の二重遅延を整理し、`init_vulkan` の参照リークを修正する
 
 - Created: 2026-11-10
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-11-19
 - Branch: feature/fix-amf-library-design
 - Polished: {YYYY-MM-DD}
 - Refreshed: 2026-11-18
@@ -36,3 +36,11 @@
 - `init_vulkan` の vtable 欠落経路の参照カウントを検証するテストが追加される。
 - `cargo test --workspace` が通る。
 - `CHANGES.md` の `## develop` に `[FIX]` を追記する。
+
+## 解決方法
+
+- `Context::init_vulkan` で `AMFContext1` の参照を取得した直後に `Context1Guard` を生成し、`InitVulkan` の vtable 取得に失敗して早期リターンする場合も `Drop` で `Release` するようにした。
+- `ensure_inner` の doc に、AMF ランタイムの初期化に成功した場合だけ結果をキャッシュし、失敗した場合は次回の呼び出しで再試行する方針を追記した。共有ロックの目的と `# Errors` も doc に明記した。
+- vtable 欠落経路は実際の AMF ランタイムでは再現できず、モックやスタブを使わない方針のため専用のテストは追加していない。`Context1Guard` を `InitVulkan` の vtable 取得より先に生成する構造で、取得に失敗した場合も `Release` されることを担保している。
+- 既存の `test_context_clone_and_handles_increment_ref_count` を含む `cargo test --workspace` を AMD GPU 実機で実行し、成功することを確認した。
+- `CHANGES.md` の `## develop` に `[FIX]` を追記した。
