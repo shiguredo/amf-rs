@@ -1,7 +1,7 @@
 # 未使用の AMF ラッパー API を削除する
 
 - Created: 2026-11-10
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-11-18
 - Branch: feature/refactor-remove-unused-api
 - Polished: {YYYY-MM-DD}
 - Reporter: @melpon
@@ -40,3 +40,11 @@
 - `re_init` と `flush` は残っている。
 - `cargo clippy --workspace --all-targets -- -D warnings` と `cargo test --workspace` が通る。
 - `CHANGES.md` の `## develop` に `[CHANGE]` を追記する。
+
+## 解決方法
+
+対応しない。公開クレートの API を「クレート内で未使用」という理由で削除する方針は採用しない。`shiguredo_amf` は crates.io で公開されており、外部からの利用の有無をリポジトリ内の参照だけで判断できない。現在のテストも `Surface` / `Buffer` / `Plane` / `PropertyStorage` の `into_raw` / `from_raw`、`set_duration`、`get_duration`、`get_vpitch`、`Context::as_ptr` を使用しており、「クレート内外から未使用」という前提は成立していない。
+
+`Component::get_context` は AMF の `GetContext()` が返す借用ポインタを扱う API であり、参照カウントを持つ `Context` を返す `Component::context()` とは所有権と寿命の契約が異なる。重複として削除できるものではない。`as_ptr` / `into_raw` などの低レベル API は、`get_native` などと同様に interop 用の escape hatch として残す。誤用を防ぐために削除するのではなく、返されるポインタの有効期間と `Release` の責任を doc に明記する。
+
+`buf_native` の null チェックは公開 API とは無関係な内部実装の話であり、本 issue の範囲から外す。`AMFVariantStruct` の未使用コンストラクタは `ffi` 側の semver 対象外ヘルパーであり、本 issue では扱わない。
