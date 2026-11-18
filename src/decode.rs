@@ -145,6 +145,13 @@ enum WorkerCommand<T> {
 // ---------------------------------------------------------------------------
 
 /// AMF ハードウェアデコーダー
+///
+/// デコード結果は、[`Decoder::new`] に渡したハンドラーへワーカースレッドから通知される。
+///
+/// # Drop
+///
+/// [`Decoder::finish`] を呼ばずに drop した場合、ワーカーが保留している入力の
+/// `user_data` と出力は通知されずに破棄される。
 pub struct Decoder<H: DecodeHandler> {
     component: Component,
     context: Context,
@@ -238,6 +245,11 @@ impl<H: DecodeHandler> Decoder<H> {
     /// `buffer` はこのデコーダーと同じ `Context` から確保したものでなければならない。
     /// 別の Context から確保した Buffer を渡した場合はエラーを返す。`buffer` が他の
     /// ハンドルと共有されている場合もエラーを返す。
+    ///
+    /// # Errors
+    ///
+    /// `finish` 済みの場合、`buffer` の状態が操作に適していない場合、または
+    /// AMF の操作に失敗した場合にエラーを返す。
     pub fn decode(&mut self, buffer: Buffer, user_data: H::UserData) -> Result<(), Error> {
         if self.cmd_tx.is_none() {
             return Err(Error::new_custom(
@@ -328,10 +340,13 @@ impl<H: DecodeHandler> Decoder<H> {
 
     /// 残りのフレームを出力させ、ハンドラーへの通知が完了するまで待つ。
     ///
-    /// 処理中に発生したエラーはハンドラーへ通知される。ワーカーが既に終了している
-    /// 場合や Drain に失敗した場合は `Err` を返す。
+    /// 処理中に発生したエラーはハンドラーへ通知される。
     ///
-    /// `finish` が成功した後に再度 `finish` を呼ぶと `Err` を返す。
+    /// # Errors
+    ///
+    /// `finish` 済みの場合、AMF の操作に失敗した場合、またはワーカーが停止して
+    /// いる場合にエラーを返す。ハンドラーが panic した場合もワーカーが停止したもの
+    /// として扱う。
     pub fn finish(&mut self) -> Result<(), Error> {
         if self.cmd_tx.is_none() {
             return Err(Error::new_custom(
@@ -347,21 +362,40 @@ impl<H: DecodeHandler> Decoder<H> {
             Error::check(result, "AMFComponent::Drain")?;
         }
 
-        // Drain が成功してから `cmd_tx` を取り出す。finish 中は `cmd_tx` を None に
-        // して decode と再 finish を拒否し、関数を抜けるときにチャネルを閉じる。
+        // Drain に成功してから `cmd_tx` を取り出す。以降は終了済みとして扱い、
+        // `decode` / 再度の `finish` を拒否する。Drain がエラーになった場合は
+        // `cmd_tx` を保持したままなので、呼び出し側は `finish` をやり直せる。
         let cmd_tx = self
             .cmd_tx
             .take()
             .expect("cmd_tx must be set before finish");
         let (tx, rx) = mpsc::sync_channel(1);
-        cmd_tx
-            .send(WorkerCommand::Finish(tx))
-            .map_err(|_| Error::new_custom("Decoder::finish", "worker thread terminated"))?;
+        let send_result = cmd_tx.send(WorkerCommand::Finish(tx));
 
-        rx.recv()
-            .map_err(|_| Error::new_custom("Decoder::finish", "worker thread terminated"))?;
+        // Finish を送れなかった場合はワーカーの受信側が既に破棄されているため、
+        // ワーカーは終了済みか終了処理中である。なので送信結果にかかわらず
+        // join で待つ。
+        let receive_result = match &send_result {
+            Ok(()) => rx.recv().map_err(|_| ()),
+            Err(_) => Err(()),
+        };
+        let join_result = match self.poll_thread.take() {
+            Some(handle) => handle.join(),
+            None => Ok(()),
+        };
 
-        Ok(())
+        match (receive_result, join_result) {
+            (Ok(()), Ok(())) => Ok(()),
+            // ハンドラーの panic は、panic の内容をエラーに含めずに返す。
+            (_, Err(_)) => Err(Error::new_custom(
+                "Decoder::finish",
+                "worker thread panicked",
+            )),
+            (Err(()), Ok(())) => Err(Error::new_custom(
+                "Decoder::finish",
+                "worker thread terminated",
+            )),
+        }
     }
 }
 
@@ -372,10 +406,17 @@ impl<H: DecodeHandler> Drop for Decoder<H> {
         self.cmd_tx = None;
 
         if let Some(handle) = self.poll_thread.take() {
-            let _ = handle.join();
+            // Drop はエラーを返せないため、ハンドラーの panic はログに記録する。
+            if handle.join().is_err() {
+                tracing::error!("Decoder::drop: decoder worker thread panicked");
+            }
         }
 
-        let _ = self.component.terminate();
+        // 戻り値を返せない後始末であるため、失敗は記録だけ行う。
+        let result = self.component.terminate();
+        if result != AMF_RESULT::AMF_OK {
+            tracing::error!("Decoder::drop: AMFComponent::Terminate failed: {result:?}");
+        }
     }
 }
 

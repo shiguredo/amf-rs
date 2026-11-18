@@ -415,6 +415,13 @@ struct DynamicPropertyNames {
 // ---------------------------------------------------------------------------
 
 /// AMF ハードウェアエンコーダー
+///
+/// エンコード結果は、[`Encoder::new`] に渡したハンドラーへワーカースレッドから通知される。
+///
+/// # Drop
+///
+/// [`Encoder::finish`] を呼ばずに drop した場合、ワーカーが保留している入力の
+/// `user_data` と出力は通知されずに破棄される。
 pub struct Encoder<H: EncodeHandler> {
     component: Component,
     context: Context,
@@ -602,9 +609,17 @@ impl<H: EncodeHandler> Encoder<H> {
     ///
     /// # Errors
     ///
-    /// `params` の値が不正な場合、または AMF のプロパティを設定できない場合に
-    /// エラーを返す。コーデックが対応していない項目を指定した場合も含む。
+    /// `finish` 済みの場合、`params` の値が不正な場合、または AMF の操作に失敗
+    /// した場合にエラーを返す。利用するコーデックが指定した項目に対応していない
+    /// 場合も含む。
     pub fn reconfigure(&mut self, params: ReconfigureParams) -> Result<(), Error> {
+        if self.cmd_tx.is_none() {
+            return Err(Error::new_custom(
+                "Encoder::reconfigure",
+                "encoder is already finished",
+            ));
+        }
+
         // HEVC には B フレーム用の QP プロパティがない。また AMF の HEVC では
         // GOP サイズが初期化前の静的プロパティであり、H.264 の IDRPeriod や
         // AV1 の GOPSize と異なり初期化後には変更できない。再設定では指定できない。
@@ -1002,14 +1017,21 @@ impl<H: EncodeHandler> Encoder<H> {
     ///
     /// # Errors
     ///
-    /// `surface` の状態が操作に適していない場合、または AMF への入力に失敗した
-    /// 場合にエラーを返す。
+    /// `finish` 済みの場合、`surface` の状態が操作に適していない場合、または
+    /// AMF の操作に失敗した場合にエラーを返す。
     pub fn encode(
         &mut self,
         surface: Surface,
         options: &EncodeOptions,
         user_data: H::UserData,
     ) -> Result<(), Error> {
+        if self.cmd_tx.is_none() {
+            return Err(Error::new_custom(
+                "Encoder::encode",
+                "encoder is already finished",
+            ));
+        }
+
         // AMF は同じ Context に載ったオブジェクトの受け渡しを前提としているため、
         // 投入前に同じ Context のハンドルであることを確認する。
         if surface.context() != self.context {
@@ -1169,9 +1191,21 @@ impl<H: EncodeHandler> Encoder<H> {
 
     /// 残りのフレームを出力させ、ハンドラーへの通知が完了するまで待つ。
     ///
-    /// 処理中に発生したエラーはハンドラーへ通知される。ワーカーが既に終了している
-    /// 場合や Drain に失敗した場合は `Err` を返す。
+    /// 処理中に発生したエラーはハンドラーへ通知される。
+    ///
+    /// # Errors
+    ///
+    /// `finish` 済みの場合、AMF の操作に失敗した場合、またはワーカーが停止して
+    /// いる場合にエラーを返す。ハンドラーが panic した場合もワーカーが停止したもの
+    /// として扱う。
     pub fn finish(&mut self) -> Result<(), Error> {
+        if self.cmd_tx.is_none() {
+            return Err(Error::new_custom(
+                "Encoder::finish",
+                "encoder is already finished",
+            ));
+        }
+
         // Drain を呼び出して残りのフレームを出力させる
         let result = self.component.drain();
         // AMF_INPUT_FULL は Drain 中に返ることがあるが無視する
@@ -1179,19 +1213,42 @@ impl<H: EncodeHandler> Encoder<H> {
             Error::check(result, "AMFComponent::Drain")?;
         }
 
+        // Drain に成功してから `cmd_tx` を取り出す。以降は終了済みとして扱い、
+        // `encode` / `reconfigure` / 再度の `finish` を拒否する。Drain がエラーに
+        // なった場合は `cmd_tx` を保持したままなので、呼び出し側は `finish` をやり直せる。
+        let cmd_tx = self
+            .cmd_tx
+            .take()
+            .expect("cmd_tx must be set before finish");
+
         // Finish コマンドでワーカースレッドに残りの出力を処理させる
         let (tx, rx) = mpsc::sync_channel(1);
-        self.cmd_tx
-            .as_ref()
-            .expect("cmd_tx must be set before finish")
-            .send(WorkerCommand::Finish(tx))
-            .map_err(|_| Error::new_custom("Encoder::finish", "worker thread terminated"))?;
+        let send_result = cmd_tx.send(WorkerCommand::Finish(tx));
 
-        // ワーカーの完了を待つ
-        rx.recv()
-            .map_err(|_| Error::new_custom("Encoder::finish", "worker thread terminated"))?;
+        // Finish を送れなかった場合はワーカーの受信側が既に破棄されているため、
+        // ワーカーは終了済みか終了処理中である。なので送信結果にかかわらず
+        // join で待つ。
+        let receive_result = match &send_result {
+            Ok(()) => rx.recv().map_err(|_| ()),
+            Err(_) => Err(()),
+        };
+        let join_result = match self.poll_thread.take() {
+            Some(handle) => handle.join(),
+            None => Ok(()),
+        };
 
-        Ok(())
+        match (receive_result, join_result) {
+            (Ok(()), Ok(())) => Ok(()),
+            // ハンドラーの panic は、panic の内容をエラーに含めずに返す。
+            (_, Err(_)) => Err(Error::new_custom(
+                "Encoder::finish",
+                "worker thread panicked",
+            )),
+            (Err(()), Ok(())) => Err(Error::new_custom(
+                "Encoder::finish",
+                "worker thread terminated",
+            )),
+        }
     }
 }
 
@@ -1203,10 +1260,17 @@ impl<H: EncodeHandler> Drop for Encoder<H> {
         self.cmd_tx = None;
 
         if let Some(handle) = self.poll_thread.take() {
-            let _ = handle.join();
+            // Drop はエラーを返せないため、ハンドラーの panic はログに記録する。
+            if handle.join().is_err() {
+                tracing::error!("Encoder::drop: encoder worker thread panicked");
+            }
         }
 
-        let _ = self.component.terminate();
+        // 戻り値を返せない後始末であるため、失敗は記録だけ行う。
+        let result = self.component.terminate();
+        if result != AMF_RESULT::AMF_OK {
+            tracing::error!("Encoder::drop: AMFComponent::Terminate failed: {result:?}");
+        }
     }
 }
 
