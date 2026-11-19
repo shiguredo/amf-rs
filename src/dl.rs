@@ -4,6 +4,8 @@ use std::ffi::{CStr, CString, c_char, c_int, c_void};
 use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
 
+use crate::error::{EnvironmentError, Error};
+
 /// 動的ライブラリのハンドル
 pub(crate) struct DynLib {
     handle: *mut c_void,
@@ -37,14 +39,13 @@ impl DynLib {
     ///   (`assert_eq!` でサイズチェックを行うが、型の正しさは呼び出し側が保証する)
     /// - `transmute_copy` により生ポインタを `T` にビットキャストするため、
     ///   `T` が実際のシンボルの ABI と一致しない場合は未定義動作になる
-    pub(crate) unsafe fn get<T>(&self, symbol: &[u8]) -> Result<T, String> {
+    pub(crate) unsafe fn get<T>(&self, symbol: &[u8]) -> Result<T, Error> {
         assert_eq!(
             std::mem::size_of::<T>(),
             std::mem::size_of::<*mut c_void>(),
             "T must be pointer-sized"
         );
-        let c_symbol =
-            CString::new(symbol).map_err(|_| "symbol name contains null byte".to_string())?;
+        let c_symbol = CString::new(symbol)?;
         let ptr = unsafe { self.sym(&c_symbol)? };
         Ok(unsafe { std::mem::transmute_copy(&ptr) })
     }
@@ -52,20 +53,23 @@ impl DynLib {
     /// 指定したパスの動的ライブラリを開く
     ///
     /// ライブラリを開けない場合は `Err` を返す。
-    pub(crate) fn open(path: &Path) -> Result<Self, String> {
-        let c_path = CString::new(path.as_os_str().as_bytes())
-            .map_err(|_| "path contains null byte".to_string())?;
+    pub(crate) fn open(path: &Path) -> Result<Self, Error> {
+        let c_path = CString::new(path.as_os_str().as_bytes())?;
         unsafe {
             dlerror();
             let handle = dlopen(c_path.as_ptr(), DLOPEN_FLAGS);
             if handle.is_null() {
                 let err = dlerror();
-                let msg = if err.is_null() {
-                    format!("failed to load library: {}", path.display())
+                let source = if err.is_null() {
+                    std::io::Error::other("dlopen failed without a diagnostic message")
                 } else {
-                    CStr::from_ptr(err).to_string_lossy().into_owned()
+                    std::io::Error::other(CStr::from_ptr(err).to_string_lossy().into_owned())
                 };
-                return Err(msg);
+                return Err(EnvironmentError::new(
+                    format!("failed to load library: {}", path.display()),
+                    source,
+                )
+                .into());
             }
             Ok(DynLib { handle })
         }
@@ -73,18 +77,22 @@ impl DynLib {
 
     // POSIX では dlsym がシンボル値として正当に NULL を返すケースがあるが、
     // このクレートでは AMF の関数ポインタのみを取得するため NULL は常にエラーとして扱う。
-    pub(crate) unsafe fn sym(&self, symbol: &CString) -> Result<*mut c_void, String> {
+    pub(crate) unsafe fn sym(&self, symbol: &CString) -> Result<*mut c_void, Error> {
         unsafe {
             dlerror();
             let ptr = dlsym(self.handle, symbol.as_ptr());
             if ptr.is_null() {
                 let err = dlerror();
-                let msg = if err.is_null() {
-                    format!("symbol '{}' resolved to null", symbol.to_string_lossy())
+                let source = if err.is_null() {
+                    std::io::Error::other("dlsym failed without a diagnostic message")
                 } else {
-                    CStr::from_ptr(err).to_string_lossy().into_owned()
+                    std::io::Error::other(CStr::from_ptr(err).to_string_lossy().into_owned())
                 };
-                return Err(msg);
+                return Err(EnvironmentError::new(
+                    format!("failed to find symbol: {}", symbol.to_string_lossy()),
+                    source,
+                )
+                .into());
             }
             Ok(ptr)
         }

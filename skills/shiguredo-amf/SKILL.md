@@ -188,13 +188,17 @@ AMFContext が破棄され、そのデストラクタが `Terminate` を呼ぶ�
 
 | 型/関数 | 説明 |
 |--------|------|
-| `Error` | AMF 操作のエラー型 (`Debug + Display + std::error::Error`) |
-| `Error::new_custom(function: &'static str, message: &str)` | カスタムエラーを作成 (`status` なし) |
-| `Error::from_amf(AMF_RESULT, function)` | `AMF_RESULT` からエラーを作成 (内部の対応表を参照してメッセージを構築) |
-| `Error::check(AMF_RESULT, function) -> Result<(), Error>` | `AMF_OK` 以外を `Err` にして返す |
-| `Error::status() -> Option<AMF_RESULT>` | エラーに紐づく `AMF_RESULT` を返す (カスタムエラーは `None`) |
+| `Error` | AMF 操作のエラー (`Debug + Display + std::error::Error`) |
+| `Error::InvalidArgument(InvalidArgumentError)` | 利用者が渡した値が API の契約を満たさない |
+| `Error::InvalidState(InvalidStateError)` | オブジェクトの状態が操作に適していない |
+| `Error::Amf(AmfError)` | AMF の呼び出しがエラー status を返した |
+| `Error::Environment(EnvironmentError)` | 動的ライブラリのロードなど実行環境に起因する失敗 |
+| `Error::Internal(InternalError)` | ライブラリまたは AMF の前提が破られた |
+| `AmfError::status() -> AMF_RESULT` | AMF が返した status を返す |
+| `AmfError::operation() -> &str` | エラー status を返した AMF の操作名を返す |
+| `Error::source()` | `Environment` と `Internal` の内側の標準エラーを返す |
 
-`Display` フォーマットは `function() failed[status=AMF_FAIL]: General failure (AMF_FAIL)` のように `function` / `status` / メッセージを含む。`Error::status()` で `AMF_RESULT` を取り出して呼び出し側で分岐できる。
+`Display` は分類ごとに文脈を表示する。AMF のエラーは `AMFComponent::Init() failed: AMF_FAIL` のように操作名と status を 1 回ずつ含む。`Error::Amf` から `AmfError` を取り出し、`status()` で `AMF_RESULT` を取得して分岐できる。
 
 主な `AMF_RESULT` バリアント (`ffi::AMF_RESULT` で公開): `AMF_OK`, `AMF_FAIL`, `AMF_INVALID_ARG`, `AMF_OUT_OF_MEMORY`, `AMF_NOT_SUPPORTED`, `AMF_WRONG_STATE`, `AMF_NO_DEVICE`, `AMF_EOF`, `AMF_REPEAT`, `AMF_INPUT_FULL`, `AMF_NEED_MORE_INPUT`, `AMF_DECODER_NO_FREE_SURFACES`, `AMF_VULKAN_FAILED` 等。
 

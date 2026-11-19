@@ -11,6 +11,12 @@
 
 ## develop
 
+- [CHANGE] `Error` を失敗の分類 enum に変更する
+  - `Error` の `status()` / `new_custom` / `from_amf` / `check` を削除し、`InvalidArgument` / `InvalidState` / `Amf` / `Environment` / `Internal` の variant で失敗の種類を判別できるようにする
+  - `AmfError` / `EnvironmentError` / `InternalError` / `InvalidArgumentError` / `InvalidStateError` を追加する
+  - 標準エラーから `Error` への `From` を実装し、`Error::source()` で内側の標準エラーを取得できるようにする
+  - @melpon
+
 - [CHANGE] `supported_codecs` の戻り値と `CodecInfo` の能力情報を AMF が返す値に基づく形に変更する
   - `supported_codecs` は `Result<Vec<CodecInfo>, Error>` を返す
   - `CodecInfo` の `decoding` / `encoding` を `Option` に変更する

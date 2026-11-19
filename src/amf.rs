@@ -40,7 +40,9 @@
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 
-use crate::error::{Error, require_vtbl_fn};
+use crate::error::{
+    AmfError, Error, InternalError, InvalidArgumentError, InvalidStateError, require_vtbl_fn,
+};
 use crate::sys;
 use crate::types::{MemoryType, PlaneType, SurfaceFormat};
 
@@ -218,7 +220,8 @@ impl PropertyStorage {
         let name_w = sys::to_wstring(name);
         let var = sys::AMFVariantStruct::from_int64(value);
         let result = unsafe { self.set_property(name_w.as_ptr(), var) };
-        Error::check(result, format!("SetProperty({name})"))
+        AmfError::check(result, format!("SetProperty({name})"))?;
+        Ok(())
     }
 
     /// Size プロパティを設定する
@@ -226,7 +229,8 @@ impl PropertyStorage {
         let name_w = sys::to_wstring(name);
         let var = sys::AMFVariantStruct::from_size(width, height);
         let result = unsafe { self.set_property(name_w.as_ptr(), var) };
-        Error::check(result, format!("SetProperty({name})"))
+        AmfError::check(result, format!("SetProperty({name})"))?;
+        Ok(())
     }
 
     /// Rate プロパティを設定する
@@ -234,7 +238,8 @@ impl PropertyStorage {
         let name_w = sys::to_wstring(name);
         let var = sys::AMFVariantStruct::from_rate(num, den);
         let result = unsafe { self.set_property(name_w.as_ptr(), var) };
-        Error::check(result, format!("SetProperty({name})"))
+        AmfError::check(result, format!("SetProperty({name})"))?;
+        Ok(())
     }
 
     /// プロパティを取得する
@@ -260,13 +265,10 @@ impl PropertyStorage {
         let name_w = sys::to_wstring(name);
         let mut value = Variant::empty();
         let result = unsafe { self.get_property(name_w.as_ptr(), value.as_ptr()) };
-        Error::check(result, format!("GetProperty({name})"))?;
-        value.as_int64().ok_or_else(|| {
-            Error::new_custom(
-                "AMFPropertyStorage::GetProperty",
-                &format!("property {name} is not int64"),
-            )
-        })
+        AmfError::check(result, format!("GetProperty({name})"))?;
+        value
+            .as_int64()
+            .ok_or_else(|| InternalError::new(format!("property {name} is not int64")).into())
     }
 
     /// Size プロパティを取得する
@@ -280,13 +282,10 @@ impl PropertyStorage {
         let name_w = sys::to_wstring(name);
         let mut value = Variant::empty();
         let result = unsafe { self.get_property(name_w.as_ptr(), value.as_ptr()) };
-        Error::check(result, format!("GetProperty({name})"))?;
-        value.as_size().ok_or_else(|| {
-            Error::new_custom(
-                "AMFPropertyStorage::GetProperty",
-                &format!("property {name} is not size"),
-            )
-        })
+        AmfError::check(result, format!("GetProperty({name})"))?;
+        value
+            .as_size()
+            .ok_or_else(|| InternalError::new(format!("property {name} is not size")).into())
     }
 }
 
@@ -479,7 +478,9 @@ impl Surface {
         let _guard = self.state.lock();
         let plane = unsafe { (self.f.get_plane)(self.ptr, plane_type.to_amf()) };
         if plane.is_null() {
-            return Err(Error::new_custom("Surface::get_plane", "plane is null"));
+            return Err(
+                InvalidArgumentError::new("the surface does not have the requested plane").into(),
+            );
         }
         unsafe { Plane::from_raw_with_acquire(plane, true, self) }
     }
@@ -492,7 +493,7 @@ impl Surface {
         let _guard = self.state.lock();
         let plane = unsafe { (self.f.get_plane_at)(self.ptr, index) };
         if plane.is_null() {
-            return Err(Error::new_custom("Surface::get_plane_at", "plane is null"));
+            return Err(InvalidArgumentError::new("plane index is out of range").into());
         }
         unsafe { Plane::from_raw_with_acquire(plane, true, self) }
     }
@@ -504,15 +505,15 @@ impl Surface {
     pub fn convert(&self, memory_type: MemoryType) -> Result<(), Error> {
         let _guard = self.state.lock();
         if self.has_planes() {
-            return Err(Error::new_custom(
-                "Surface::convert",
-                "planes are alive; drop planes before converting",
-            ));
+            return Err(
+                InvalidStateError::new("planes are alive; drop planes before converting").into(),
+            );
         }
-        Error::check(
+        AmfError::check(
             unsafe { (self.f.convert)(self.ptr, memory_type.to_amf()) },
             "AMFData::Convert",
-        )
+        )?;
+        Ok(())
     }
 
     /// AMFPropertyStorage としてアクセスする
@@ -693,17 +694,18 @@ impl Buffer {
     /// 指定したサイズを設定できない場合にエラーを返す。
     pub fn set_size(&self, size: usize) -> Result<(), Error> {
         let _guard = self.state.lock();
-        Error::check(
+        AmfError::check(
             unsafe { (self.f.set_size)(self.ptr, size) },
             "AMFBuffer::SetSize",
-        )
+        )?;
+        Ok(())
     }
 
     /// バッファがホストメモリにあることを確認する
-    fn check_host_memory(&self, function: &'static str) -> Result<(), Error> {
+    fn check_host_memory(&self) -> Result<(), Error> {
         let memory_type = unsafe { (self.f.get_memory_type)(self.ptr) };
         if memory_type != sys::AMF_MEMORY_TYPE::AMF_MEMORY_HOST {
-            return Err(Error::new_custom(function, "buffer is not in host memory"));
+            return Err(InvalidStateError::new("buffer is not in host memory").into());
         }
         Ok(())
     }
@@ -727,14 +729,14 @@ impl Buffer {
     /// バッファの内容を Rust のスライスとして扱えない場合にエラーを返す。
     pub unsafe fn as_slice(&self) -> Result<&[u8], Error> {
         let _guard = self.state.lock();
-        self.check_host_memory("Buffer::as_slice")?;
+        self.check_host_memory()?;
         let ptr = unsafe { (self.f.get_native)(self.ptr) } as *const u8;
         let size = unsafe { (self.f.get_size)(self.ptr) };
         if size == 0 {
             return Ok(&[]);
         }
-        validate_slice_ptr("Buffer::as_slice", ptr)?;
-        validate_slice_len("Buffer::as_slice", size)?;
+        validate_slice_ptr(ptr)?;
+        validate_slice_len(size)?;
         // SAFETY: ptr は null でなく、size はスライスの長さとして有効な範囲にあり、
         // バッファは self が生きている間有効である。
         Ok(unsafe { std::slice::from_raw_parts(ptr, size) })
@@ -759,14 +761,14 @@ impl Buffer {
     /// バッファの内容を Rust のスライスとして扱えない場合にエラーを返す。
     pub unsafe fn as_mut_slice(&mut self) -> Result<&mut [u8], Error> {
         let _guard = self.state.lock();
-        self.check_host_memory("Buffer::as_mut_slice")?;
+        self.check_host_memory()?;
         let ptr = unsafe { (self.f.get_native)(self.ptr) } as *mut u8;
         let size = unsafe { (self.f.get_size)(self.ptr) };
         if size == 0 {
             return Ok(&mut []);
         }
-        validate_slice_ptr("Buffer::as_mut_slice", ptr)?;
-        validate_slice_len("Buffer::as_mut_slice", size)?;
+        validate_slice_ptr(ptr)?;
+        validate_slice_len(size)?;
         // SAFETY: ptr は null でなく、size はスライスの長さとして有効な範囲にあり、
         // バッファは self が生きている間有効である。
         Ok(unsafe { std::slice::from_raw_parts_mut(ptr, size) })
@@ -995,10 +997,10 @@ impl<'a> Plane<'a> {
     }
 
     /// 取得元の `Surface` がホストメモリにあることを確認する
-    fn check_host_memory(&self, function: &'static str) -> Result<(), Error> {
+    fn check_host_memory(&self) -> Result<(), Error> {
         let memory_type = unsafe { (self.surface.f.get_memory_type)(self.surface.ptr) };
         if memory_type != sys::AMF_MEMORY_TYPE::AMF_MEMORY_HOST {
-            return Err(Error::new_custom(function, "surface is not in host memory"));
+            return Err(InvalidStateError::new("surface is not in host memory").into());
         }
         Ok(())
     }
@@ -1022,13 +1024,13 @@ impl<'a> Plane<'a> {
     /// プレーンの内容を Rust のスライスとして扱えない場合にエラーを返す。
     pub unsafe fn as_slice(&self) -> Result<&[u8], Error> {
         let _guard = self.surface.state.lock();
-        self.check_host_memory("Plane::as_slice")?;
+        self.check_host_memory()?;
         let ptr = unsafe { (self.f.get_native)(self.ptr) } as *const u8;
         let hpitch = unsafe { (self.f.get_hpitch)(self.ptr) };
         let vpitch = unsafe { (self.f.get_vpitch)(self.ptr) };
         let is_tiled = unsafe { (self.f.is_tiled)(self.ptr) } != 0;
-        let size = plane_slice_len("Plane::as_slice", is_tiled, hpitch, vpitch)?;
-        validate_slice_ptr("Plane::as_slice", ptr)?;
+        let size = plane_slice_len(is_tiled, hpitch, vpitch)?;
+        validate_slice_ptr(ptr)?;
         // SAFETY: ptr は null でなく、size は hpitch と vpitch から計算した
         // スライスの長さとして有効な範囲にあり、プレーンは Surface が生きている間有効である。
         Ok(unsafe { std::slice::from_raw_parts(ptr, size) })
@@ -1054,13 +1056,13 @@ impl<'a> Plane<'a> {
     /// プレーンの内容を Rust のスライスとして扱えない場合にエラーを返す。
     pub unsafe fn as_mut_slice(&mut self) -> Result<&mut [u8], Error> {
         let _guard = self.surface.state.lock();
-        self.check_host_memory("Plane::as_mut_slice")?;
+        self.check_host_memory()?;
         let ptr = unsafe { (self.f.get_native)(self.ptr) } as *mut u8;
         let hpitch = unsafe { (self.f.get_hpitch)(self.ptr) };
         let vpitch = unsafe { (self.f.get_vpitch)(self.ptr) };
         let is_tiled = unsafe { (self.f.is_tiled)(self.ptr) } != 0;
-        let size = plane_slice_len("Plane::as_mut_slice", is_tiled, hpitch, vpitch)?;
-        validate_slice_ptr("Plane::as_mut_slice", ptr)?;
+        let size = plane_slice_len(is_tiled, hpitch, vpitch)?;
+        validate_slice_ptr(ptr)?;
         // SAFETY: ptr は null でなく、size は hpitch と vpitch から計算した
         // スライスの長さとして有効な範囲にあり、プレーンは Surface が生きている間有効である。
         Ok(unsafe { std::slice::from_raw_parts_mut(ptr, size) })
@@ -1097,47 +1099,41 @@ impl Drop for Plane<'_> {
 }
 
 /// スライスの生成に使うポインタが null でないことを検証する
-fn validate_slice_ptr(function: &'static str, ptr: *const u8) -> Result<(), Error> {
+fn validate_slice_ptr(ptr: *const u8) -> Result<(), Error> {
     if ptr.is_null() {
-        return Err(Error::new_custom(function, "native pointer is null"));
+        return Err(InternalError::new("native pointer is null").into());
     }
     Ok(())
 }
 
 /// スライスの長さが Rust のスライスの不変条件を満たすことを検証する
-fn validate_slice_len(function: &'static str, len: usize) -> Result<(), Error> {
+fn validate_slice_len(len: usize) -> Result<(), Error> {
     if len > isize::MAX as usize {
-        return Err(Error::new_custom(
-            function,
-            "slice length exceeds isize::MAX",
-        ));
+        return Err(InternalError::new("slice length exceeds isize::MAX").into());
     }
     Ok(())
 }
 
 /// プレーンのレイアウトを検証し、スライスの長さを計算する
-fn plane_slice_len(
-    function: &'static str,
-    is_tiled: bool,
-    hpitch: i32,
-    vpitch: i32,
-) -> Result<usize, Error> {
+fn plane_slice_len(is_tiled: bool, hpitch: i32, vpitch: i32) -> Result<usize, Error> {
     if is_tiled {
-        return Err(Error::new_custom(function, "plane is tiled"));
+        return Err(InvalidStateError::new("plane is tiled").into());
     }
-    let hpitch =
-        usize::try_from(hpitch).map_err(|_| Error::new_custom(function, "hpitch is negative"))?;
-    let vpitch =
-        usize::try_from(vpitch).map_err(|_| Error::new_custom(function, "vpitch is negative"))?;
-    checked_mul_len(function, hpitch, vpitch)
+    let Ok(hpitch) = usize::try_from(hpitch) else {
+        return Err(InternalError::new("hpitch is negative").into());
+    };
+    let Ok(vpitch) = usize::try_from(vpitch) else {
+        return Err(InternalError::new("vpitch is negative").into());
+    };
+    checked_mul_len(hpitch, vpitch)
 }
 
 /// 2 つの長さの積をスライスの長さとして計算する
-fn checked_mul_len(function: &'static str, a: usize, b: usize) -> Result<usize, Error> {
+fn checked_mul_len(a: usize, b: usize) -> Result<usize, Error> {
     let len = a
         .checked_mul(b)
-        .ok_or_else(|| Error::new_custom(function, "plane size overflows usize"))?;
-    validate_slice_len(function, len)?;
+        .ok_or_else(|| InternalError::new("plane size overflows usize"))?;
+    validate_slice_len(len)?;
     Ok(len)
 }
 
@@ -1252,13 +1248,10 @@ impl Context {
                     &mut surface,
                 )
             };
-            Error::check(result, "AMFContext::AllocSurface")?;
+            AmfError::check(result, "AMFContext::AllocSurface")?;
 
             if surface.is_null() {
-                return Err(Error::new_custom(
-                    "Context::alloc_surface",
-                    "AllocSurface returned null",
-                ));
+                return Err(InternalError::new("AllocSurface returned null").into());
             }
             surface
         };
@@ -1278,13 +1271,10 @@ impl Context {
             let mut buffer: *mut sys::AMFBuffer = std::ptr::null_mut();
             let result =
                 unsafe { (self.f.alloc_buffer)(self.ptr, memory_type.to_amf(), size, &mut buffer) };
-            Error::check(result, "AMFContext::AllocBuffer")?;
+            AmfError::check(result, "AMFContext::AllocBuffer")?;
 
             if buffer.is_null() {
-                return Err(Error::new_custom(
-                    "Context::alloc_buffer",
-                    "AllocBuffer returned null",
-                ));
+                return Err(InternalError::new("AllocBuffer returned null").into());
             }
             buffer
         };
@@ -1305,13 +1295,10 @@ impl Context {
         let result = unsafe {
             (self.f.query_interface)(self.ptr, &sys::IID_AMF_CONTEXT1, &mut context1_ptr)
         };
-        Error::check(result, "AMFContext::QueryInterface(AMFContext1)")?;
+        AmfError::check(result, "AMFContext::QueryInterface(AMFContext1)")?;
 
         if context1_ptr.is_null() {
-            return Err(Error::new_custom(
-                "Context::init_vulkan",
-                "QueryInterface returned null for AMFContext1",
-            ));
+            return Err(InternalError::new("QueryInterface returned null for AMFContext1").into());
         }
 
         let context1 = context1_ptr as *mut sys::AMFContext1;
@@ -1326,7 +1313,8 @@ impl Context {
 
         let init_vulkan = require_vtbl_fn(vtbl.InitVulkan, "AMFContext1::InitVulkan")?;
         let result = unsafe { init_vulkan(context1.ptr, device) };
-        Error::check(result, "AMFContext1::InitVulkan")
+        AmfError::check(result, "AMFContext1::InitVulkan")?;
+        Ok(())
     }
 }
 
@@ -1567,12 +1555,9 @@ impl Component {
         let _guard = self.process_state.lock();
         let mut caps: *mut sys::AMFCaps = std::ptr::null_mut();
         let result = unsafe { (self.f.get_caps)(self.ptr, &mut caps) };
-        Error::check(result, "AMFComponent::GetCaps")?;
+        AmfError::check(result, "AMFComponent::GetCaps")?;
         if caps.is_null() {
-            return Err(Error::new_custom(
-                "AMFComponent::GetCaps",
-                "returned null caps",
-            ));
+            return Err(InternalError::new("GetCaps returned null").into());
         }
         unsafe { Caps::from_raw(caps) }
     }
@@ -1688,12 +1673,9 @@ impl Caps {
     pub(crate) fn get_input_caps(&self) -> Result<IoCaps, Error> {
         let mut io_caps: *mut sys::AMFIOCaps = std::ptr::null_mut();
         let result = unsafe { (self.f.get_input_caps)(self.ptr, &mut io_caps) };
-        Error::check(result, "AMFCaps::GetInputCaps")?;
+        AmfError::check(result, "AMFCaps::GetInputCaps")?;
         if io_caps.is_null() {
-            return Err(Error::new_custom(
-                "AMFCaps::GetInputCaps",
-                "returned null io caps",
-            ));
+            return Err(InternalError::new("GetInputCaps returned null").into());
         }
         unsafe { IoCaps::from_raw(io_caps) }
     }
@@ -1702,12 +1684,9 @@ impl Caps {
     pub(crate) fn get_output_caps(&self) -> Result<IoCaps, Error> {
         let mut io_caps: *mut sys::AMFIOCaps = std::ptr::null_mut();
         let result = unsafe { (self.f.get_output_caps)(self.ptr, &mut io_caps) };
-        Error::check(result, "AMFCaps::GetOutputCaps")?;
+        AmfError::check(result, "AMFCaps::GetOutputCaps")?;
         if io_caps.is_null() {
-            return Err(Error::new_custom(
-                "AMFCaps::GetOutputCaps",
-                "returned null io caps",
-            ));
+            return Err(InternalError::new("GetOutputCaps returned null").into());
         }
         unsafe { IoCaps::from_raw(io_caps) }
     }
@@ -1734,13 +1713,10 @@ impl Caps {
                 value.as_ptr(),
             )
         };
-        Error::check(result, "AMFCaps::GetPropertyAt")?;
+        AmfError::check(result, "AMFCaps::GetPropertyAt")?;
         let name = sys::from_wstring(&name);
         if name.chars().count() >= MAX_NAME_LEN {
-            return Err(Error::new_custom(
-                "AMFCaps::GetPropertyAt",
-                "property name is too long",
-            ));
+            return Err(InternalError::new("property name is too long").into());
         }
         Ok((name, value))
     }
@@ -1966,7 +1942,7 @@ impl IoCaps {
             let mut native = 0;
             let result =
                 unsafe { (self.f.get_format_at)(self.ptr, index, &mut format, &mut native) };
-            Error::check(result, "AMFIOCaps::GetFormatAt")?;
+            AmfError::check(result, "AMFIOCaps::GetFormatAt")?;
             formats.push((format, native != 0));
         }
         Ok(formats)
@@ -1982,7 +1958,7 @@ impl IoCaps {
             let result = unsafe {
                 (self.f.get_memory_type_at)(self.ptr, index, &mut memory_type, &mut native)
             };
-            Error::check(result, "AMFIOCaps::GetMemoryTypeAt")?;
+            AmfError::check(result, "AMFIOCaps::GetMemoryTypeAt")?;
             memory_types.push((memory_type, native != 0));
         }
         Ok(memory_types)
@@ -2280,13 +2256,13 @@ mod tests {
     #[test]
     fn test_validate_slice_ptr_rejects_null() {
         assert!(
-            validate_slice_ptr("test", std::ptr::null()).is_err(),
+            validate_slice_ptr(std::ptr::null()).is_err(),
             "null ポインタが受け入れられた"
         );
 
         let data = [0u8; 1];
         assert!(
-            validate_slice_ptr("test", data.as_ptr()).is_ok(),
+            validate_slice_ptr(data.as_ptr()).is_ok(),
             "null でないポインタが拒否された"
         );
     }
@@ -2295,11 +2271,11 @@ mod tests {
     #[test]
     fn test_validate_slice_len_rejects_too_long() {
         assert!(
-            validate_slice_len("test", isize::MAX as usize).is_ok(),
+            validate_slice_len(isize::MAX as usize).is_ok(),
             "isize::MAX の長さが拒否された"
         );
         assert!(
-            validate_slice_len("test", isize::MAX as usize + 1).is_err(),
+            validate_slice_len(isize::MAX as usize + 1).is_err(),
             "isize::MAX を超える長さが受け入れられた"
         );
     }
@@ -2308,24 +2284,24 @@ mod tests {
     #[test]
     fn test_plane_slice_len_validates_pitch() {
         assert_eq!(
-            plane_slice_len("test", false, 4, 3).expect("正のピッチが拒否された"),
+            plane_slice_len(false, 4, 3).expect("正のピッチが拒否された"),
             12,
             "ピッチの積が一致しない"
         );
         assert!(
-            plane_slice_len("test", false, -1, 3).is_err(),
+            plane_slice_len(false, -1, 3).is_err(),
             "負の hpitch が受け入れられた"
         );
         assert!(
-            plane_slice_len("test", false, 4, -1).is_err(),
+            plane_slice_len(false, 4, -1).is_err(),
             "負の vpitch が受け入れられた"
         );
         assert!(
-            checked_mul_len("test", usize::MAX, 2).is_err(),
+            checked_mul_len(usize::MAX, 2).is_err(),
             "長さの積のオーバーフローが受け入れられた"
         );
         assert!(
-            plane_slice_len("test", true, 4, 3).is_err(),
+            plane_slice_len(true, 4, 3).is_err(),
             "タイル状のプレーンが受け入れられた"
         );
     }

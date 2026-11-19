@@ -3,7 +3,7 @@ use std::sync::{Arc, Mutex};
 use shiguredo_amf::amf::{Context, Surface};
 use shiguredo_amf::{
     Av1EncoderConfig, Av1Profile, CodecConfig, Decoder, DecoderCodec, DecoderConfig, EncodeOptions,
-    EncodedFrame, Encoder, EncoderConfig, FnDecodeHandler, FnEncodeHandler, FrameFormat,
+    EncodedFrame, Encoder, EncoderConfig, Error, FnDecodeHandler, FnEncodeHandler, FrameFormat,
     H264EncoderConfig, H264Profile, HevcEncoderConfig, HevcProfile, MemoryType, PictureType,
     PlaneType, RateControlMode, ReconfigureParams, SurfaceFormat, VideoCodecType, frame_type,
     supported_codecs,
@@ -1333,10 +1333,9 @@ fn test_reconfigure_hevc_rejects_qpb_and_gop() {
             ..ReconfigureParams::default()
         })
         .expect_err("HEVC の qpb を再設定できてしまった");
-    assert_eq!(
-        err.status(),
-        None,
-        "AMF のエラーではなく Encoder::reconfigure のエラーであるべき: {err}"
+    assert!(
+        matches!(&err, Error::InvalidArgument(_)),
+        "Encoder::reconfigure の引数エラーであるべき: {err}"
     );
     assert!(
         err.to_string().contains("qpb is not supported for HEVC"),
@@ -1349,10 +1348,9 @@ fn test_reconfigure_hevc_rejects_qpb_and_gop() {
             ..ReconfigureParams::default()
         })
         .expect_err("HEVC の gop_pic_size を再設定できてしまった");
-    assert_eq!(
-        err.status(),
-        None,
-        "AMF のエラーではなく Encoder::reconfigure のエラーであるべき: {err}"
+    assert!(
+        matches!(&err, Error::InvalidArgument(_)),
+        "Encoder::reconfigure の引数エラーであるべき: {err}"
     );
     assert!(
         err.to_string()
