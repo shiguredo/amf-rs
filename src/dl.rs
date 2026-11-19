@@ -39,6 +39,11 @@ impl DynLib {
     ///   (`assert_eq!` でサイズチェックを行うが、型の正しさは呼び出し側が保証する)
     /// - `transmute_copy` により生ポインタを `T` にビットキャストするため、
     ///   `T` が実際のシンボルの ABI と一致しない場合は未定義動作になる
+    ///
+    /// # Errors
+    ///
+    /// シンボル名に NUL バイトが含まれる場合、またはシンボルを取得できない場合に
+    /// エラーを返す。
     pub(crate) unsafe fn get<T>(&self, symbol: &[u8]) -> Result<T, Error> {
         assert_eq!(
             std::mem::size_of::<T>(),
@@ -52,7 +57,10 @@ impl DynLib {
 
     /// 指定したパスの動的ライブラリを開く
     ///
-    /// ライブラリを開けない場合は `Err` を返す。
+    /// # Errors
+    ///
+    /// パスに NUL バイトが含まれる場合、またはライブラリを開けない場合に
+    /// エラーを返す。ライブラリを開けない場合の原因は `source()` で取得できる。
     pub(crate) fn open(path: &Path) -> Result<Self, Error> {
         let c_path = CString::new(path.as_os_str().as_bytes())?;
         unsafe {
@@ -75,6 +83,11 @@ impl DynLib {
         }
     }
 
+    /// シンボルを取得する
+    ///
+    /// # Errors
+    ///
+    /// シンボルを取得できない場合にエラーを返す。原因は `source()` で取得できる。
     // POSIX では dlsym がシンボル値として正当に NULL を返すケースがあるが、
     // このクレートでは AMF の関数ポインタのみを取得するため NULL は常にエラーとして扱う。
     pub(crate) unsafe fn sym(&self, symbol: &CString) -> Result<*mut c_void, Error> {

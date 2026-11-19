@@ -11,12 +11,6 @@
 
 ## develop
 
-- [CHANGE] `Error` を失敗の分類 enum に変更する
-  - `Error` の `status()` / `new_custom` / `from_amf` / `check` を削除し、`InvalidArgument` / `InvalidState` / `Amf` / `Environment` / `Internal` の variant で失敗の種類を判別できるようにする
-  - `AmfError` / `EnvironmentError` / `InternalError` / `InvalidArgumentError` / `InvalidStateError` を追加する
-  - 標準エラーから `Error` への `From` を実装し、`Error::source()` で内側の標準エラーを取得できるようにする
-  - @melpon
-
 - [CHANGE] `supported_codecs` の戻り値と `CodecInfo` の能力情報を AMF が返す値に基づく形に変更する
   - `supported_codecs` は `Result<Vec<CodecInfo>, Error>` を返す
   - `CodecInfo` の `decoding` / `encoding` を `Option` に変更する
@@ -65,6 +59,13 @@
   - B フレームに対応していない GPU で 1 以上を指定した場合と、B フレームを扱わない HEVC で指定した場合は `Encoder::new` がエラーを返す
   - `AMF_NEED_MORE_INPUT` を入力の受理として扱う
   - 入力フレームに一意な値を設定して入出力を対応付け、入力順と出力順が異なっても `user_data` を対応するフレームへ付ける
+  - @melpon
+- [CHANGE] `Error` を失敗の分類 enum に変更する
+  - `Error` の `status()` / `new_custom` / `from_amf` / `check` を削除し、`InvalidArgument` / `InvalidState` / `Amf` / `Environment` / `Internal` のバリアントで失敗の種類を判別できるようにする
+  - `AmfError` / `EnvironmentError` / `InternalError` / `InvalidArgumentError` / `InvalidStateError` を追加する
+  - `Error::Amf(error)` から `error.status()` / `error.operation()` で AMF のステータスと操作名を取得する
+  - 標準エラーから `Error` への `From` を実装し、`Error::source()` で内側の標準エラーを取得できるようにする
+  - `Display` の形式を変更し、AMF のエラーは操作名とステータスを 1 回だけ表示する。Rust の関数名はメッセージに含めない
   - @melpon
 - [ADD] `PlaneType` を追加する
   - @melpon

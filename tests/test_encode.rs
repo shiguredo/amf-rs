@@ -432,7 +432,7 @@ fn test_encoder_p010_10bit_encoding() {
                 assert_eq!(
                     error.status(),
                     AMF_RESULT::AMF_INVALID_FORMAT,
-                    "{name}: P010 のエンコーダーが想定外の status で失敗した: {e}"
+                    "{name}: P010 のエンコーダーが想定外のステータスで失敗した: {e}"
                 );
                 assert_eq!(
                     error.operation(),
@@ -497,7 +497,7 @@ fn test_encoder_y210_y410_initialization() {
                     assert_eq!(
                         error.status(),
                         AMF_RESULT::AMF_INVALID_FORMAT,
-                        "{name} {frame_format:?}: 想定外の status で失敗した: {e}"
+                        "{name} {frame_format:?}: 想定外のステータスで失敗した: {e}"
                     );
                     assert_eq!(
                         error.operation(),
