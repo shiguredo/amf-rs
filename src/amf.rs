@@ -268,6 +268,26 @@ impl PropertyStorage {
             )
         })
     }
+
+    /// Size プロパティを取得する
+    ///
+    /// 幅と高さの組を返す。
+    ///
+    /// # Errors
+    ///
+    /// プロパティを取得できない場合、または値が Size でない場合にエラーを返す。
+    pub fn get_property_size(&self, name: &str) -> Result<(i32, i32), Error> {
+        let name_w = sys::to_wstring(name);
+        let mut value = Variant::empty();
+        let result = unsafe { self.get_property(name_w.as_ptr(), value.as_ptr()) };
+        Error::check(result, format!("GetProperty({name})"))?;
+        value.as_size().ok_or_else(|| {
+            Error::new_custom(
+                "AMFPropertyStorage::GetProperty",
+                &format!("property {name} is not size"),
+            )
+        })
+    }
 }
 
 impl Clone for PropertyStorage {
@@ -1775,6 +1795,17 @@ impl Variant {
             return None;
         }
         Some(unsafe { self.value.__bindgen_anon_1.boolValue != 0 })
+    }
+
+    /// Size の値を幅と高さの組で返す
+    ///
+    /// variant の型が Size でない場合は `None` を返す。
+    pub(crate) fn as_size(&self) -> Option<(sys::amf_int32, sys::amf_int32)> {
+        if self.value.type_ != sys::AMF_VARIANT_TYPE::AMF_VARIANT_SIZE {
+            return None;
+        }
+        let size = unsafe { self.value.__bindgen_anon_1.sizeValue };
+        Some((size.width, size.height))
     }
 }
 

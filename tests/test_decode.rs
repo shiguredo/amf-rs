@@ -5,9 +5,14 @@
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use shiguredo_amf::{DecodedFrame, Decoder, DecoderCodec, DecoderConfig, Error, FnDecodeHandler};
+use shiguredo_amf::amf::{Context, Surface};
+use shiguredo_amf::{
+    CodecConfig, DecodedFrame, Decoder, DecoderCodec, DecoderConfig, EncodeOptions, Encoder,
+    EncoderConfig, Error, FnDecodeHandler, FnEncodeHandler, FrameFormat, H264EncoderConfig,
+    PlaneType, RateControlMode, frame_type,
+};
 
-#[expect(dead_code, reason = "test_decode では create_context だけを使う")]
+#[expect(dead_code, reason = "test_decode では一部のヘルパーだけを使う")]
 mod helpers;
 
 use helpers::create_context;
@@ -259,7 +264,7 @@ fn test_decoder_finish_without_input() {
     )
     .expect("デコーダーの作成に失敗");
 
-    // Drain 後に出力がない状態でも、ワーカーは EOF または出力なしを検出して完了する。
+    // 入力がない場合は Drain を呼ばず、Stop でワーカーを終了する。
     decoder.finish().expect("入力なしの finish に失敗");
     drop(decoder);
 
@@ -268,6 +273,70 @@ fn test_decoder_finish_without_input() {
         .into_inner()
         .expect("結果一覧のロックに失敗");
     assert!(results.is_empty(), "入力なしでデコード結果が通知された");
+}
+
+/// 最初の SubmitInput がハードエラーになっても finish がハングしないことを確認する
+#[test]
+fn test_finish_after_failed_first_submit_does_not_hang() {
+    let context = create_context();
+    let (result_tx, result_rx) = std::sync::mpsc::channel();
+
+    let handle = std::thread::spawn(move || {
+        let results = Arc::new(Mutex::new(Vec::new()));
+        let received = Arc::clone(&results);
+
+        let mut decoder = Decoder::new(
+            context,
+            DecoderConfig {
+                codec: DecoderCodec::H264,
+            },
+            FnDecodeHandler::<usize>::new(move |result| {
+                received
+                    .lock()
+                    .expect("結果一覧のロックに失敗")
+                    .push(result);
+            }),
+        )
+        .expect("デコーダーの作成に失敗");
+
+        // H.264 として解釈できない 1 バイトの入力を最初に投入し、
+        // AMF が入力を受理しない状態を作る。
+        let mut buffer = decoder.alloc_buffer(1).expect("Buffer の確保に失敗");
+        unsafe { buffer.as_mut_slice() }
+            .expect("Buffer のスライス取得に失敗")
+            .copy_from_slice(&[0]);
+        let error = decoder
+            .decode(buffer, 0)
+            .expect_err("不正なバッファの decode が成功した");
+        assert!(
+            error.to_string().contains("AMFComponent::SubmitInput"),
+            "想定外のエラー: {error}"
+        );
+
+        let finish_result = decoder.finish();
+        drop(decoder);
+
+        let results = Arc::try_unwrap(results)
+            .expect("結果一覧の Arc の参照が残っている")
+            .into_inner()
+            .expect("結果一覧のロックに失敗");
+        result_tx
+            .send((finish_result, results))
+            .expect("結果の送信に失敗");
+    });
+
+    // 入力を受理していないため finish は Drain を待たずに Stop で終了する。
+    // 退行すると finish が永久に戻らないため、watchdog で検出する。
+    let (finish_result, results) = result_rx
+        .recv_timeout(Duration::from_secs(5))
+        .expect("入力未受理の finish がハングした");
+    finish_result.expect("入力未受理の finish に失敗");
+    assert!(
+        results.is_empty(),
+        "入力未受理の finish でデコード結果が通知された"
+    );
+
+    handle.join().expect("テストスレッドが panic した");
 }
 
 /// 複数フレームを含むバッファを渡すと、AMF_REPEAT を検出してエラーになることを確認する
@@ -598,4 +667,215 @@ fn test_decode_hevc_bframes_maps_user_data_by_pts() {
 
     let results = decode_access_units(DecoderCodec::Hevc, &access_units);
     assert_user_data_follows_pts(results, access_units.len());
+}
+
+// ---------------------------------------------------------------------------
+// 解像度変化
+// ---------------------------------------------------------------------------
+
+/// 最初の解像度 (320x240) のフレーム数
+const RESOLUTION_CHANGE_INITIAL_FRAMES: usize = 30;
+
+/// 縮小後の解像度 (256x160) のフレーム数
+const RESOLUTION_CHANGE_SMALLER_FRAMES: usize = 15;
+
+/// 拡大後の解像度 (320x240) のフレーム数
+const RESOLUTION_CHANGE_LARGER_FRAMES: usize = 15;
+
+/// 指定した解像度の H.264 ストリームをエンコードし、フレームごとのビット列を返す
+///
+/// 解像度の異なるストリームを連結するため、Buffer ではなくビット列として
+/// 取り出す。
+fn encode_h264_stream(
+    context: &Context,
+    width: u32,
+    height: u32,
+    frame_count: usize,
+) -> Vec<Vec<u8>> {
+    let mut config = EncoderConfig::new(
+        CodecConfig::H264(H264EncoderConfig { profile: None }),
+        width,
+        height,
+        FrameFormat::Nv12,
+        30,
+        1,
+        RateControlMode::Cbr,
+    );
+    config.target_kbps = Some(1000);
+
+    let results = Arc::new(Mutex::new(Vec::new()));
+    let received = Arc::clone(&results);
+    let mut encoder = Encoder::new(
+        context.clone(),
+        config,
+        FnEncodeHandler::<()>::new(move |result| {
+            received
+                .lock()
+                .expect("エンコード結果を格納する Mutex のロックに失敗")
+                .push(result.expect("エンコード結果の取得に失敗"));
+        }),
+    )
+    .expect("エンコーダーの作成に失敗");
+
+    for index in 0..frame_count {
+        let surface = encoder.alloc_surface().expect("Surface の確保に失敗");
+        let frame = helpers::generate_dummy_nv12(width as usize, height as usize, index);
+        helpers::copy_nv12_to_surface(&surface, &frame, width as usize, height as usize);
+        encoder
+            .encode(
+                surface,
+                &EncodeOptions {
+                    frame_type: frame_type::UNKNOWN,
+                },
+                (),
+            )
+            .expect("エンコードに失敗");
+    }
+    encoder.finish().expect("finish に失敗");
+    drop(encoder);
+
+    Arc::try_unwrap(results)
+        .expect("エンコード結果の Arc の参照が残っている")
+        .into_inner()
+        .expect("エンコード結果の Mutex がポイズンされている")
+        .into_iter()
+        .map(|frame| {
+            let (buffer, ()) = frame.into_parts();
+            unsafe { buffer.as_slice() }
+                .expect("エンコード結果のスライス取得に失敗")
+                .to_vec()
+        })
+        .collect()
+}
+
+/// Surface の Y プレーンの幅と高さを返す
+fn surface_size(surface: &Surface) -> (usize, usize) {
+    let plane = surface
+        .get_plane(PlaneType::Y)
+        .expect("Y プレーンの取得に失敗");
+    (plane.get_width() as usize, plane.get_height() as usize)
+}
+
+/// 解像度が 320x240 → 256x160 (縮小) → 320x240 (拡大) と変化する
+/// 60 フレームのストリームを欠落・重複なくデコードできることを確認する
+#[test]
+fn test_decode_continues_after_resolution_change() {
+    // 320x240 x 30 + 256x160 x 15 + 320x240 x 15 の 3 本のストリームを
+    // 1 本に連結する。
+    let encoding_context = create_context();
+    let mut access_units = encode_h264_stream(
+        &encoding_context,
+        320,
+        240,
+        RESOLUTION_CHANGE_INITIAL_FRAMES,
+    );
+    access_units.extend(encode_h264_stream(
+        &encoding_context,
+        256,
+        160,
+        RESOLUTION_CHANGE_SMALLER_FRAMES,
+    ));
+    access_units.extend(encode_h264_stream(
+        &encoding_context,
+        320,
+        240,
+        RESOLUTION_CHANGE_LARGER_FRAMES,
+    ));
+    drop(encoding_context);
+
+    let total_frames = RESOLUTION_CHANGE_INITIAL_FRAMES
+        + RESOLUTION_CHANGE_SMALLER_FRAMES
+        + RESOLUTION_CHANGE_LARGER_FRAMES;
+    assert_eq!(
+        access_units.len(),
+        total_frames,
+        "テスト用ストリームのフレーム数が想定と異なる"
+    );
+
+    let results = Arc::new(Mutex::new(Vec::new()));
+    let received = Arc::clone(&results);
+    let mut decoder = Decoder::new(
+        create_context(),
+        DecoderConfig {
+            codec: DecoderCodec::H264,
+        },
+        FnDecodeHandler::<usize>::new(move |result| {
+            received
+                .lock()
+                .expect("デコード結果を格納する Mutex のロックに失敗")
+                .push(result);
+        }),
+    )
+    .expect("デコーダーの作成に失敗");
+
+    for (index, access_unit) in access_units.iter().enumerate() {
+        let mut buffer = decoder
+            .alloc_buffer(access_unit.len())
+            .expect("Buffer の確保に失敗");
+        unsafe { buffer.as_mut_slice() }
+            .expect("Buffer のスライス取得に失敗")
+            .copy_from_slice(access_unit);
+        buffer.set_pts(input_pts(index));
+        decoder
+            .decode(buffer, index)
+            .unwrap_or_else(|error| panic!("フレーム {index} の投入に失敗: {error}"));
+    }
+
+    decoder.finish().expect("finish に失敗");
+    drop(decoder);
+
+    let results = Arc::try_unwrap(results)
+        .expect("デコード結果の Arc の参照が残っている")
+        .into_inner()
+        .expect("デコード結果の Mutex がポイズンされている");
+    let summaries = results
+        .iter()
+        .map(|result| match result {
+            Ok(frame) => format!(
+                "ok: user_data={}, pts={}",
+                frame.user_data(),
+                frame.surface().get_pts()
+            ),
+            Err(error) => format!("err: {error}"),
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        results.len(),
+        total_frames,
+        "通知されたフレーム数が一致しない: {summaries:?}"
+    );
+
+    let mut order = Vec::new();
+    for (position, result) in results.into_iter().enumerate() {
+        let frame =
+            result.unwrap_or_else(|error| panic!("出力 {position} のデコードに失敗: {error}"));
+        let (surface, index) = frame.into_parts();
+        assert!(
+            index < total_frames,
+            "未知の user_data {index} が通知された"
+        );
+        order.push(index);
+        assert_eq!(
+            surface.get_pts(),
+            input_pts(index),
+            "フレーム {index} の PTS が入力時の値と一致しない"
+        );
+        let expected = if index < RESOLUTION_CHANGE_INITIAL_FRAMES {
+            (320, 240)
+        } else if index < RESOLUTION_CHANGE_INITIAL_FRAMES + RESOLUTION_CHANGE_SMALLER_FRAMES {
+            (256, 160)
+        } else {
+            (320, 240)
+        };
+        assert_eq!(
+            surface_size(&surface),
+            expected,
+            "フレーム {index} の解像度が想定と異なる"
+        );
+    }
+    assert_eq!(
+        order,
+        (0..total_frames).collect::<Vec<_>>(),
+        "解像度変化を挟んでも出力順が入力順と一致しない"
+    );
 }

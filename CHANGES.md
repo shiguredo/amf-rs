@@ -75,6 +75,8 @@
   - @melpon
 - [ADD] `amf::Buffer::set_pts` と `amf::Surface::get_pts` を追加する
   - @melpon
+- [ADD] `amf::PropertyStorage::get_property_size` を追加する
+  - @melpon
 - [FIX] `Decoder::decode` の `user_data` が B フレームを含むストリームで誤ったフレームに付く問題を修正する
   - 入力 `Buffer` に一意な PTS を設定し、出力 `Surface` の PTS で `user_data` を引き当てる
   - 対応付けに使った PTS は、通知前に呼び出し元が設定した値へ戻す
@@ -112,6 +114,9 @@
   - `Encoder::encode()` / `Encoder::reconfigure()` / `Encoder::finish()` は `finish` 済みの場合に AMF を呼ばずにエラーを返す
   - `Encoder::finish()` / `Decoder::finish()` はワーカーの終了を join まで待つ
   - `Drop` では通知前の入出力を破棄し、ハンドラーの panic と `Component::terminate` の失敗を `tracing::error!` で記録する
+  - @melpon
+- [FIX] 解像度が変化するストリームでもデコードを継続できるようにする
+  - 解像度の変化を検出したら、保留中の出力を通知したあと新しい解像度でデコーダーを作り直し、変化を検出したフレームを再投入する
   - @melpon
 
 ### misc
