@@ -490,13 +490,21 @@ struct OutputError {
     error: Error,
 }
 
-impl From<Error> for OutputError {
-    fn from(error: Error) -> Self {
-        // 対応付け用の値を取得する前の失敗は、どの入力の出力か特定できない。
+impl OutputError {
+    /// 対応付け用の値を取得する前の失敗から、対象の入力を特定できないエラーを作成する
+    fn unidentified(error: Error) -> Self {
         Self {
             frame_id: None,
             error,
         }
+    }
+}
+
+/// 対応付け用の値を取得する前の失敗を `OutputError` に変換する
+fn without_frame_id<T>(result: Result<T, Error>) -> Result<T, OutputError> {
+    match result {
+        Ok(value) => Ok(value),
+        Err(error) => Err(OutputError::unidentified(error)),
     }
 }
 
@@ -640,7 +648,7 @@ impl<H: EncodeHandler> Encoder<H> {
                     .and_then(|value| value.as_bool());
                 if capability == Some(false) {
                     return Err(InvalidArgumentError::new(
-                        "B frames are not supported by this GPU and AMF implementation",
+                        "this GPU and AMF implementation do not support B frames",
                     )
                     .into());
                 }
@@ -713,7 +721,7 @@ impl<H: EncodeHandler> Encoder<H> {
             None => "the default HEVC profile (Main)",
         };
         Err(InvalidArgumentError::new(format!(
-            "HEVC 10-bit input requires HevcProfile::Main10: {profile} with {:?} (set HevcProfile::Main10)",
+            "HEVC 10bit input requires HevcProfile::Main10: {profile} with {:?} (set HevcProfile::Main10)",
             config.frame_format
         ))
         .into())
@@ -1180,12 +1188,14 @@ impl<H: EncodeHandler> Encoder<H> {
         tracing::trace!("Encoder::encode: SubmitInput");
         // SubmitInput (INPUT_FULL の場合はリトライする)
         let max_retries = 100;
+        let mut last_result = AMF_RESULT::AMF_OK;
         let mut submitted = false;
         for retry in 0..max_retries {
             let result = unsafe {
                 self.component
                     .submit_input(surface.as_ptr() as *mut AMFData)
             };
+            last_result = result;
 
             // AMF_NEED_MORE_INPUT は入力を受け付けたが、まだ出力を生成できないことを
             // 示す。B フレームでは複数の入力を必要とするため、受理として扱う。
@@ -1205,7 +1215,10 @@ impl<H: EncodeHandler> Encoder<H> {
             return AmfError::check(result, "AMFComponent::SubmitInput").map_err(Into::into);
         }
         if !submitted {
-            return Err(InternalError::new("SubmitInput retry limit exceeded").into());
+            return Err(InternalError::new(format!(
+                "AMFComponent::SubmitInput did not accept input after {max_retries} retries (last status: {last_result:?})"
+            ))
+            .into());
         }
 
         // ワーカースレッドに Submit コマンドを送信する
@@ -1329,7 +1342,7 @@ impl<H: EncodeHandler> Encoder<H> {
         let result = self.component.drain();
         // AMF_INPUT_FULL は Drain 中に返ることがあるが無視する
         if result != AMF_RESULT::AMF_OK && result != AMF_RESULT::AMF_INPUT_FULL {
-            AmfError::check(result, "AMFComponent::Drain")?;
+            return Err(AmfError::new(result, "AMFComponent::Drain").into());
         }
 
         // Drain に成功してから `cmd_tx` を取り出す。以降は終了済みとして扱い、
@@ -1342,25 +1355,21 @@ impl<H: EncodeHandler> Encoder<H> {
 
         // Finish コマンドでワーカースレッドに残りの出力を処理させる
         let (tx, rx) = mpsc::sync_channel(1);
-        let send_result = cmd_tx.send(WorkerCommand::Finish(tx));
+        let worker_replied = cmd_tx.send(WorkerCommand::Finish(tx)).is_ok() && rx.recv().is_ok();
 
         // Finish を送れなかった場合はワーカーの受信側が既に破棄されているため、
         // ワーカーは終了済みか終了処理中である。なので送信結果にかかわらず
         // join で待つ。
-        let receive_result = match &send_result {
-            Ok(()) => rx.recv().is_ok(),
-            Err(_) => false,
-        };
         let join_result = match self.poll_thread.take() {
             Some(handle) => handle.join(),
             None => Ok(()),
         };
 
-        match (receive_result, join_result) {
+        match (worker_replied, join_result) {
             (true, Ok(())) => Ok(()),
             // ハンドラーの panic は、panic の内容をエラーに含めずに返す。
-            (_, Err(_)) => Err(InternalError::new("worker thread panicked").into()),
-            (false, Ok(())) => Err(InternalError::new("worker thread terminated").into()),
+            (_, Err(_)) => Err(InternalError::new("encoder worker thread panicked").into()),
+            (false, Ok(())) => Err(InternalError::new("encoder worker thread terminated").into()),
         }
     }
 }
@@ -1589,7 +1598,7 @@ fn flush_buffered_outputs<H: EncodeHandler>(
                     user_data,
                 })),
                 None => handler.on_encoded(Err(Error::Internal(InternalError::new(format!(
-                    "no submitted frame for output with frame ID {frame_id}"
+                    "the encoder produced output that matches no submitted input (frame ID {frame_id})"
                 )))
                 .into())),
             },
@@ -1615,7 +1624,7 @@ fn report_unmatched_inputs<H: EncodeHandler>(
     frame_ids.sort_unstable();
     for frame_id in frame_ids {
         handler.on_encoded(Err(Error::Internal(InternalError::new(format!(
-            "encoder did not output a frame for submitted input with frame ID {frame_id}"
+            "the encoder did not produce output for the submitted input (frame ID {frame_id})"
         )))
         .into()));
     }
@@ -1636,8 +1645,8 @@ fn notify_terminal_error<H: EncodeHandler>(
 
 /// 出力バッファ、ピクチャタイプ、対応付け用の値を返す。
 ///
-/// 出力バッファを返せない場合は `Err` を返す。バッファを取得できた後のエラーには
-/// 対応付け用の値を付ける。
+/// 出力バッファを返せない場合は `Err` を返す。対応付け用の値を取得できた後の
+/// エラーにはその値を付け、取得前のエラーには付けない。
 fn extract_encoded_output(
     data: *mut AMFData,
     codec_config: &CodecConfig,
@@ -1651,11 +1660,11 @@ fn extract_encoded_output(
         });
     }
     // エンコーダーの出力バッファは、エンコーダーが作成された Context から確保されている
-    let buffer = unsafe { Buffer::from_raw(buffer, context.clone()) }?;
+    let buffer = without_frame_id(unsafe { Buffer::from_raw(buffer, context.clone()) })?;
     // `Encoder::encode` が入力 Surface に設定した値を、AMF が同じフレームの出力 Buffer へ
     // 引き継ぐ。`Buffer::get_pts()` はフレームの識別に使えないため参照しない。
-    let property = buffer.property_storage()?;
-    let frame_id = property.get_property_int64(FRAME_ID_PROPERTY)?;
+    let property = without_frame_id(buffer.property_storage())?;
+    let frame_id = without_frame_id(property.get_property_int64(FRAME_ID_PROPERTY))?;
     let buf_size = buffer.get_size();
     if buf_size == 0 {
         return Err(OutputError {

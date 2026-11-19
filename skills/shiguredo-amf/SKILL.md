@@ -203,7 +203,7 @@ AMFContext が破棄され、そのデストラクタが `Terminate` を呼ぶ�
 
 - `InvalidArgument`: `invalid argument: ...`
 - `InvalidState`: `invalid state: ...`
-- `Amf`: 操作名とステータス (例: `AMFComponent::Init() failed: AMF_FAIL`)
+- `Amf`: 操作名とステータス (例: `AMFComponent::Init failed: AMF_FAIL`)
 - `Environment`: `environment error: ...`
 - `Internal`: `internal error: ...`
 
@@ -511,8 +511,8 @@ H.264 / HEVC / AV1 で AMF SDK 内部の enum 値順序が異なるが、`shigur
 | `framerate_num == 0 \|\| framerate_den == 0` | `invalid framerate: N/D (must be non-zero)` |
 | HEVC で `qpb` を指定 | `qpb is not supported for HEVC` |
 | HEVC で `b_pic_pattern` を指定 | `b_pic_pattern is not supported for HEVC` |
-| AMF が B フレーム非対応と報告した場合 (`b_pic_pattern > 0`) | `B frames are not supported by this GPU and AMF implementation` |
-| HEVC の 10bit 入力でプロファイルが `Main10` 以外 | `HEVC 10-bit input requires HevcProfile::Main10: ...` |
+| AMF が B フレーム非対応と報告した場合 (`b_pic_pattern > 0`) | `this GPU and AMF implementation do not support B frames` |
+| HEVC の 10bit 入力でプロファイルが `Main10` 以外 | `HEVC 10bit input requires HevcProfile::Main10: ...` |
 
 入力フォーマットとプロファイルの組み合わせ、および `b_pic_pattern` の値域は基本的に AMF に任せ、AMF が返すエラーをそのまま返す。B フレーム対応のケーパビリティが取得できない場合も、対応可否を決めずに AMF に任せる。HEVC の 10bit 入力と Main プロファイル (プロファイル未指定を含む) の組み合わせだけは `Encoder::new` がエラーを返す。
 

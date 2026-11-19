@@ -1,7 +1,4 @@
 //! AMF エラー型
-//!
-//! 利用者の入力不正、オブジェクトの状態不正、AMF の呼び出し失敗、実行環境の
-//! 失敗、ライブラリと AMF の前提違反を型で区別する。
 
 use std::borrow::Cow;
 use std::sync::mpsc;
@@ -97,9 +94,7 @@ impl std::fmt::Display for InvalidStateError {
 /// AMF の呼び出しがエラーステータスを返したエラー
 #[derive(Debug)]
 pub struct AmfError {
-    /// AMF が返したステータス
     status: AMF_RESULT,
-    /// エラーステータスを返した AMF の操作
     operation: Cow<'static, str>,
 }
 
@@ -147,7 +142,7 @@ impl AmfError {
 
 impl std::fmt::Display for AmfError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}() failed: {:?}", self.operation, self.status)
+        write!(f, "{} failed: {:?}", self.operation, self.status)
     }
 }
 
@@ -288,14 +283,14 @@ impl From<std::num::TryFromIntError> for Error {
 
 impl From<mpsc::RecvError> for Error {
     fn from(source: mpsc::RecvError) -> Self {
-        InternalError::with_source("worker thread terminated", source).into()
+        InternalError::with_source("worker channel closed", source).into()
     }
 }
 
 impl<T> From<mpsc::SendError<T>> for Error {
     fn from(_source: mpsc::SendError<T>) -> Self {
         // 未送信のコマンドは保持せず、チャネルの切断だけをエラーとして扱う。
-        InternalError::new("worker thread terminated").into()
+        InternalError::new("worker channel closed").into()
     }
 }
 
@@ -310,6 +305,13 @@ pub(crate) fn require_vtbl_fn<F>(f: Option<F>, name: &str) -> Result<F, Error> {
 mod tests {
     use super::*;
 
+    /// Error がワーカースレッドを跨いで渡せることを型で確認する
+    #[test]
+    fn test_error_is_send_and_sync() {
+        fn assert_send_sync<T: Send + Sync>() {}
+        assert_send_sync::<Error>();
+    }
+
     /// AMF のエラー表示にステータス名が 1 回だけ現れることを確認する
     #[test]
     fn test_amf_error_display_outputs_status_once() {
@@ -321,7 +323,7 @@ mod tests {
             "ステータス名が 1 回だけ表示されていない: {message}"
         );
         assert!(
-            message.contains("AMFComponent::Init() failed"),
+            message.contains("AMFComponent::Init failed"),
             "操作名が表示されていない: {message}"
         );
     }
@@ -388,7 +390,7 @@ mod tests {
 
         let error: Error = internal.into();
         assert!(
-            matches!(error, Error::Internal(_)),
+            matches!(&error, Error::Internal(_)),
             "Internal ではない: {error}"
         );
         let source = std::error::Error::source(&error).expect("source が取得できない");
@@ -397,7 +399,7 @@ mod tests {
             "source の内容が一致しない: {source}"
         );
 
-        let error: Error = InternalError::new("worker thread terminated").into();
+        let error: Error = InternalError::new("worker channel closed").into();
         assert!(
             std::error::Error::source(&error).is_none(),
             "source が返された: {error}"
@@ -418,7 +420,7 @@ mod tests {
         let send_error = tx.send(()).expect_err("送信が成功した");
         let error: Error = send_error.into();
         assert!(
-            matches!(error, Error::Internal(_)),
+            matches!(&error, Error::Internal(_)),
             "Internal ではない: {error}"
         );
         assert!(

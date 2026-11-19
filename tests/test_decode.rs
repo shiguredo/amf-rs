@@ -617,7 +617,7 @@ fn test_decode_reports_input_without_output() {
         "未対応入力のエラーが Internal ではない: {error}"
     );
     assert!(
-        error.to_string().contains("submitted PTS 100000"),
+        error.to_string().contains("PTS 100000"),
         "未対応入力のエラーメッセージが想定と異なる: {error}"
     );
 }

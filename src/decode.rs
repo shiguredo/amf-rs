@@ -174,8 +174,10 @@ enum WorkerCommand<T> {
 /// その他のエラーは `Err` を返す。
 fn submit_input_with_retry(component: &Component, buffer: &Buffer) -> Result<AMF_RESULT, Error> {
     let max_retries = 100;
+    let mut last_result = AMF_RESULT::AMF_OK;
     for retry in 0..max_retries {
         let result = unsafe { component.submit_input(buffer.as_ptr() as *mut AMFData) };
+        last_result = result;
         if retry > 0 && retry % 10 == 0 {
             tracing::trace!("Decoder::SubmitInput: retry={retry}, result={result:?}");
         }
@@ -196,7 +198,10 @@ fn submit_input_with_retry(component: &Component, buffer: &Buffer) -> Result<AMF
         }
         std::thread::sleep(Duration::from_millis(1));
     }
-    Err(InternalError::new("SubmitInput retry limit exceeded").into())
+    Err(InternalError::new(format!(
+        "AMFComponent::SubmitInput did not accept input after {max_retries} retries (last status: {last_result:?})"
+    ))
+    .into())
 }
 
 /// AMF ハードウェアデコーダー
@@ -426,7 +431,7 @@ impl<H: DecodeHandler> Decoder<H> {
         let cmd_tx = self
             .cmd_tx
             .take()
-            .ok_or_else(|| InternalError::new("worker thread terminated"))?;
+            .ok_or_else(|| InternalError::new("decoder worker thread terminated"))?;
 
         // AMF_RESOLUTION_CHANGED は Drain / Terminate / Init を要求する
         // (AMF SDK v1.5.2 の include/core/Result.h)。AMF_VIDEO_DECODER_CURRENT_SIZE は
@@ -485,7 +490,7 @@ impl<H: DecodeHandler> Decoder<H> {
     fn wait_eof_worker(&mut self) -> Result<WaitEofOutcome, Error> {
         let cmd_tx = match self.cmd_tx.as_ref() {
             Some(cmd_tx) => cmd_tx,
-            None => return Err(InternalError::new("worker thread terminated").into()),
+            None => return Err(InternalError::new("decoder worker thread terminated").into()),
         };
         let (done_tx, done_rx) = mpsc::sync_channel(1);
         if cmd_tx
@@ -495,7 +500,7 @@ impl<H: DecodeHandler> Decoder<H> {
             self.cmd_tx = None;
             self.join_worker()?;
             self.drain_required = false;
-            return Err(InternalError::new("worker thread terminated").into());
+            return Err(InternalError::new("decoder worker thread terminated").into());
         }
 
         match done_rx.recv() {
@@ -519,7 +524,7 @@ impl<H: DecodeHandler> Decoder<H> {
         match self.poll_thread.take() {
             Some(handle) => match handle.join() {
                 Ok(()) => Ok(()),
-                Err(_) => Err(InternalError::new("worker thread panicked").into()),
+                Err(_) => Err(InternalError::new("decoder worker thread panicked").into()),
             },
             None => Ok(()),
         }
@@ -530,27 +535,24 @@ impl<H: DecodeHandler> Decoder<H> {
         let cmd_tx = self
             .cmd_tx
             .take()
-            .ok_or_else(|| InternalError::new("worker thread terminated"))?;
+            .expect("cmd_tx must be set before stopping the worker");
         let (done_tx, done_rx) = mpsc::sync_channel(1);
-        let send_result = cmd_tx.send(WorkerCommand::Stop { done: done_tx });
+        let worker_replied =
+            cmd_tx.send(WorkerCommand::Stop { done: done_tx }).is_ok() && done_rx.recv().is_ok();
 
         // Stop を送れなかった場合はワーカーの受信側が既に破棄されているため、
         // ワーカーは終了済みか終了処理中である。なので送信結果にかかわらず
         // join で待つ。
-        let receive_result = match &send_result {
-            Ok(()) => done_rx.recv().is_ok(),
-            Err(_) => false,
-        };
         let join_result = match self.poll_thread.take() {
             Some(handle) => handle.join(),
             None => Ok(()),
         };
 
-        match (receive_result, join_result) {
+        match (worker_replied, join_result) {
             (true, Ok(())) => Ok(()),
             // ハンドラーの panic は、panic の内容をエラーに含めずに返す。
-            (_, Err(_)) => Err(InternalError::new("worker thread panicked").into()),
-            (false, Ok(())) => Err(InternalError::new("worker thread terminated").into()),
+            (_, Err(_)) => Err(InternalError::new("decoder worker thread panicked").into()),
+            (false, Ok(())) => Err(InternalError::new("decoder worker thread terminated").into()),
         }
     }
 
@@ -560,9 +562,9 @@ impl<H: DecodeHandler> Decoder<H> {
     ///
     /// # Errors
     ///
-    /// `finish` 済みの場合、`WaitEof` の送信に失敗した場合、または `Stop` の
-    /// 送信・完了待ちに失敗した場合にエラーを返す。ハンドラーが panic した場合も
-    /// ワーカーが停止したものとして扱う。
+    /// `finish` 済みの場合、ワーカーとの通信に失敗した場合、またはワーカーが
+    /// 停止している場合にエラーを返す。ハンドラーが panic した場合もワーカーが
+    /// 停止したものとして扱う。
     ///
     /// ワーカーが `Drain` または `AMF_EOF` の待機中に終端エラーを検出した場合は、
     /// そのエラーをハンドラーへ通知して `Ok` を返す。
@@ -889,7 +891,7 @@ fn flush_buffered_outputs<H: DecodeHandler>(
                     handler.on_decoded(Ok(into_decoded_frame::<H>(surface, frame)));
                 }
                 None => handler.on_decoded(Err(Error::Internal(InternalError::new(format!(
-                    "no submitted frame for output with internal PTS {pts}"
+                    "the decoder produced output that matches no submitted input (internal PTS {pts})"
                 )))
                 .into())),
             },
@@ -904,7 +906,7 @@ fn flush_buffered_outputs<H: DecodeHandler>(
     }
 }
 
-/// 出力が得られなかった入力を、ワーカーを発生元とする `Err` として通知する。
+/// 出力が得られなかった入力を `Err` として通知する。
 ///
 /// 通知順は入力順とする。
 fn report_unmatched_inputs<H: DecodeHandler>(
@@ -915,7 +917,7 @@ fn report_unmatched_inputs<H: DecodeHandler>(
     frames.sort_by_key(|(pts, _)| *pts);
     for (_, frame) in frames {
         handler.on_decoded(Err(Error::Internal(InternalError::new(format!(
-            "decoder did not output a frame for submitted PTS {}",
+            "the decoder did not produce output for the submitted input (PTS {})",
             frame.original_pts
         )))
         .into()));

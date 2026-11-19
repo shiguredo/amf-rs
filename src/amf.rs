@@ -220,7 +220,7 @@ impl PropertyStorage {
         let name_w = sys::to_wstring(name);
         let var = sys::AMFVariantStruct::from_int64(value);
         let result = unsafe { self.set_property(name_w.as_ptr(), var) };
-        AmfError::check(result, format!("SetProperty({name})"))?;
+        AmfError::check(result, format!("AMFPropertyStorage::SetProperty({name:?})"))?;
         Ok(())
     }
 
@@ -229,7 +229,7 @@ impl PropertyStorage {
         let name_w = sys::to_wstring(name);
         let var = sys::AMFVariantStruct::from_size(width, height);
         let result = unsafe { self.set_property(name_w.as_ptr(), var) };
-        AmfError::check(result, format!("SetProperty({name})"))?;
+        AmfError::check(result, format!("AMFPropertyStorage::SetProperty({name:?})"))?;
         Ok(())
     }
 
@@ -238,7 +238,7 @@ impl PropertyStorage {
         let name_w = sys::to_wstring(name);
         let var = sys::AMFVariantStruct::from_rate(num, den);
         let result = unsafe { self.set_property(name_w.as_ptr(), var) };
-        AmfError::check(result, format!("SetProperty({name})"))?;
+        AmfError::check(result, format!("AMFPropertyStorage::SetProperty({name:?})"))?;
         Ok(())
     }
 
@@ -265,10 +265,10 @@ impl PropertyStorage {
         let name_w = sys::to_wstring(name);
         let mut value = Variant::empty();
         let result = unsafe { self.get_property(name_w.as_ptr(), value.as_ptr()) };
-        AmfError::check(result, format!("GetProperty({name})"))?;
-        value
-            .as_int64()
-            .ok_or_else(|| InternalError::new(format!("property {name} is not int64")).into())
+        AmfError::check(result, format!("AMFPropertyStorage::GetProperty({name:?})"))?;
+        value.as_int64().ok_or_else(|| {
+            InternalError::new(format!("property {name:?} is not an Int64 value")).into()
+        })
     }
 
     /// Size プロパティを取得する
@@ -282,10 +282,10 @@ impl PropertyStorage {
         let name_w = sys::to_wstring(name);
         let mut value = Variant::empty();
         let result = unsafe { self.get_property(name_w.as_ptr(), value.as_ptr()) };
-        AmfError::check(result, format!("GetProperty({name})"))?;
-        value
-            .as_size()
-            .ok_or_else(|| InternalError::new(format!("property {name} is not size")).into())
+        AmfError::check(result, format!("AMFPropertyStorage::GetProperty({name:?})"))?;
+        value.as_size().ok_or_else(|| {
+            InternalError::new(format!("property {name:?} is not a Size value")).into()
+        })
     }
 }
 
@@ -478,9 +478,10 @@ impl Surface {
         let _guard = self.state.lock();
         let plane = unsafe { (self.f.get_plane)(self.ptr, plane_type.to_amf()) };
         if plane.is_null() {
-            return Err(
-                InvalidArgumentError::new("the surface does not have the requested plane").into(),
-            );
+            return Err(InvalidArgumentError::new(format!(
+                "the surface does not have the {plane_type:?} plane"
+            ))
+            .into());
         }
         unsafe { Plane::from_raw_with_acquire(plane, true, self) }
     }
@@ -493,7 +494,9 @@ impl Surface {
         let _guard = self.state.lock();
         let plane = unsafe { (self.f.get_plane_at)(self.ptr, index) };
         if plane.is_null() {
-            return Err(InvalidArgumentError::new("plane index is out of range").into());
+            return Err(
+                InvalidArgumentError::new(format!("plane index {index} is out of range")).into(),
+            );
         }
         unsafe { Plane::from_raw_with_acquire(plane, true, self) }
     }
@@ -2256,7 +2259,10 @@ mod tests {
     #[test]
     fn test_validate_slice_ptr_rejects_null() {
         assert!(
-            validate_slice_ptr(std::ptr::null()).is_err(),
+            matches!(
+                validate_slice_ptr(std::ptr::null()),
+                Err(Error::Internal(_))
+            ),
             "null ポインタが受け入れられた"
         );
 
@@ -2275,7 +2281,10 @@ mod tests {
             "isize::MAX の長さが拒否された"
         );
         assert!(
-            validate_slice_len(isize::MAX as usize + 1).is_err(),
+            matches!(
+                validate_slice_len(isize::MAX as usize + 1),
+                Err(Error::Internal(_))
+            ),
             "isize::MAX を超える長さが受け入れられた"
         );
     }
@@ -2289,19 +2298,19 @@ mod tests {
             "ピッチの積が一致しない"
         );
         assert!(
-            plane_slice_len(false, -1, 3).is_err(),
+            matches!(plane_slice_len(false, -1, 3), Err(Error::Internal(_))),
             "負の hpitch が受け入れられた"
         );
         assert!(
-            plane_slice_len(false, 4, -1).is_err(),
+            matches!(plane_slice_len(false, 4, -1), Err(Error::Internal(_))),
             "負の vpitch が受け入れられた"
         );
         assert!(
-            checked_mul_len(usize::MAX, 2).is_err(),
+            matches!(checked_mul_len(usize::MAX, 2), Err(Error::Internal(_))),
             "長さの積のオーバーフローが受け入れられた"
         );
         assert!(
-            plane_slice_len(true, 4, 3).is_err(),
+            matches!(plane_slice_len(true, 4, 3), Err(Error::InvalidState(_))),
             "タイル状のプレーンが受け入れられた"
         );
     }

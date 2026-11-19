@@ -119,3 +119,39 @@ impl Drop for DynLib {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::ffi::OsStr;
+    use std::os::unix::ffi::OsStrExt;
+    use std::path::Path;
+
+    use super::*;
+
+    /// 存在しないライブラリを開くと Environment エラーと source を返すことを確認する
+    #[test]
+    fn test_open_missing_library_returns_environment_error() {
+        let path = Path::new("/nonexistent/shiguredo-amf-test.so");
+        let error = DynLib::open(path).expect_err("存在しないライブラリを開けてしまった");
+        assert!(
+            matches!(&error, Error::Environment(_)),
+            "Environment エラーではない: {error}"
+        );
+        assert!(
+            std::error::Error::source(&error).is_some(),
+            "source が取得できない: {error}"
+        );
+    }
+
+    /// パスに NUL バイトが含まれる場合は Internal エラーになることを確認する
+    #[test]
+    fn test_open_path_with_nul_returns_internal_error() {
+        let path = Path::new(OsStr::from_bytes(b"/nonexistent/amf\0test.so"));
+        let error =
+            DynLib::open(path).expect_err("NUL バイトを含むパスでライブラリを開けてしまった");
+        assert!(
+            matches!(&error, Error::Internal(_)),
+            "Internal エラーではない: {error}"
+        );
+    }
+}

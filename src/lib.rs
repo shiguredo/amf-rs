@@ -232,7 +232,10 @@ impl AmfLibrary {
             let mut context: *mut sys::AMFContext = ptr::null_mut();
             let result = unsafe {
                 let vtbl = &*(*inner.factory).pVtbl;
-                require_vtbl_fn(vtbl.CreateContext, "CreateContext")?(inner.factory, &mut context)
+                require_vtbl_fn(vtbl.CreateContext, "AMFFactory::CreateContext")?(
+                    inner.factory,
+                    &mut context,
+                )
             };
             AmfError::check(result, "AMFFactory::CreateContext")?;
 
@@ -260,7 +263,7 @@ impl AmfLibrary {
             let mut component: *mut sys::AMFComponent = ptr::null_mut();
             let result = unsafe {
                 let vtbl = &*(*inner.factory).pVtbl;
-                require_vtbl_fn(vtbl.CreateComponent, "CreateComponent")?(
+                require_vtbl_fn(vtbl.CreateComponent, "AMFFactory::CreateComponent")?(
                     inner.factory,
                     context.as_ptr(),
                     component_id_w.as_ptr(),
