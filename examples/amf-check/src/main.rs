@@ -6,39 +6,48 @@
 use shiguredo_amf::amf::Context;
 use shiguredo_amf::{
     AmfLibrary, Av1EncoderConfig, BUILD_VERSION, CodecConfig, CodecInfo, Decoder, DecoderCodec,
-    DecoderConfig, Encoder, EncoderConfig, Error as AmfError, FnDecodeHandler, FnEncodeHandler,
-    FrameFormat, H264EncoderConfig, HevcEncoderConfig, RateControlMode, VideoCodecType,
-    VideoProfile, supported_codecs,
+    DecoderConfig, Encoder, EncoderConfig, Error, FnDecodeHandler, FnEncodeHandler, FrameFormat,
+    H264EncoderConfig, HevcEncoderConfig, RateControlMode, VideoCodecType, VideoProfile,
+    supported_codecs,
 };
 
 #[derive(Debug)]
-enum Error {
+enum AppError {
     Args(noargs::Error),
-    Amf(AmfError),
+    Amf(Error),
 }
 
-impl std::fmt::Display for Error {
+impl std::fmt::Display for AppError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Error::Args(e) => write!(f, "{e:?}"),
-            Error::Amf(e) => write!(f, "{e}"),
+            AppError::Args(e) => write!(f, "{e:?}"),
+            AppError::Amf(e) => write!(f, "{e}"),
         }
     }
 }
 
-impl From<noargs::Error> for Error {
+impl From<noargs::Error> for AppError {
     fn from(e: noargs::Error) -> Self {
-        Error::Args(e)
+        AppError::Args(e)
     }
 }
 
-impl From<AmfError> for Error {
-    fn from(e: AmfError) -> Self {
-        Error::Amf(e)
+impl From<Error> for AppError {
+    fn from(e: Error) -> Self {
+        AppError::Amf(e)
     }
 }
 
-type Result<T> = std::result::Result<T, Error>;
+impl std::error::Error for AppError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            AppError::Args(_) => None,
+            AppError::Amf(e) => std::error::Error::source(e),
+        }
+    }
+}
+
+type Result<T> = std::result::Result<T, AppError>;
 
 struct Args {
     width: u32,
@@ -114,6 +123,18 @@ fn format_io_capabilities(caps: Option<&shiguredo_amf::IoCapabilities>) -> Strin
     }
 }
 
+/// エラーとその原因を 1 行にまとめる
+fn format_error(error: &dyn std::error::Error) -> String {
+    let mut message = error.to_string();
+    let mut source = std::error::Error::source(error);
+    while let Some(cause) = source {
+        message.push_str(": ");
+        message.push_str(&cause.to_string());
+        source = std::error::Error::source(cause);
+    }
+    message
+}
+
 fn check_runtime() -> bool {
     println!("=== AMF Runtime ===");
     println!("Build version: {BUILD_VERSION}");
@@ -127,7 +148,7 @@ fn check_runtime() -> bool {
             true
         }
         Err(e) => {
-            println!("NG ({e})");
+            println!("NG ({})", format_error(&e));
             false
         }
     }
@@ -140,7 +161,7 @@ fn print_codec_support(codecs: &Result<Vec<CodecInfo>>) {
     let codecs = match codecs {
         Ok(codecs) => codecs,
         Err(e) => {
-            println!("supported_codecs failed: {e}");
+            println!("supported_codecs failed: {}", format_error(&e));
             return;
         }
     };
@@ -209,7 +230,7 @@ fn check_encoder_init(context: &Context, codec: VideoCodecType, width: u32, heig
             true
         }
         Err(e) => {
-            println!("NG ({e})");
+            println!("NG ({})", format_error(&e));
             false
         }
     }
@@ -232,7 +253,7 @@ fn check_decoder_init(context: &Context, codec: VideoCodecType) -> bool {
             true
         }
         Err(e) => {
-            println!("NG ({e})");
+            println!("NG ({})", format_error(&e));
             false
         }
     }
@@ -246,7 +267,7 @@ fn check_component_init(codecs: &Result<Vec<CodecInfo>>, width: u32, height: u32
     let context = match AmfLibrary::instance().create_context() {
         Ok(context) => context,
         Err(e) => {
-            println!("[context] create ... NG ({e})");
+            println!("[context] create ... NG ({})", format_error(&e));
             return false;
         }
     };
@@ -255,7 +276,7 @@ fn check_component_init(codecs: &Result<Vec<CodecInfo>>, width: u32, height: u32
     let codecs = match codecs {
         Ok(codecs) => codecs,
         Err(e) => {
-            println!("[context] supported_codecs ... NG ({e})");
+            println!("[context] supported_codecs ... NG ({})", format_error(&e));
             return false;
         }
     };
@@ -289,7 +310,7 @@ fn main() -> Result<()> {
     let args = parse_args()?;
 
     let mut ok = check_runtime();
-    let codecs = supported_codecs().map_err(Error::Amf);
+    let codecs = supported_codecs().map_err(AppError::Amf);
     print_codec_support(&codecs);
 
     // ランタイムがロードできていても、エンコーダー/デコーダー初期化が失敗することがある
