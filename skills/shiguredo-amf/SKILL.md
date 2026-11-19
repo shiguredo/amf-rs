@@ -188,20 +188,37 @@ AMFContext が破棄され、そのデストラクタが `Terminate` を呼ぶ�
 
 | 型/関数 | 説明 |
 |--------|------|
-| `Error` | AMF 操作のエラー型 (`Debug + Display + std::error::Error`) |
-| `Error::new_custom(function: &'static str, message: &str)` | カスタムエラーを作成 (`status` なし) |
-| `Error::from_amf(AMF_RESULT, function)` | `AMF_RESULT` からエラーを作成 (内部の対応表を参照してメッセージを構築) |
-| `Error::check(AMF_RESULT, function) -> Result<(), Error>` | `AMF_OK` 以外を `Err` にして返す |
-| `Error::status() -> Option<AMF_RESULT>` | エラーに紐づく `AMF_RESULT` を返す (カスタムエラーは `None`) |
+| `Error` | AMF 操作のエラー (`Debug + Display + std::error::Error`) |
+| `Error::InvalidArgument(InvalidArgumentError)` | 引数、または引数が指すオブジェクトが操作の前提を満たさない |
+| `Error::InvalidState(InvalidStateError)` | オブジェクトの状態が操作に適していない |
+| `Error::Amf(AmfError)` | AMF の呼び出しがエラーステータスを返した |
+| `Error::Environment(EnvironmentError)` | 動的ライブラリのロードなど実行環境に起因する失敗 |
+| `Error::Internal(InternalError)` | ライブラリまたは AMF の前提が破られた |
+| `AmfError::status() -> AMF_RESULT` | AMF が返したステータスを返す |
+| `AmfError::operation() -> &str` | エラーステータスを返した AMF の操作名を返す |
+| `Error::source()` | 原因を持つ分類では内側の標準エラーを返す。原因を持たない場合は `None`。`std::error::Error` のメソッドなので trait の import が必要 |
+| `EnvironmentError::source()` / `InternalError::source()` | 分類型が持つ原因を返す。`EnvironmentError` は常に `Some`、`InternalError` は原因がない場合 `None` |
 
-`Display` フォーマットは `function() failed[status=AMF_FAIL]: General failure (AMF_FAIL)` のように `function` / `status` / メッセージを含む。`Error::status()` で `AMF_RESULT` を取り出して呼び出し側で分岐できる。
+`Display` は分類ごとに次の形式で表示する。`Environment` と `Internal` は文脈だけを表示し、原因は `source()` で取得する。
+
+- `InvalidArgument`: `invalid argument: ...`
+- `InvalidState`: `invalid state: ...`
+- `Amf`: 操作名とステータス (例: `AMFComponent::Init failed: AMF_FAIL`)
+- `Environment`: `environment error: ...`
+- `Internal`: `internal error: ...`
+
+原因の具体的な型が必要な場合は、`source()` が返す `&(dyn std::error::Error + 'static)` から `downcast_ref::<std::io::Error>()` などで取り出す。
+
+標準エラーから `?` で `Error` に変換できる。`std::io::Error` は `Environment`、`NulError` / `TryFromIntError` / `RecvError` / `SendError<T>` は `Internal` になる。
+
+分類は、呼び出し側が修正できる失敗 (`InvalidArgument` / `InvalidState`)、AMF が返したステータスを保持する失敗 (`Amf`)、実行環境やライブラリ内部に起因する失敗 (`Environment` / `Internal`) に分かれる。AMF のステータスで分岐する場合は `Error::Amf` から `AmfError` を取り出して `status()` を読む。
 
 主な `AMF_RESULT` バリアント (`ffi::AMF_RESULT` で公開): `AMF_OK`, `AMF_FAIL`, `AMF_INVALID_ARG`, `AMF_OUT_OF_MEMORY`, `AMF_NOT_SUPPORTED`, `AMF_WRONG_STATE`, `AMF_NO_DEVICE`, `AMF_EOF`, `AMF_REPEAT`, `AMF_INPUT_FULL`, `AMF_NEED_MORE_INPUT`, `AMF_DECODER_NO_FREE_SURFACES`, `AMF_VULKAN_FAILED` 等。
 
 `Encoder::encode` / `Decoder::decode` は、投入する `Surface` / `Buffer` が別の Context のもの、
 または他のハンドルと共有されている場合にエラーを返す。メッセージにはそれぞれ
 `does not belong to the encoder's AMF context` / `does not belong to the decoder's AMF context`、
-`shared with other handles` が含まれる。
+`shared with other handles` が含まれる。これらは呼び出し側が入力を直して再試行できる失敗である。
 
 ## FFI モジュール
 
@@ -494,8 +511,8 @@ H.264 / HEVC / AV1 で AMF SDK 内部の enum 値順序が異なるが、`shigur
 | `framerate_num == 0 \|\| framerate_den == 0` | `invalid framerate: N/D (must be non-zero)` |
 | HEVC で `qpb` を指定 | `qpb is not supported for HEVC` |
 | HEVC で `b_pic_pattern` を指定 | `b_pic_pattern is not supported for HEVC` |
-| AMF が B フレーム非対応と報告した場合 (`b_pic_pattern > 0`) | `B frames are not supported by this GPU and AMF implementation` |
-| HEVC の 10bit 入力でプロファイルが `Main10` 以外 | `HEVC 10-bit input requires HevcProfile::Main10: ...` |
+| AMF が B フレーム非対応と報告した場合 (`b_pic_pattern > 0`) | `this GPU and AMF implementation do not support B frames` |
+| HEVC の 10bit 入力でプロファイルが `Main10` 以外 | `HEVC 10bit input requires HevcProfile::Main10: ...` |
 
 入力フォーマットとプロファイルの組み合わせ、および `b_pic_pattern` の値域は基本的に AMF に任せ、AMF が返すエラーをそのまま返す。B フレーム対応のケーパビリティが取得できない場合も、対応可否を決めずに AMF に任せる。HEVC の 10bit 入力と Main プロファイル (プロファイル未指定を含む) の組み合わせだけは `Encoder::new` がエラーを返す。
 

@@ -8,8 +8,8 @@ use shiguredo_amf::amf::{Buffer, Component, Context, Plane, PropertyStorage, Sur
 use shiguredo_amf::ffi::amf_long;
 use shiguredo_amf::{
     CodecConfig, Decoder, DecoderCodec, DecoderConfig, EncodeOptions, Encoder, EncoderConfig,
-    FnDecodeHandler, FnEncodeHandler, FrameFormat, H264EncoderConfig, H264Profile, MemoryType,
-    PlaneType, RateControlMode, SurfaceFormat, frame_type,
+    Error, FnDecodeHandler, FnEncodeHandler, FrameFormat, H264EncoderConfig, H264Profile,
+    MemoryType, PlaneType, RateControlMode, SurfaceFormat, frame_type,
 };
 
 pub mod helpers;
@@ -73,11 +73,15 @@ fn create_nv12_host_surface(context: &Context) -> Surface {
 }
 
 /// Plane が生存している Surface の convert が拒否されることを確認する
-fn assert_convert_rejected(result: Result<(), shiguredo_amf::Error>) {
+fn assert_convert_rejected(result: Result<(), Error>) {
     let err = match result {
         Ok(()) => panic!("Plane が生存している Surface の convert が成功した"),
         Err(err) => err,
     };
+    assert!(
+        matches!(&err, Error::InvalidState(_)),
+        "Plane 生存中の convert が InvalidState ではない: {err}"
+    );
     assert!(
         err.to_string().contains("planes are alive"),
         "Plane 生存中のエラーではない: {err}"
@@ -1012,6 +1016,10 @@ fn test_vulkan_surface_convert_after_context_dropped() {
     let err = surface
         .convert(MemoryType::Host)
         .expect_err("Plane が生存している Surface の convert は失敗するはず");
+    assert!(
+        matches!(&err, Error::InvalidState(_)),
+        "Plane 生存中の convert が InvalidState ではない: {err}"
+    );
     assert!(
         err.to_string().contains("planes are alive"),
         "Plane 生存中のエラーではない: {err}"

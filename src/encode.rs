@@ -11,7 +11,9 @@ use std::time::Duration;
 
 use crate::AmfLibrary;
 use crate::amf::{Buffer, Component, Context, PropertyStorage, Surface};
-use crate::error::Error;
+use crate::error::{
+    AmfError, EnvironmentError, Error, InternalError, InvalidArgumentError, InvalidStateError,
+};
 use crate::query_output::{DrainStatus, QueryOutputKind, classify_query_output};
 use crate::sys::{self, AMF_RESULT, AMFBuffer, AMFData, amf_int32, amf_int64};
 use crate::types::{Av1Profile, FrameFormat, H264Profile, HevcProfile, MemoryType, SurfaceFormat};
@@ -488,6 +490,24 @@ struct OutputError {
     error: Error,
 }
 
+impl OutputError {
+    /// 対応付け用の値を取得する前の失敗から、対象の入力を特定できないエラーを作成する
+    fn unidentified(error: Error) -> Self {
+        Self {
+            frame_id: None,
+            error,
+        }
+    }
+}
+
+/// 対応付け用の値を取得する前の失敗を `OutputError` に変換する
+fn without_frame_id<T>(result: Result<T, Error>) -> Result<T, OutputError> {
+    match result {
+        Ok(value) => Ok(value),
+        Err(error) => Err(OutputError::unidentified(error)),
+    }
+}
+
 enum WorkerCommand<T> {
     /// 入力フレームの対応付け用の値とユーザーデータを登録する
     Submit {
@@ -557,47 +577,36 @@ impl<H: EncodeHandler> Encoder<H> {
     pub fn new(context: Context, config: EncoderConfig, handler: H) -> Result<Self, Error> {
         // 入力パラメータのバリデーション
         if config.width == 0 || config.height == 0 {
-            return Err(Error::new_custom(
-                "Encoder::new",
-                &format!(
-                    "invalid resolution: {}x{} (must be non-zero)",
-                    config.width, config.height
-                ),
-            ));
+            return Err(InvalidArgumentError::new(format!(
+                "invalid resolution: {}x{} (must be non-zero)",
+                config.width, config.height
+            ))
+            .into());
         }
         if config.width > i32::MAX as u32 || config.height > i32::MAX as u32 {
-            return Err(Error::new_custom(
-                "Encoder::new",
-                &format!(
-                    "invalid resolution: {}x{} (exceeds i32::MAX)",
-                    config.width, config.height
-                ),
-            ));
+            return Err(InvalidArgumentError::new(format!(
+                "invalid resolution: {}x{} (exceeds i32::MAX)",
+                config.width, config.height
+            ))
+            .into());
         }
         if !config.width.is_multiple_of(2) || !config.height.is_multiple_of(2) {
-            return Err(Error::new_custom(
-                "Encoder::new",
-                &format!(
-                    "invalid resolution: {}x{} (must be even)",
-                    config.width, config.height
-                ),
-            ));
+            return Err(InvalidArgumentError::new(format!(
+                "invalid resolution: {}x{} (must be even)",
+                config.width, config.height
+            ))
+            .into());
         }
         if config.framerate_num == 0 || config.framerate_den == 0 {
-            return Err(Error::new_custom(
-                "Encoder::new",
-                &format!(
-                    "invalid framerate: {}/{} (must be non-zero)",
-                    config.framerate_num, config.framerate_den
-                ),
-            ));
+            return Err(InvalidArgumentError::new(format!(
+                "invalid framerate: {}/{} (must be non-zero)",
+                config.framerate_num, config.framerate_den
+            ))
+            .into());
         }
 
         if matches!(&config.codec, CodecConfig::Hevc(_)) && config.qpb.is_some() {
-            return Err(Error::new_custom(
-                "Encoder::new",
-                "qpb is not supported for HEVC",
-            ));
+            return Err(InvalidArgumentError::new("qpb is not supported for HEVC").into());
         }
         // HEVC の Main プロファイルと 10bit 入力の組み合わせは、AMF が Main に
         // 適合しない 10bit ストリームを生成するため、事前に拒否する。
@@ -625,10 +634,10 @@ impl<H: EncodeHandler> Encoder<H> {
                 CodecConfig::H264(_) => sys::str::AMF_VIDEO_ENCODER_CAP_BFRAMES,
                 CodecConfig::Av1(_) => sys::str::AMF_VIDEO_ENCODER_AV1_CAP_BFRAMES,
                 CodecConfig::Hevc(_) => {
-                    return Err(Error::new_custom(
-                        "Encoder::new",
+                    return Err(InvalidArgumentError::new(
                         "b_pic_pattern is not supported for HEVC",
-                    ));
+                    )
+                    .into());
                 }
             };
             if pattern > 0 {
@@ -638,10 +647,10 @@ impl<H: EncodeHandler> Encoder<H> {
                     .and_then(|caps| caps.get_property(cap_name))
                     .and_then(|value| value.as_bool());
                 if capability == Some(false) {
-                    return Err(Error::new_custom(
-                        "Encoder::new",
-                        "B frames are not supported by this GPU and AMF implementation",
-                    ));
+                    return Err(InvalidArgumentError::new(
+                        "this GPU and AMF implementation do not support B frames",
+                    )
+                    .into());
                 }
             }
         }
@@ -658,7 +667,7 @@ impl<H: EncodeHandler> Encoder<H> {
             config.width as amf_int32,
             config.height as amf_int32,
         );
-        Error::check(result, "AMFComponent::Init")?;
+        AmfError::check(result, "AMFComponent::Init")?;
 
         let codec_config = config.codec;
 
@@ -670,13 +679,15 @@ impl<H: EncodeHandler> Encoder<H> {
             .name("amf-encoder-worker".into())
             .spawn(move || {
                 worker(worker_component, handler, cmd_rx, worker_codec_config);
-            })
-            .map_err(|e| {
-                Error::new_custom(
-                    "Encoder::new",
-                    &format!("failed to spawn worker thread: {e}"),
-                )
-            })?;
+            });
+        let poll_thread = match poll_thread {
+            Ok(handle) => handle,
+            Err(source) => {
+                return Err(
+                    EnvironmentError::new("failed to spawn encoder worker thread", source).into(),
+                );
+            }
+        };
 
         Ok(Self {
             component,
@@ -709,13 +720,11 @@ impl<H: EncodeHandler> Encoder<H> {
             Some(HevcProfile::Main) => "HevcProfile::Main",
             None => "the default HEVC profile (Main)",
         };
-        Err(Error::new_custom(
-            "Encoder::new",
-            &format!(
-                "HEVC 10-bit input requires HevcProfile::Main10: {profile} with {:?} (set HevcProfile::Main10)",
-                config.frame_format
-            ),
+        Err(InvalidArgumentError::new(format!(
+            "HEVC 10bit input requires HevcProfile::Main10: {profile} with {:?} (set HevcProfile::Main10)",
+            config.frame_format
         ))
+        .into())
     }
 
     /// エンコーダーにプロパティを設定する
@@ -745,10 +754,7 @@ impl<H: EncodeHandler> Encoder<H> {
     /// 場合も含む。
     pub fn reconfigure(&mut self, params: ReconfigureParams) -> Result<(), Error> {
         if self.cmd_tx.is_none() {
-            return Err(Error::new_custom(
-                "Encoder::reconfigure",
-                "encoder is already finished",
-            ));
+            return Err(InvalidStateError::new("encoder is already finished").into());
         }
 
         // HEVC には B フレーム用の QP プロパティがない。また AMF の HEVC では
@@ -756,16 +762,12 @@ impl<H: EncodeHandler> Encoder<H> {
         // AV1 の GOPSize と異なり初期化後には変更できない。再設定では指定できない。
         if let CodecConfig::Hevc(_) = &self.codec_config {
             if params.qpb.is_some() {
-                return Err(Error::new_custom(
-                    "Encoder::reconfigure",
-                    "qpb is not supported for HEVC",
-                ));
+                return Err(InvalidArgumentError::new("qpb is not supported for HEVC").into());
             }
             if params.gop_pic_size.is_some() {
-                return Err(Error::new_custom(
-                    "Encoder::reconfigure",
-                    "gop_pic_size cannot be changed for HEVC",
-                ));
+                return Err(
+                    InvalidArgumentError::new("gop_pic_size cannot be changed for HEVC").into(),
+                );
             }
         }
 
@@ -795,19 +797,17 @@ impl<H: EncodeHandler> Encoder<H> {
             (None, None) => Ok(None),
             (Some(num), Some(den)) => {
                 if num == 0 || den == 0 {
-                    return Err(Error::new_custom(
-                        "Encoder::reconfigure",
-                        &format!(
-                            "invalid framerate: {num}/{den} (must be non-zero when specified)"
-                        ),
-                    ));
+                    return Err(InvalidArgumentError::new(format!(
+                        "invalid framerate: {num}/{den} (must be non-zero when specified)"
+                    ))
+                    .into());
                 }
                 Ok(Some((num, den)))
             }
-            _ => Err(Error::new_custom(
-                "Encoder::reconfigure",
+            _ => Err(InvalidArgumentError::new(
                 "framerate_num and framerate_den must be set together",
-            )),
+            )
+            .into()),
         }
     }
 
@@ -1149,28 +1149,25 @@ impl<H: EncodeHandler> Encoder<H> {
         user_data: H::UserData,
     ) -> Result<(), Error> {
         if self.cmd_tx.is_none() {
-            return Err(Error::new_custom(
-                "Encoder::encode",
-                "encoder is already finished",
-            ));
+            return Err(InvalidStateError::new("encoder is already finished").into());
         }
 
         // AMF は同じ Context に載ったオブジェクトの受け渡しを前提としているため、
         // 投入前に同じ Context のハンドルであることを確認する。
         if surface.context() != self.context {
-            return Err(Error::new_custom(
-                "Encoder::encode",
+            return Err(InvalidArgumentError::new(
                 "surface does not belong to the encoder's AMF context",
-            ));
+            )
+            .into());
         }
 
         // AMF コンポーネントは投入した Surface を解放するまで排他アクセスするため、
         // 他のハンドルが残っている状態では投入しない。
         if surface.is_shared() {
-            return Err(Error::new_custom(
-                "Encoder::encode",
+            return Err(InvalidStateError::new(
                 "surface is shared with other handles; drop clones, planes, and property storages before submitting",
-            ));
+            )
+            .into());
         }
 
         // 入力と出力の対応付けに使う一意な値を割り当てる。
@@ -1178,7 +1175,7 @@ impl<H: EncodeHandler> Encoder<H> {
         self.next_frame_id = self
             .next_frame_id
             .checked_add(1)
-            .ok_or_else(|| Error::new_custom("Encoder::encode", "frame ID counter overflowed"))?;
+            .ok_or_else(|| InternalError::new("frame ID counter overflowed"))?;
 
         {
             let property = surface.property_storage()?;
@@ -1191,12 +1188,14 @@ impl<H: EncodeHandler> Encoder<H> {
         tracing::trace!("Encoder::encode: SubmitInput");
         // SubmitInput (INPUT_FULL の場合はリトライする)
         let max_retries = 100;
+        let mut last_result = AMF_RESULT::AMF_OK;
         let mut submitted = false;
         for retry in 0..max_retries {
             let result = unsafe {
                 self.component
                     .submit_input(surface.as_ptr() as *mut AMFData)
             };
+            last_result = result;
 
             // AMF_NEED_MORE_INPUT は入力を受け付けたが、まだ出力を生成できないことを
             // 示す。B フレームでは複数の入力を必要とするため、受理として扱う。
@@ -1213,13 +1212,13 @@ impl<H: EncodeHandler> Encoder<H> {
                 continue;
             }
             // その他のエラー
-            return Error::check(result, "AMFComponent::SubmitInput");
+            return AmfError::check(result, "AMFComponent::SubmitInput").map_err(Into::into);
         }
         if !submitted {
-            return Err(Error::new_custom(
-                "Encoder::encode",
-                "SubmitInput retry limit exceeded",
-            ));
+            return Err(InternalError::new(format!(
+                "AMFComponent::SubmitInput did not accept input after {max_retries} retries (last status: {last_result:?})"
+            ))
+            .into());
         }
 
         // ワーカースレッドに Submit コマンドを送信する
@@ -1229,8 +1228,7 @@ impl<H: EncodeHandler> Encoder<H> {
             .send(WorkerCommand::Submit {
                 frame_id,
                 user_data,
-            })
-            .map_err(|_| Error::new_custom("Encoder::encode", "worker thread terminated"))?;
+            })?;
 
         Ok(())
     }
@@ -1337,17 +1335,14 @@ impl<H: EncodeHandler> Encoder<H> {
     /// として扱う。
     pub fn finish(&mut self) -> Result<(), Error> {
         if self.cmd_tx.is_none() {
-            return Err(Error::new_custom(
-                "Encoder::finish",
-                "encoder is already finished",
-            ));
+            return Err(InvalidStateError::new("encoder is already finished").into());
         }
 
         // Drain を呼び出して残りのフレームを出力させる
         let result = self.component.drain();
         // AMF_INPUT_FULL は Drain 中に返ることがあるが無視する
         if result != AMF_RESULT::AMF_OK && result != AMF_RESULT::AMF_INPUT_FULL {
-            Error::check(result, "AMFComponent::Drain")?;
+            return Err(AmfError::new(result, "AMFComponent::Drain").into());
         }
 
         // Drain に成功してから `cmd_tx` を取り出す。以降は終了済みとして扱い、
@@ -1360,31 +1355,21 @@ impl<H: EncodeHandler> Encoder<H> {
 
         // Finish コマンドでワーカースレッドに残りの出力を処理させる
         let (tx, rx) = mpsc::sync_channel(1);
-        let send_result = cmd_tx.send(WorkerCommand::Finish(tx));
+        let worker_replied = cmd_tx.send(WorkerCommand::Finish(tx)).is_ok() && rx.recv().is_ok();
 
         // Finish を送れなかった場合はワーカーの受信側が既に破棄されているため、
         // ワーカーは終了済みか終了処理中である。なので送信結果にかかわらず
         // join で待つ。
-        let receive_result = match &send_result {
-            Ok(()) => rx.recv().map_err(|_| ()),
-            Err(_) => Err(()),
-        };
         let join_result = match self.poll_thread.take() {
             Some(handle) => handle.join(),
             None => Ok(()),
         };
 
-        match (receive_result, join_result) {
-            (Ok(()), Ok(())) => Ok(()),
+        match (worker_replied, join_result) {
+            (true, Ok(())) => Ok(()),
             // ハンドラーの panic は、panic の内容をエラーに含めずに返す。
-            (_, Err(_)) => Err(Error::new_custom(
-                "Encoder::finish",
-                "worker thread panicked",
-            )),
-            (Err(()), Ok(())) => Err(Error::new_custom(
-                "Encoder::finish",
-                "worker thread terminated",
-            )),
+            (_, Err(_)) => Err(InternalError::new("encoder worker thread panicked").into()),
+            (false, Ok(())) => Err(InternalError::new("encoder worker thread terminated").into()),
         }
     }
 }
@@ -1443,7 +1428,7 @@ fn worker<H: EncodeHandler>(
                     deliver_buffered(&mut output_buffer, &mut pending, &mut handler);
                     if status == DrainStatus::Eof {
                         flush_buffered_outputs(&mut output_buffer, &mut pending, &mut handler);
-                        report_unmatched_inputs(&mut pending, &mut handler, "Encoder::finish");
+                        report_unmatched_inputs(&mut pending, &mut handler);
                         break;
                     }
                     if pending.is_empty() && output_buffer.is_empty() {
@@ -1546,7 +1531,7 @@ fn drain_output(
                 return Ok(DrainStatus::Eof);
             }
             QueryOutputKind::TerminalError => {
-                return Err(Error::from_amf(result, "AMFComponent::QueryOutput"));
+                return Err(AmfError::new(result, "AMFComponent::QueryOutput").into());
             }
         }
     }
@@ -1612,10 +1597,9 @@ fn flush_buffered_outputs<H: EncodeHandler>(
                     picture_type,
                     user_data,
                 })),
-                None => handler.on_encoded(Err(Error::new_custom(
-                    "Encoder::worker",
-                    &format!("no submitted frame for output with frame ID {frame_id}"),
-                )
+                None => handler.on_encoded(Err(Error::Internal(InternalError::new(format!(
+                    "the encoder produced output that matches no submitted input (frame ID {frame_id})"
+                )))
                 .into())),
             },
             Err(output_error) => {
@@ -1629,21 +1613,19 @@ fn flush_buffered_outputs<H: EncodeHandler>(
     }
 }
 
-/// 出力が得られなかった入力を、`function` を発生元とする `Err` として通知する。
+/// 出力が得られなかった入力を `Err` として通知する。
 ///
 /// 通知順は入力順とする。
 fn report_unmatched_inputs<H: EncodeHandler>(
     pending: &mut HashMap<i64, H::UserData>,
     handler: &mut H,
-    function: &'static str,
 ) {
     let mut frame_ids: Vec<_> = pending.drain().map(|(frame_id, _)| frame_id).collect();
     frame_ids.sort_unstable();
     for frame_id in frame_ids {
-        handler.on_encoded(Err(Error::new_custom(
-            function,
-            &format!("encoder did not output a frame for submitted input with frame ID {frame_id}"),
-        )
+        handler.on_encoded(Err(Error::Internal(InternalError::new(format!(
+            "the encoder did not produce output for the submitted input (frame ID {frame_id})"
+        )))
         .into()));
     }
 }
@@ -1658,13 +1640,13 @@ fn notify_terminal_error<H: EncodeHandler>(
 ) {
     flush_buffered_outputs(output_buffer, pending, handler);
     handler.on_encoded(Err(error.into()));
-    report_unmatched_inputs(pending, handler, "Encoder::worker");
+    report_unmatched_inputs(pending, handler);
 }
 
 /// 出力バッファ、ピクチャタイプ、対応付け用の値を返す。
 ///
-/// 出力バッファを返せない場合は `Err` を返す。バッファを取得できた後のエラーには
-/// 対応付け用の値を付ける。
+/// 出力バッファを返せない場合は `Err` を返す。対応付け用の値を取得できた後の
+/// エラーにはその値を付け、取得前のエラーには付けない。
 fn extract_encoded_output(
     data: *mut AMFData,
     codec_config: &CodecConfig,
@@ -1674,32 +1656,20 @@ fn extract_encoded_output(
     if buffer.is_null() {
         return Err(OutputError {
             frame_id: None,
-            error: Error::new_custom("extract_encoded_output", "buffer is null"),
+            error: InternalError::new("output buffer is null").into(),
         });
     }
     // エンコーダーの出力バッファは、エンコーダーが作成された Context から確保されている
-    let buffer =
-        unsafe { Buffer::from_raw(buffer, context.clone()) }.map_err(|error| OutputError {
-            frame_id: None,
-            error,
-        })?;
+    let buffer = without_frame_id(unsafe { Buffer::from_raw(buffer, context.clone()) })?;
     // `Encoder::encode` が入力 Surface に設定した値を、AMF が同じフレームの出力 Buffer へ
     // 引き継ぐ。`Buffer::get_pts()` はフレームの識別に使えないため参照しない。
-    let property = buffer.property_storage().map_err(|error| OutputError {
-        frame_id: None,
-        error,
-    })?;
-    let frame_id = property
-        .get_property_int64(FRAME_ID_PROPERTY)
-        .map_err(|error| OutputError {
-            frame_id: None,
-            error,
-        })?;
+    let property = without_frame_id(buffer.property_storage())?;
+    let frame_id = without_frame_id(property.get_property_int64(FRAME_ID_PROPERTY))?;
     let buf_size = buffer.get_size();
     if buf_size == 0 {
         return Err(OutputError {
             frame_id: Some(frame_id),
-            error: Error::new_custom("extract_encoded_output", "buffer size is 0"),
+            error: InternalError::new("output buffer size is 0").into(),
         });
     }
     // エンコーダーの出力バッファはホストメモリとは限らないため、メモリ種別ではなく
@@ -1708,14 +1678,18 @@ fn extract_encoded_output(
     if buf_native.is_null() {
         return Err(OutputError {
             frame_id: Some(frame_id),
-            error: Error::new_custom("extract_encoded_output", "buffer native is null"),
+            error: InternalError::new("output buffer native pointer is null").into(),
         });
     }
-    let picture_type =
-        get_output_picture_type(&buffer, codec_config).map_err(|error| OutputError {
-            frame_id: Some(frame_id),
-            error,
-        })?;
+    let picture_type = match get_output_picture_type(&buffer, codec_config) {
+        Ok(picture_type) => picture_type,
+        Err(error) => {
+            return Err(OutputError {
+                frame_id: Some(frame_id),
+                error,
+            });
+        }
+    };
     Ok((buffer, picture_type, frame_id))
 }
 

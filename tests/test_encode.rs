@@ -4,10 +4,10 @@ use std::time::Duration;
 use shiguredo_amf::amf::Surface;
 use shiguredo_amf::ffi::AMF_RESULT;
 use shiguredo_amf::{
-    Av1EncoderConfig, Av1Profile, CodecConfig, EncodeHandler, EncodeOptions, EncodedFrame, Encoder,
-    EncoderConfig, Error, FnEncodeHandler, FrameFormat, H264EncoderConfig, H264Profile,
-    HevcEncoderConfig, HevcProfile, PlaneType, RateControlMode, ReconfigureParams, VideoCodecType,
-    supported_codecs,
+    AmfError, Av1EncoderConfig, Av1Profile, CodecConfig, EncodeHandler, EncodeOptions,
+    EncodedFrame, Encoder, EncoderConfig, Error, FnEncodeHandler, FrameFormat, H264EncoderConfig,
+    H264Profile, HevcEncoderConfig, HevcProfile, PlaneType, RateControlMode, ReconfigureParams,
+    VideoCodecType, supported_codecs,
 };
 
 pub mod helpers;
@@ -15,6 +15,16 @@ pub mod helpers;
 use helpers::{
     copy_nv12_to_surface, create_context, generate_dummy_nv12, h264_cbr_test_encoder_config,
 };
+
+/// AMF のエラーから分類型を取り出す
+///
+/// AMF の呼び出しに起因しないエラーが返された場合は、`context` を付けてテストを失敗させる。
+fn amf_error<'a>(error: &'a Error, context: &str) -> &'a AmfError {
+    match error {
+        Error::Amf(error) => error,
+        other => panic!("{context}: AMF のエラーではない: {other:?}"),
+    }
+}
 
 /// ReconfigureParams::default() が全項目未指定であることを確認する
 #[test]
@@ -136,14 +146,9 @@ fn test_encode_after_finish_is_rejected() {
     let error = encoder
         .encode(surface, &EncodeOptions::default(), ())
         .expect_err("finish 後の encode が成功した");
-    assert_eq!(
-        error.status(),
-        None,
-        "AMF のエラーではなく Encoder::encode のエラーであるべき: {error}"
-    );
     assert!(
-        error.to_string().contains("already finished"),
-        "finish 後の encode のエラーメッセージが想定と異なる: {error}"
+        matches!(&error, Error::InvalidState(_)),
+        "Encoder::encode の状態エラーであるべき: {error}"
     );
 }
 
@@ -163,14 +168,9 @@ fn test_reconfigure_after_finish_is_rejected() {
     let error = encoder
         .reconfigure(params)
         .expect_err("finish 後の reconfigure が成功した");
-    assert_eq!(
-        error.status(),
-        None,
-        "AMF のエラーではなく Encoder::reconfigure のエラーであるべき: {error}"
-    );
     assert!(
-        error.to_string().contains("already finished"),
-        "finish 後の reconfigure のエラーメッセージが想定と異なる: {error}"
+        matches!(&error, Error::InvalidState(_)),
+        "Encoder::reconfigure の状態エラーであるべき: {error}"
     );
 }
 
@@ -182,14 +182,9 @@ fn test_finish_twice_is_rejected() {
 
     encoder.finish().expect("1 回目の finish に失敗");
     let error = encoder.finish().expect_err("2 回目の finish が成功した");
-    assert_eq!(
-        error.status(),
-        None,
-        "AMF のエラーではなく Encoder::finish のエラーであるべき: {error}"
-    );
     assert!(
-        error.to_string().contains("already finished"),
-        "2 回目の finish のエラーメッセージが想定と異なる: {error}"
+        matches!(&error, Error::InvalidState(_)),
+        "Encoder::finish の状態エラーであるべき: {error}"
     );
 }
 
@@ -305,14 +300,13 @@ fn test_encoder_rejects_hevc_10bit_without_main10() {
             let err = create_encoder(test_encoder_config(codec.clone(), frame_format))
                 .err()
                 .expect("10bit 入力と Main プロファイルなのにエンコーダーを作成できた");
-            assert_eq!(
-                err.status(),
-                None,
-                "{name} {frame_format:?}: AMF のエラーではなく Encoder::new のエラーであるべき: {err}"
+            assert!(
+                matches!(&err, Error::InvalidArgument(_)),
+                "{name} {frame_format:?}: Encoder::new の引数エラーであるべき: {err}"
             );
             let message = err.to_string();
             assert!(
-                message.contains("HEVC 10-bit input requires HevcProfile::Main10"),
+                message.contains("HEVC 10bit input requires HevcProfile::Main10"),
                 "{name} {frame_format:?}: 想定したエラーメッセージではない: {message}"
             );
             assert!(
@@ -331,10 +325,9 @@ fn test_encoder_rejects_hevc_qpb() {
     let err = create_encoder(config)
         .err()
         .expect("HEVC に qpb を指定したのにエンコーダーを作成できた");
-    assert_eq!(
-        err.status(),
-        None,
-        "AMF のエラーではなく Encoder::new のエラーであるべき: {err}"
+    assert!(
+        matches!(&err, Error::InvalidArgument(_)),
+        "Encoder::new の引数エラーであるべき: {err}"
     );
     assert!(
         err.to_string().contains("qpb is not supported for HEVC"),
@@ -351,10 +344,9 @@ fn test_encoder_rejects_hevc_b_pic_pattern() {
     let err = create_encoder(config)
         .err()
         .expect("HEVC に b_pic_pattern を指定したのにエンコーダーを作成できた");
-    assert_eq!(
-        err.status(),
-        None,
-        "AMF のエラーではなく Encoder::new のエラーであるべき: {err}"
+    assert!(
+        matches!(&err, Error::InvalidArgument(_)),
+        "Encoder::new の引数エラーであるべき: {err}"
     );
     assert!(
         err.to_string()
@@ -396,16 +388,79 @@ fn test_encoder_rejects_b_frames_not_supported_by_gpu() {
     let err = create_encoder(config)
         .err()
         .expect("B フレーム非対応の GPU なのにエンコーダーを作成できた");
-    assert_eq!(
-        err.status(),
-        None,
-        "AMF のエラーではなく Encoder::new のエラーであるべき: {err}"
+    assert!(
+        matches!(&err, Error::InvalidArgument(_)),
+        "Encoder::new の引数エラーであるべき: {err}"
     );
     assert!(
-        err.to_string()
-            .contains("B frames are not supported by this GPU"),
+        err.to_string().contains("do not support B frames"),
         "想定したエラーメッセージではない: {err}"
     );
+}
+
+/// Encoder::new が不正な解像度とフレームレートを InvalidArgument で拒否することを確認する
+#[test]
+fn test_encoder_rejects_invalid_config() {
+    let cases = [
+        ("zero width", 0, 240, 30, 1, "invalid resolution"),
+        ("odd height", 320, 241, 30, 1, "invalid resolution"),
+        (
+            "width exceeds i32::MAX",
+            i32::MAX as u32 + 1,
+            240,
+            30,
+            1,
+            "invalid resolution",
+        ),
+        (
+            "zero framerate denominator",
+            320,
+            240,
+            30,
+            0,
+            "invalid framerate",
+        ),
+    ];
+    for (name, width, height, framerate_num, framerate_den, expected_message) in cases {
+        let mut config = h264_cbr_test_encoder_config();
+        config.width = width;
+        config.height = height;
+        config.framerate_num = framerate_num;
+        config.framerate_den = framerate_den;
+        let error = Encoder::new(create_context(), config, FnEncodeHandler::<()>::new(|_| {}))
+            .err()
+            .expect("不正な設定のエンコーダーを作成できた");
+        assert!(
+            matches!(&error, Error::InvalidArgument(_)),
+            "{name}: InvalidArgument ではない: {error}"
+        );
+        assert!(
+            error.to_string().contains(expected_message),
+            "{name}: エラーメッセージが想定と異なる: {error}"
+        );
+    }
+}
+
+/// Encoder::reconfigure がフレームレートの片方だけの指定を InvalidArgument で拒否することを確認する
+#[test]
+fn test_reconfigure_rejects_incomplete_framerate() {
+    let mut encoder =
+        create_encoder(h264_cbr_test_encoder_config()).expect("エンコーダーの作成に失敗");
+    let error = encoder
+        .reconfigure(ReconfigureParams {
+            framerate_num: Some(30),
+            ..ReconfigureParams::default()
+        })
+        .expect_err("フレームレートの分子だけを指定した reconfigure が成功した");
+    assert!(
+        matches!(&error, Error::InvalidArgument(_)),
+        "InvalidArgument ではない: {error}"
+    );
+    assert!(
+        error.to_string().contains("must be set together"),
+        "エラーメッセージが想定と異なる: {error}"
+    );
+    encoder.finish().expect("finish に失敗");
 }
 
 /// P010 入力で HEVC Main10 と AV1 のエンコーダーを初期化し、エンコードできることを確認する
@@ -425,10 +480,16 @@ fn test_encoder_p010_10bit_encoding() {
             Ok(encoder) => encoder,
             Err(e) => {
                 // 10bit エンコードに対応していない GPU では AMF の Init が失敗する
+                let error = amf_error(&e, &format!("{name}: P010"));
                 assert_eq!(
-                    e.status(),
-                    Some(AMF_RESULT::AMF_INVALID_FORMAT),
-                    "{name}: P010 のエンコーダーを作成できず、想定していないエラーになった: {e}"
+                    error.status(),
+                    AMF_RESULT::AMF_INVALID_FORMAT,
+                    "{name}: P010 のエンコーダーが想定外のステータスで失敗した: {e}"
+                );
+                assert_eq!(
+                    error.operation(),
+                    "AMFComponent::Init",
+                    "{name}: P010 のエンコーダーが Init 以外の AMF 呼び出しで失敗した: {e}"
                 );
                 continue;
             }
@@ -484,10 +545,16 @@ fn test_encoder_y210_y410_initialization() {
                     drop(encoder);
                 }
                 Err(e) => {
+                    let error = amf_error(&e, &format!("{name} {frame_format:?}"));
                     assert_eq!(
-                        e.status(),
-                        Some(AMF_RESULT::AMF_INVALID_FORMAT),
-                        "{name} {frame_format:?}: 想定していないエラー: {e}"
+                        error.status(),
+                        AMF_RESULT::AMF_INVALID_FORMAT,
+                        "{name} {frame_format:?}: 想定外のステータスで失敗した: {e}"
+                    );
+                    assert_eq!(
+                        error.operation(),
+                        "AMFComponent::Init",
+                        "{name} {frame_format:?}: Init 以外の AMF 呼び出しで失敗した: {e}"
                     );
                 }
             }

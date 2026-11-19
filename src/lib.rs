@@ -98,7 +98,9 @@ pub use encode::{
     EncoderConfig, FnEncodeHandler, H264EncoderConfig, HevcEncoderConfig, PictureType,
     RateControlMode, ReconfigureParams, frame_type,
 };
-pub use error::Error;
+pub use error::{
+    AmfError, EnvironmentError, Error, InternalError, InvalidArgumentError, InvalidStateError,
+};
 pub use types::{
     Av1Profile, FrameFormat, H264Profile, HevcProfile, MemoryType, PlaneType, SurfaceFormat,
 };
@@ -181,29 +183,16 @@ impl AmfLibrary {
         // アクセスはすべてこのロックの下で行う。
         let inner = unsafe { &mut *self.inner.get() };
         if inner.is_none() {
-            let lib = dl::DynLib::open(Path::new(AMF_DLL_NAME)).map_err(|e| {
-                Error::new_custom(
-                    "AmfLibrary::ensure_inner",
-                    &format!("failed to load {AMF_DLL_NAME}: {e}"),
-                )
-            })?;
+            let lib = dl::DynLib::open(Path::new(AMF_DLL_NAME))?;
 
-            let amf_init: AmfInitFn = unsafe { lib.get(b"AMFInit") }.map_err(|e| {
-                Error::new_custom(
-                    "AmfLibrary::ensure_inner",
-                    &format!("failed to find AMFInit: {e}"),
-                )
-            })?;
+            let amf_init: AmfInitFn = unsafe { lib.get(b"AMFInit") }?;
 
             let mut factory: *mut AMFFactory = ptr::null_mut();
             let result = unsafe { amf_init(AMF_FULL_VERSION, &mut factory) };
-            Error::check(result, "AMFInit")?;
+            AmfError::check(result, "AMFInit")?;
 
             if factory.is_null() {
-                return Err(Error::new_custom(
-                    "AmfLibrary::ensure_inner",
-                    "AMFInit returned null factory",
-                ));
+                return Err(InternalError::new("AMFInit returned null factory").into());
             }
 
             // 初期化に成功した場合だけキャッシュする。失敗時は `inner` を
@@ -217,17 +206,11 @@ impl AmfLibrary {
     pub fn query_version(&self) -> Result<(u16, u16, u16, u16), Error> {
         let guard = self.state.lock();
         let inner = self.ensure_inner(&guard)?;
-        let amf_query_version: AmfQueryVersionFn = unsafe { inner.lib.get(b"AMFQueryVersion") }
-            .map_err(|e| {
-                Error::new_custom(
-                    "AmfLibrary::query_version",
-                    &format!("failed to find AMFQueryVersion: {e}"),
-                )
-            })?;
+        let amf_query_version: AmfQueryVersionFn = unsafe { inner.lib.get(b"AMFQueryVersion") }?;
 
         let mut version: amf_uint64 = 0;
         let result = unsafe { amf_query_version(&mut version) };
-        Error::check(result, "AMFQueryVersion")?;
+        AmfError::check(result, "AMFQueryVersion")?;
 
         let major = ((version >> 48) & 0xFFFF) as u16;
         let minor = ((version >> 32) & 0xFFFF) as u16;
@@ -249,15 +232,15 @@ impl AmfLibrary {
             let mut context: *mut sys::AMFContext = ptr::null_mut();
             let result = unsafe {
                 let vtbl = &*(*inner.factory).pVtbl;
-                require_vtbl_fn(vtbl.CreateContext, "CreateContext")?(inner.factory, &mut context)
+                require_vtbl_fn(vtbl.CreateContext, "AMFFactory::CreateContext")?(
+                    inner.factory,
+                    &mut context,
+                )
             };
-            Error::check(result, "AMFFactory::CreateContext")?;
+            AmfError::check(result, "AMFFactory::CreateContext")?;
 
             if context.is_null() {
-                return Err(Error::new_custom(
-                    "AmfLibrary::create_context",
-                    "CreateContext returned null",
-                ));
+                return Err(InternalError::new("CreateContext returned null").into());
             }
 
             unsafe { Context::from_raw_with_state(context, Arc::clone(&self.state)) }?
@@ -280,19 +263,16 @@ impl AmfLibrary {
             let mut component: *mut sys::AMFComponent = ptr::null_mut();
             let result = unsafe {
                 let vtbl = &*(*inner.factory).pVtbl;
-                require_vtbl_fn(vtbl.CreateComponent, "CreateComponent")?(
+                require_vtbl_fn(vtbl.CreateComponent, "AMFFactory::CreateComponent")?(
                     inner.factory,
                     context.as_ptr(),
                     component_id_w.as_ptr(),
                     &mut component,
                 )
             };
-            Error::check(result, "AMFFactory::CreateComponent")?;
+            AmfError::check(result, "AMFFactory::CreateComponent")?;
             if component.is_null() {
-                return Err(Error::new_custom(
-                    "AmfLibrary::create_component",
-                    "CreateComponent returned null",
-                ));
+                return Err(InternalError::new("CreateComponent returned null").into());
             }
             component
         };

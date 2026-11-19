@@ -11,7 +11,9 @@ use std::time::Duration;
 
 use crate::AmfLibrary;
 use crate::amf::{Buffer, Component, Context, Surface};
-use crate::error::Error;
+use crate::error::{
+    AmfError, EnvironmentError, Error, InternalError, InvalidArgumentError, InvalidStateError,
+};
 use crate::query_output::{DrainStatus, QueryOutputKind, classify_query_output};
 use crate::sys::{self, AMF_RESULT, AMFData, AMFSurface, amf_pts};
 use crate::types::{FrameFormat, MemoryType, SurfaceFormat};
@@ -172,8 +174,10 @@ enum WorkerCommand<T> {
 /// その他のエラーは `Err` を返す。
 fn submit_input_with_retry(component: &Component, buffer: &Buffer) -> Result<AMF_RESULT, Error> {
     let max_retries = 100;
+    let mut last_result = AMF_RESULT::AMF_OK;
     for retry in 0..max_retries {
         let result = unsafe { component.submit_input(buffer.as_ptr() as *mut AMFData) };
+        last_result = result;
         if retry > 0 && retry % 10 == 0 {
             tracing::trace!("Decoder::SubmitInput: retry={retry}, result={result:?}");
         }
@@ -190,14 +194,14 @@ fn submit_input_with_retry(component: &Component, buffer: &Buffer) -> Result<AMF
             result,
             AMF_RESULT::AMF_INPUT_FULL | AMF_RESULT::AMF_DECODER_NO_FREE_SURFACES
         ) {
-            return Err(Error::from_amf(result, "AMFComponent::SubmitInput"));
+            return Err(AmfError::new(result, "AMFComponent::SubmitInput").into());
         }
         std::thread::sleep(Duration::from_millis(1));
     }
-    Err(Error::new_custom(
-        "Decoder::decode",
-        "SubmitInput retry limit exceeded",
+    Err(InternalError::new(format!(
+        "AMFComponent::SubmitInput did not accept input after {max_retries} retries (last status: {last_result:?})"
     ))
+    .into())
 }
 
 /// AMF ハードウェアデコーダー
@@ -254,7 +258,7 @@ impl<H: DecodeHandler> Decoder<H> {
 
         // デコーダーを初期化する (解像度は 0,0 でストリームから自動検出)
         let result = component.init(SurfaceFormat::from(FrameFormat::Nv12), 0, 0);
-        Error::check(result, "AMFComponent::Init")?;
+        AmfError::check(result, "AMFComponent::Init")?;
 
         let (cmd_tx, cmd_rx) = mpsc::channel();
         let worker_component = component.clone();
@@ -262,13 +266,15 @@ impl<H: DecodeHandler> Decoder<H> {
             .name("amf-decoder-worker".into())
             .spawn(move || {
                 worker(worker_component, handler, cmd_rx);
-            })
-            .map_err(|e| {
-                Error::new_custom(
-                    "Decoder::new",
-                    &format!("failed to spawn worker thread: {e}"),
-                )
-            })?;
+            });
+        let poll_thread = match poll_thread {
+            Ok(handle) => handle,
+            Err(source) => {
+                return Err(
+                    EnvironmentError::new("failed to spawn decoder worker thread", source).into(),
+                );
+            }
+        };
 
         Ok(Self {
             component,
@@ -315,28 +321,25 @@ impl<H: DecodeHandler> Decoder<H> {
     /// AMF の操作に失敗した場合にエラーを返す。
     pub fn decode(&mut self, buffer: Buffer, user_data: H::UserData) -> Result<(), Error> {
         if self.cmd_tx.is_none() {
-            return Err(Error::new_custom(
-                "Decoder::decode",
-                "decoder is already finished",
-            ));
+            return Err(InvalidStateError::new("decoder is already finished").into());
         }
 
         // AMF は同じ Context に載ったオブジェクトの受け渡しを前提としているため、
         // 投入前に同じ Context のハンドルであることを確認する。
         if buffer.context() != self.context {
-            return Err(Error::new_custom(
-                "Decoder::decode",
+            return Err(InvalidArgumentError::new(
                 "buffer does not belong to the decoder's AMF context",
-            ));
+            )
+            .into());
         }
 
         // AMF コンポーネントは投入した Buffer を解放するまで排他アクセスするため、
         // 他のハンドルが残っている状態では投入しない。
         if buffer.is_shared() {
-            return Err(Error::new_custom(
-                "Decoder::decode",
+            return Err(InvalidStateError::new(
                 "buffer is shared with other handles; drop clones before submitting",
-            ));
+            )
+            .into());
         }
 
         // 呼び出し元が入力 Buffer に設定した PTS を保存する。AMF のデコーダーは
@@ -350,7 +353,7 @@ impl<H: DecodeHandler> Decoder<H> {
         self.next_pts = self
             .next_pts
             .checked_add(1)
-            .ok_or_else(|| Error::new_custom("Decoder::decode", "PTS counter overflowed"))?;
+            .ok_or_else(|| InternalError::new("PTS counter overflowed"))?;
         buffer.set_pts(pts);
 
         tracing::trace!("Decoder::decode");
@@ -369,9 +372,6 @@ impl<H: DecodeHandler> Decoder<H> {
                         pts,
                         original_pts,
                         user_data,
-                    })
-                    .map_err(|_| {
-                        Error::new_custom("Decoder::decode", "worker thread terminated")
                     })?;
                 Ok(())
             }
@@ -380,10 +380,10 @@ impl<H: DecodeHandler> Decoder<H> {
                 // 対応付けできないフレームは通知しないが、残りの出力を回収するために
                 // finish では Drain が必要になる。
                 self.drain_required = true;
-                Err(Error::new_custom(
-                    "Decoder::decode",
+                Err(InvalidArgumentError::new(
                     "input buffer contains multiple frames; submit one frame per buffer",
-                ))
+                )
+                .into())
             }
             AMF_RESULT::AMF_RESOLUTION_CHANGED => {
                 // AMF は解像度の変化を検出すると、このバッファを受理せずに
@@ -394,7 +394,7 @@ impl<H: DecodeHandler> Decoder<H> {
                 self.reinitialize_after_resolution_change(buffer, pts, original_pts, user_data)
             }
             // helper の契約上ここには来ない。来た場合はエラーとして扱う。
-            _ => Err(Error::from_amf(result, "AMFComponent::SubmitInput")),
+            _ => Err(AmfError::new(result, "AMFComponent::SubmitInput").into()),
         }
     }
 
@@ -415,13 +415,13 @@ impl<H: DecodeHandler> Decoder<H> {
     ) -> Result<(), Error> {
         // 旧解像度の出力をすべて通知させ、ワーカーをコマンド待ちに戻す。
         // Drain と AMF_EOF 待ちはワーカーが行う。
-        match self.wait_eof_worker("Decoder::decode")? {
+        match self.wait_eof_worker()? {
             WaitEofOutcome::Drained => {}
             WaitEofOutcome::DrainFailed => {
-                return Err(Error::new_custom(
-                    "Decoder::decode",
+                return Err(InternalError::new(
                     "decoder worker terminated before the resolution change completed",
-                ));
+                )
+                .into());
             }
         }
 
@@ -431,7 +431,7 @@ impl<H: DecodeHandler> Decoder<H> {
         let cmd_tx = self
             .cmd_tx
             .take()
-            .ok_or_else(|| Error::new_custom("Decoder::decode", "worker thread terminated"))?;
+            .ok_or_else(|| InternalError::new("decoder worker thread terminated"))?;
 
         // AMF_RESOLUTION_CHANGED は Drain / Terminate / Init を要求する
         // (AMF SDK v1.5.2 の include/core/Result.h)。AMF_VIDEO_DECODER_CURRENT_SIZE は
@@ -444,14 +444,14 @@ impl<H: DecodeHandler> Decoder<H> {
         // コンポーネントを作り直す。初期化し直したデコーダーでも入力 PTS を
         // 出力 Surface へ引き継ぐよう、初期化の前に設定を適用する。
         let result = self.component.terminate();
-        Error::check(result, "AMFComponent::Terminate")?;
+        AmfError::check(result, "AMFComponent::Terminate")?;
         self.initialized = false;
         self.drain_required = false;
         set_timestamp_mode(&self.component)?;
         let result = self
             .component
             .init(SurfaceFormat::from(FrameFormat::Nv12), width, height);
-        Error::check(result, "AMFComponent::Init")?;
+        AmfError::check(result, "AMFComponent::Init")?;
         self.initialized = true;
 
         // AMF に受理されなかったバッファを新しい解像度のデコーダーへ再投入する。
@@ -462,24 +462,22 @@ impl<H: DecodeHandler> Decoder<H> {
             }
             AMF_RESULT::AMF_REPEAT => {
                 self.drain_required = true;
-                return Err(Error::new_custom(
-                    "Decoder::decode",
+                return Err(InvalidArgumentError::new(
                     "input buffer contains multiple frames; submit one frame per buffer",
-                ));
+                )
+                .into());
             }
             _ => {
-                return Err(Error::from_amf(result, "AMFComponent::SubmitInput"));
+                return Err(AmfError::new(result, "AMFComponent::SubmitInput").into());
             }
         }
 
         // 再投入したフレームをワーカーへ登録し、通常ループを再開させる。
-        cmd_tx
-            .send(WorkerCommand::Submit {
-                pts,
-                original_pts,
-                user_data,
-            })
-            .map_err(|_| Error::new_custom("Decoder::decode", "worker thread terminated"))?;
+        cmd_tx.send(WorkerCommand::Submit {
+            pts,
+            original_pts,
+            user_data,
+        })?;
         self.cmd_tx = Some(cmd_tx);
         Ok(())
     }
@@ -489,10 +487,10 @@ impl<H: DecodeHandler> Decoder<H> {
     /// ワーカーは入力キューが空くまで Drain を再試行し、`AMF_EOF` まで回収して
     /// 完了を通知する。`DrainFailed` の場合はワーカーが終端エラーで終了して
     /// いる。
-    fn wait_eof_worker(&mut self, function: &'static str) -> Result<WaitEofOutcome, Error> {
+    fn wait_eof_worker(&mut self) -> Result<WaitEofOutcome, Error> {
         let cmd_tx = match self.cmd_tx.as_ref() {
             Some(cmd_tx) => cmd_tx,
-            None => return Err(Error::new_custom(function, "worker thread terminated")),
+            None => return Err(InternalError::new("decoder worker thread terminated").into()),
         };
         let (done_tx, done_rx) = mpsc::sync_channel(1);
         if cmd_tx
@@ -500,9 +498,9 @@ impl<H: DecodeHandler> Decoder<H> {
             .is_err()
         {
             self.cmd_tx = None;
-            self.join_worker(function)?;
+            self.join_worker()?;
             self.drain_required = false;
-            return Err(Error::new_custom(function, "worker thread terminated"));
+            return Err(InternalError::new("decoder worker thread terminated").into());
         }
 
         match done_rx.recv() {
@@ -514,7 +512,7 @@ impl<H: DecodeHandler> Decoder<H> {
                 // ワーカーは終端エラーをハンドラーへ通知して終了したか、panic した。
                 // panic は join で検出する。
                 self.cmd_tx = None;
-                self.join_worker(function)?;
+                self.join_worker()?;
                 self.drain_required = false;
                 Ok(WaitEofOutcome::DrainFailed)
             }
@@ -522,41 +520,39 @@ impl<H: DecodeHandler> Decoder<H> {
     }
 
     /// ワーカースレッドを join する
-    fn join_worker(&mut self, function: &'static str) -> Result<(), Error> {
+    fn join_worker(&mut self) -> Result<(), Error> {
         match self.poll_thread.take() {
-            Some(handle) => handle
-                .join()
-                .map_err(|_| Error::new_custom(function, "worker thread panicked")),
+            Some(handle) => match handle.join() {
+                Ok(()) => Ok(()),
+                Err(_) => Err(InternalError::new("decoder worker thread panicked").into()),
+            },
             None => Ok(()),
         }
     }
 
     /// ワーカーを停止する
-    fn stop_worker(&mut self, function: &'static str) -> Result<(), Error> {
+    fn stop_worker(&mut self) -> Result<(), Error> {
         let cmd_tx = self
             .cmd_tx
             .take()
-            .ok_or_else(|| Error::new_custom(function, "worker thread terminated"))?;
+            .expect("cmd_tx must be set before stopping the worker");
         let (done_tx, done_rx) = mpsc::sync_channel(1);
-        let send_result = cmd_tx.send(WorkerCommand::Stop { done: done_tx });
+        let worker_replied =
+            cmd_tx.send(WorkerCommand::Stop { done: done_tx }).is_ok() && done_rx.recv().is_ok();
 
         // Stop を送れなかった場合はワーカーの受信側が既に破棄されているため、
         // ワーカーは終了済みか終了処理中である。なので送信結果にかかわらず
         // join で待つ。
-        let receive_result = match &send_result {
-            Ok(()) => done_rx.recv().map_err(|_| ()),
-            Err(_) => Err(()),
-        };
         let join_result = match self.poll_thread.take() {
             Some(handle) => handle.join(),
             None => Ok(()),
         };
 
-        match (receive_result, join_result) {
-            (Ok(()), Ok(())) => Ok(()),
+        match (worker_replied, join_result) {
+            (true, Ok(())) => Ok(()),
             // ハンドラーの panic は、panic の内容をエラーに含めずに返す。
-            (_, Err(_)) => Err(Error::new_custom(function, "worker thread panicked")),
-            (Err(()), Ok(())) => Err(Error::new_custom(function, "worker thread terminated")),
+            (_, Err(_)) => Err(InternalError::new("decoder worker thread panicked").into()),
+            (false, Ok(())) => Err(InternalError::new("decoder worker thread terminated").into()),
         }
     }
 
@@ -566,18 +562,15 @@ impl<H: DecodeHandler> Decoder<H> {
     ///
     /// # Errors
     ///
-    /// `finish` 済みの場合、`WaitEof` の送信に失敗した場合、または `Stop` の
-    /// 送信・完了待ちに失敗した場合にエラーを返す。ハンドラーが panic した場合も
-    /// ワーカーが停止したものとして扱う。
+    /// `finish` 済みの場合、ワーカーとの通信に失敗した場合、またはワーカーが
+    /// 停止している場合にエラーを返す。ハンドラーが panic した場合もワーカーが
+    /// 停止したものとして扱う。
     ///
     /// ワーカーが `Drain` または `AMF_EOF` の待機中に終端エラーを検出した場合は、
     /// そのエラーをハンドラーへ通知して `Ok` を返す。
     pub fn finish(&mut self) -> Result<(), Error> {
         if self.cmd_tx.is_none() {
-            return Err(Error::new_custom(
-                "Decoder::finish",
-                "decoder is already finished",
-            ));
+            return Err(InvalidStateError::new("decoder is already finished").into());
         }
 
         // 入力が受理済みなら、WaitEof でワーカーに Drain と EOF までの回収を
@@ -585,12 +578,12 @@ impl<H: DecodeHandler> Decoder<H> {
         // WaitEof 中の終端エラーはハンドラーへ通知済みなので Ok を返す。
         // ワーカーの panic と停止は Err として返す。
         if self.drain_required {
-            match self.wait_eof_worker("Decoder::finish")? {
+            match self.wait_eof_worker()? {
                 WaitEofOutcome::Drained => {}
                 WaitEofOutcome::DrainFailed => return Ok(()),
             }
         }
-        self.stop_worker("Decoder::finish")?;
+        self.stop_worker()?;
         Ok(())
     }
 }
@@ -678,7 +671,7 @@ fn worker<H: DecodeHandler>(
                 }
                 if result != AMF_RESULT::AMF_INPUT_FULL {
                     notify_terminal_error(
-                        Error::from_amf(result, "AMFComponent::Drain"),
+                        AmfError::new(result, "AMFComponent::Drain").into(),
                         &mut output_buffer,
                         &mut pending,
                         &mut handler,
@@ -824,7 +817,7 @@ fn drain_output(
                 return Ok(DrainStatus::Eof);
             }
             QueryOutputKind::TerminalError => {
-                return Err(Error::from_amf(result, "AMFComponent::QueryOutput"));
+                return Err(AmfError::new(result, "AMFComponent::QueryOutput").into());
             }
         }
     }
@@ -897,10 +890,9 @@ fn flush_buffered_outputs<H: DecodeHandler>(
                 Some(frame) => {
                     handler.on_decoded(Ok(into_decoded_frame::<H>(surface, frame)));
                 }
-                None => handler.on_decoded(Err(Error::new_custom(
-                    "Decoder::worker",
-                    &format!("no submitted frame for output with internal PTS {pts}"),
-                )
+                None => handler.on_decoded(Err(Error::Internal(InternalError::new(format!(
+                    "the decoder produced output that matches no submitted input (internal PTS {pts})"
+                )))
                 .into())),
             },
             Err(frame_error) => {
@@ -914,7 +906,7 @@ fn flush_buffered_outputs<H: DecodeHandler>(
     }
 }
 
-/// 出力が得られなかった入力を、ワーカーを発生元とする `Err` として通知する。
+/// 出力が得られなかった入力を `Err` として通知する。
 ///
 /// 通知順は入力順とする。
 fn report_unmatched_inputs<H: DecodeHandler>(
@@ -924,13 +916,10 @@ fn report_unmatched_inputs<H: DecodeHandler>(
     let mut frames: Vec<_> = pending.drain().collect();
     frames.sort_by_key(|(pts, _)| *pts);
     for (_, frame) in frames {
-        handler.on_decoded(Err(Error::new_custom(
-            "Decoder::worker",
-            &format!(
-                "decoder did not output a frame for submitted PTS {}",
-                frame.original_pts
-            ),
-        )
+        handler.on_decoded(Err(Error::Internal(InternalError::new(format!(
+            "the decoder did not produce output for the submitted input (PTS {})",
+            frame.original_pts
+        )))
         .into()));
     }
 }
@@ -963,7 +952,7 @@ fn extract_frame(
     if surface.is_null() {
         return Err(FrameError {
             pts: None,
-            error: Error::new_custom("extract_frame", "surface is null"),
+            error: InternalError::new("output surface is null").into(),
         });
     }
 
