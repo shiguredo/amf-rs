@@ -1315,22 +1315,35 @@ impl Context {
         }
 
         let context1 = context1_ptr as *mut sys::AMFContext1;
-
-        let result = unsafe {
-            let vtbl = &*(*context1).pVtbl;
-            let init_vulkan = require_vtbl_fn(vtbl.InitVulkan, "AMFContext1::InitVulkan")?;
-            let release = vtbl.Release;
-
-            let r = init_vulkan(context1, device);
-
-            if let Some(release) = release {
-                release(context1);
-            }
-
-            r
+        let vtbl = unsafe { &*(*context1).pVtbl };
+        let release = require_vtbl_fn(vtbl.Release, "AMFContext1::Release")?;
+        // Release を取得した直後にガードを作り、InitVulkan の vtable 取得が
+        // 失敗しても参照が残らないようにする。
+        let context1 = Context1Guard {
+            ptr: context1,
+            release,
         };
 
+        let init_vulkan = require_vtbl_fn(vtbl.InitVulkan, "AMFContext1::InitVulkan")?;
+        let result = unsafe { init_vulkan(context1.ptr, device) };
         Error::check(result, "AMFContext1::InitVulkan")
+    }
+}
+
+/// `AMFContext1` の参照を保持し、破棄時に `Release` を呼ぶガード
+struct Context1Guard {
+    /// 解放対象の `AMFContext1`
+    ptr: *mut sys::AMFContext1,
+    /// `AMFContext1::Release` の関数ポインタ
+    release: unsafe extern "C" fn(*mut sys::AMFContext1) -> sys::amf_long,
+}
+
+impl Drop for Context1Guard {
+    fn drop(&mut self) {
+        // InitVulkan の成否にかかわらず、QueryInterface が増やした参照を解放する。
+        unsafe {
+            (self.release)(self.ptr);
+        }
     }
 }
 

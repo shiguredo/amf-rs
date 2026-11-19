@@ -115,12 +115,17 @@
   - `Encoder::finish()` / `Decoder::finish()` はワーカーの終了を join まで待つ
   - `Drop` では通知前の入出力を破棄し、ハンドラーの panic と `Component::terminate` の失敗を `tracing::error!` で記録する
   - @melpon
+- [FIX] `AmfLibrary::create_context` が `AMFContext1` の `InitVulkan` を取得できない場合に参照を解放しない問題を修正する
+  - @melpon
 - [FIX] 解像度が変化するストリームでもデコードを継続できるようにする
   - 解像度の変化を検出したら、保留中の出力を通知したあと新しい解像度でデコーダーを作り直し、変化を検出したフレームを再投入する
   - @melpon
 
 ### misc
 
+- [UPDATE] レート制御メソッドの設定に bindgen の enum を使うようにする
+  - H.264 / HEVC / AV1 のレート制御メソッドをコーデック別の enum へ変換して設定する
+  - @melpon
 - [UPDATE] `ffi` の `AMF_SURFACE_FORMAT` / `AMF_MEMORY_TYPE` / `AMF_VARIANT_TYPE` を newtype enum に変更する
   - @melpon
 - [UPDATE] shiguredo-rust と AGENTS.md の規約に合わせて lint 抑制・`.unwrap()`・ログ出力・コメントを整理する
@@ -138,6 +143,8 @@
   - @voluntas
 - [UPDATE] `examples/amf-check` の `supported_codecs` 呼び出しを 1 回にまとめる
   - Vulkan デバイスの初期化とコーデックのプローブの重複をなくす
+  - @melpon
+- [UPDATE] Windows / macOS 向けの未使用の分岐を削除する
   - @melpon
 
 ## 2026.3.0
