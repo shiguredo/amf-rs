@@ -4,10 +4,10 @@ use std::time::Duration;
 use shiguredo_amf::amf::Surface;
 use shiguredo_amf::ffi::AMF_RESULT;
 use shiguredo_amf::{
-    Av1EncoderConfig, Av1Profile, CodecConfig, EncodeHandler, EncodeOptions, EncodedFrame, Encoder,
-    EncoderConfig, Error, FnEncodeHandler, FrameFormat, H264EncoderConfig, H264Profile,
-    HevcEncoderConfig, HevcProfile, PlaneType, RateControlMode, ReconfigureParams, VideoCodecType,
-    supported_codecs,
+    AmfError, Av1EncoderConfig, Av1Profile, CodecConfig, EncodeHandler, EncodeOptions,
+    EncodedFrame, Encoder, EncoderConfig, Error, FnEncodeHandler, FrameFormat, H264EncoderConfig,
+    H264Profile, HevcEncoderConfig, HevcProfile, PlaneType, RateControlMode, ReconfigureParams,
+    VideoCodecType, supported_codecs,
 };
 
 pub mod helpers;
@@ -16,12 +16,12 @@ use helpers::{
     copy_nv12_to_surface, create_context, generate_dummy_nv12, h264_cbr_test_encoder_config,
 };
 
-/// AMF のエラーから status を取り出す
+/// AMF のエラーから分類型を取り出す
 ///
 /// AMF の呼び出しに起因しないエラーが返された場合はテストを失敗させる。
-fn amf_status(error: &Error) -> AMF_RESULT {
+fn amf_error(error: &Error) -> &AmfError {
     match error {
-        Error::Amf(error) => error.status(),
+        Error::Amf(error) => error,
         other => panic!("AMF のエラーではない: {other}"),
     }
 }
@@ -428,10 +428,16 @@ fn test_encoder_p010_10bit_encoding() {
             Ok(encoder) => encoder,
             Err(e) => {
                 // 10bit エンコードに対応していない GPU では AMF の Init が失敗する
+                let error = amf_error(&e);
                 assert_eq!(
-                    amf_status(&e),
+                    error.status(),
                     AMF_RESULT::AMF_INVALID_FORMAT,
-                    "{name}: P010 のエンコーダーを作成できず、想定していないエラーになった: {e}"
+                    "{name}: P010 のエンコーダーが想定外の status で失敗した: {e}"
+                );
+                assert_eq!(
+                    error.operation(),
+                    "AMFComponent::Init",
+                    "{name}: P010 のエンコーダーが Init 以外の AMF 呼び出しで失敗した: {e}"
                 );
                 continue;
             }
@@ -487,10 +493,16 @@ fn test_encoder_y210_y410_initialization() {
                     drop(encoder);
                 }
                 Err(e) => {
+                    let error = amf_error(&e);
                     assert_eq!(
-                        amf_status(&e),
+                        error.status(),
                         AMF_RESULT::AMF_INVALID_FORMAT,
-                        "{name} {frame_format:?}: 想定していないエラー: {e}"
+                        "{name} {frame_format:?}: 想定外の status で失敗した: {e}"
+                    );
+                    assert_eq!(
+                        error.operation(),
+                        "AMFComponent::Init",
+                        "{name} {frame_format:?}: Init 以外の AMF 呼び出しで失敗した: {e}"
                     );
                 }
             }

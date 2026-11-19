@@ -1227,6 +1227,10 @@ fn test_reconfigure_invalid_framerate_zero() {
         })
         .expect_err("reconfigure はゼロフレームレートでエラーになること");
     assert!(
+        matches!(&err, Error::InvalidArgument(_)),
+        "ゼロフレームレートの reconfigure が InvalidArgument ではない: {err}"
+    );
+    assert!(
         err.to_string().contains("invalid framerate"),
         "想定外のエラー: {err}"
     );
@@ -1936,6 +1940,10 @@ fn test_encode_rejects_surface_with_cloned_handle() {
     let result = encoder.encode(surface, &options, ());
     let err = result.expect_err("クローンが残っている Surface のエンコードは失敗するはず");
     assert!(
+        matches!(&err, Error::InvalidState(_)),
+        "共有 Surface のエンコードが InvalidState ではない: {err}"
+    );
+    assert!(
         err.to_string().contains("shared with other handles"),
         "共有ハンドル拒否のエラーではない: {err}"
     );
@@ -1975,6 +1983,10 @@ fn test_encode_rejects_surface_with_live_property_storage() {
     let result = encoder.encode(surface, &options, ());
     let err = result.expect_err("PropertyStorage が残っている Surface のエンコードは失敗するはず");
     assert!(
+        matches!(&err, Error::InvalidState(_)),
+        "PropertyStorage が残る Surface のエンコードが InvalidState ではない: {err}"
+    );
+    assert!(
         err.to_string().contains("shared with other handles"),
         "共有ハンドル拒否のエラーではない: {err}"
     );
@@ -2005,6 +2017,10 @@ fn test_decode_rejects_buffer_with_cloned_handle() {
 
     let result = decoder.decode(first.into_parts().0, ());
     let err = result.expect_err("クローンが残っている Buffer のデコードは失敗するはず");
+    assert!(
+        matches!(&err, Error::InvalidState(_)),
+        "共有 Buffer のデコードが InvalidState ではない: {err}"
+    );
     assert!(
         err.to_string().contains("shared with other handles"),
         "共有ハンドル拒否のエラーではない: {err}"
@@ -2099,6 +2115,10 @@ fn test_encode_rejects_surface_from_other_context() {
     let result = encoder.encode(surface, &EncodeOptions::default(), ());
     let err = result.expect_err("別 Context の Surface のエンコードは失敗するはず");
     assert!(
+        matches!(&err, Error::InvalidArgument(_)),
+        "別 Context の Surface のエンコードが InvalidArgument ではない: {err}"
+    );
+    assert!(
         err.to_string().contains("does not belong"),
         "Context 不一致のエラーではない: {err}"
     );
@@ -2129,6 +2149,10 @@ fn test_decode_rejects_buffer_from_other_context() {
 
     let result = decoder.decode(first.into_parts().0, ());
     let err = result.expect_err("別 Context の Buffer のデコードは失敗するはず");
+    assert!(
+        matches!(&err, Error::InvalidArgument(_)),
+        "別 Context の Buffer のデコードが InvalidArgument ではない: {err}"
+    );
     assert!(
         err.to_string().contains("does not belong"),
         "Context 不一致のエラーではない: {err}"

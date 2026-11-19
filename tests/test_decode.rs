@@ -309,8 +309,11 @@ fn test_finish_after_failed_first_submit_does_not_hang() {
             .decode(buffer, 0)
             .expect_err("不正なバッファの decode が成功した");
         assert!(
-            error.to_string().contains("AMFComponent::SubmitInput"),
-            "想定外のエラー: {error}"
+            matches!(
+                &error,
+                Error::Amf(amf) if amf.operation() == "AMFComponent::SubmitInput"
+            ),
+            "AMFComponent::SubmitInput の AMF エラーではない: {error}"
         );
 
         let finish_result = decoder.finish();
@@ -384,6 +387,10 @@ fn test_decode_rejects_multi_frame_buffer() {
         .decode(buffer, 0)
         .expect_err("複数フレームを含むバッファの decode が成功した");
     assert!(
+        matches!(&error, Error::InvalidArgument(_)),
+        "複数フレームを含むバッファの decode が InvalidArgument ではない: {error}"
+    );
+    assert!(
         error.to_string().contains("multiple frames"),
         "複数フレームを含むバッファのエラーメッセージが想定と異なる: {error}"
     );
@@ -423,6 +430,10 @@ fn test_decode_after_finish_is_rejected() {
     let error = decoder
         .decode(buffer, 0)
         .expect_err("finish 後の decode が成功した");
+    assert!(
+        matches!(&error, Error::InvalidState(_)),
+        "finish 後の decode が InvalidState ではない: {error}"
+    );
     assert!(
         error.to_string().contains("already finished"),
         "finish 後の decode のエラーメッセージが想定と異なる: {error}"
@@ -602,6 +613,10 @@ fn test_decode_reports_input_without_output() {
         .expect("結果が存在しない")
         .expect_err("出力のない入力が成功として通知された");
     assert!(
+        matches!(&error, Error::Internal(_)),
+        "未対応入力のエラーが Internal ではない: {error}"
+    );
+    assert!(
         error.to_string().contains("submitted PTS 100000"),
         "未対応入力のエラーメッセージが想定と異なる: {error}"
     );
@@ -621,6 +636,10 @@ fn test_finish_twice_is_rejected() {
 
     decoder.finish().expect("1 回目の finish に失敗");
     let error = decoder.finish().expect_err("2 回目の finish が成功した");
+    assert!(
+        matches!(&error, Error::InvalidState(_)),
+        "2 回目の finish が InvalidState ではない: {error}"
+    );
     assert!(
         error.to_string().contains("already finished"),
         "2 回目の finish のエラーメッセージが想定と異なる: {error}"

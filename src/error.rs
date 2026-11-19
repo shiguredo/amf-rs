@@ -323,6 +323,21 @@ mod tests {
         AmfError::new(AMF_RESULT::AMF_OK, "AMFComponent::Init");
     }
 
+    /// AMF の status の確認が AMF_OK を成功、それ以外を失敗として扱うことを確認する
+    #[test]
+    fn test_amf_error_check() {
+        assert!(AmfError::check(AMF_RESULT::AMF_OK, "AMFComponent::Init").is_ok());
+
+        let error = AmfError::check(AMF_RESULT::AMF_FAIL, "AMFComponent::Init")
+            .expect_err("AMF_FAIL が成功として扱われた");
+        assert_eq!(error.status(), AMF_RESULT::AMF_FAIL, "status が一致しない");
+        assert_eq!(
+            error.operation(),
+            "AMFComponent::Init",
+            "operation が一致しない"
+        );
+    }
+
     /// Environment と Internal の source() が内側の標準エラーを返すことを確認する
     #[test]
     fn test_error_source_returns_inner_error() {
