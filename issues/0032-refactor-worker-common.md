@@ -1,7 +1,7 @@
 # encode / decode のワーカー実装を共通化し、frame ID で入出力を対応付ける
 
 - Created: 2026-11-10
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-11-20
 - Branch: feature/refactor-worker-common
 - Polished: {YYYY-MM-DD}
 - Refreshed: 2026-11-20
@@ -91,3 +91,11 @@
 - 既存のテストがすべて通る。
 - `cargo clippy --workspace --all-targets -- -D warnings` が通る。
 - `CHANGES.md` の `## develop` に `[ADD]` (`amf::Data`) と `[CHANGE]` (デコーダーの PTS、`finish`、`Drop`) を追記し、`### misc` にリファクタリングとして追記した。既存の `[FIX]` にあるデコーダーの PTS 対応付けと `Drop` の記述も、今回の実装に合わせて更新した。
+
+## 解決方法
+
+`Encoder` / `Decoder` のワーカーを `src/worker.rs` に共通化し、入力の `ShiguredoAmfFrameId` と出力から読み取った frame ID で入出力を対応付けるようにした。`amf::Data` を追加して `Surface` / `Buffer` の `data` / `into_data` と `Data::to_buffer` / `to_surface` を実装し、状態と Plane カウンタを共有するように修正した。
+
+`AMF_DATA_TYPE` を newtype 化して `DataType` に `Unknown` を追加し、`finish` は Encoder / Decoder とも `AMF_EOF` まで回収するよう統一した。`Decoder::wait_eof_worker` はインライン化し、Drop と `finish` のテスト、`README.md`、`skills/shiguredo-amf/SKILL.md`、`CHANGES.md` を更新した。
+
+H.264 / HEVC / AV1 の実機テストと `cargo test --workspace`、`cargo clippy --workspace --all-targets -- -D warnings` が成功している。0028 の `SubmitInput` リトライ中の `QueryOutput` は未実装のまま、0028 の完了条件として残している。
