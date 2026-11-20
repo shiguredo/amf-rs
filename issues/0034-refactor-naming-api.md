@@ -1,7 +1,7 @@
 # 公開 API の命名と小さな設計を整理する
 
 - Created: 2026-11-10
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-11-20
 - Branch: feature/refactor-naming-api
 - Polished: {YYYY-MM-DD}
 - Reporter: @melpon
@@ -39,3 +39,14 @@
 - `frame_size` の奇数寸法の扱いが doc とテストで一致する。
 - `cargo test --workspace` が通る。
 - `CHANGES.md` の `## develop` に `[CHANGE]` を追記する。
+
+## 解決方法
+
+- `AmfLibrary::query_version` の戻り値を `AmfVersion` に変更した。`major` / `minor` / `release` / `build` をフィールドで取得でき、`Display` は `major.minor.release.build` 形式で表示する
+- 公開 API の引数名は `memory_type` / `format` になり、`type_` は残っていない
+- `src/codec_info.rs` の `Error` の import を `crate::error::Error` に統一した
+- `amf::Plane` / `amf::Context` / `amf::Component` / `amf::PropertyStorage` が `Debug` を実装している。生ポインタはアドレスだけを表示する
+- `Encoder::encode` の `EncodeOptions` を値で受け取るように変更した
+- `FrameFormat::frame_size` を削除した。AMF の `Surface` のサイズは `Plane` のピッチとスライスから取得するため、フレームサイズを計算する公開 API は不要と判断した
+- `README.md` と `skills/shiguredo-amf/SKILL.md` を更新し、`CHANGES.md` の `## develop` に `[CHANGE]` と `[ADD]` を追記した
+- `cargo fmt --all -- --check` / `cargo clippy --workspace --all-targets -- -D warnings` / `cargo test --workspace --no-run` と、AMD GPU 実機の `cargo test --workspace` (138 テスト) が成功した
