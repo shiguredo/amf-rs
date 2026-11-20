@@ -1,7 +1,7 @@
 # `build.rs` のプロパティ抽出を正確にする
 
 - Created: 2026-11-10
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-11-20
 - Branch: feature/fix-build-property-parser
 - Polished: {YYYY-MM-DD}
 - Reporter: @melpon
@@ -36,3 +36,11 @@
 - パーサの単体テストが追加される。
 - `cargo test --workspace` が通る。
 - `CHANGES.md` の `## develop` の `### misc` にビルド修正として追記する。
+
+## 解決方法
+
+対応しない。`#ifdef` の評価と行継続への対応を汎用に実装すると、実装・テスト・保守の規模が issue の効果に対して過大になる。v1.5.2 の対象ヘッダーには行継続したワイド文字列定義が無く、空白が 2 個以上の定義は 1 件だけである。`#ifdef` の誤評価が影響する `AMF_VIDEO_DECODER_NATIVEWINDOW` もクレート内で使用していない。
+
+`build.rs` のプロパティ抽出は現状のまま維持する。`AMF_VIDEO_DECODER_NATIVEWINDOW` の Android 用定義が Linux ビルドでも採用される問題は残るが、この定数を実際に使用する必要が生じた時点で、対象を限定した形で別途扱う。
+
+`BUILD_METADATA_REPOSITORY` と `AMF_DX_VERSION` の扱いも変更しない。
