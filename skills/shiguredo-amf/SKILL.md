@@ -138,10 +138,12 @@ AMD GPU 向けハードウェアアクセラレーションによるビデオエ
 |----|------|-------------|
 | `Context` | `AMFContext` の参照カウントを管理する Clone 可能なハンドル | `alloc_surface(MemoryType, SurfaceFormat, width, height)`, `alloc_buffer(MemoryType, size)`, `as_ptr()` |
 | `Component` | `AMFComponent` のラッパー | `init(SurfaceFormat, width, height)`, `re_init(width, height)`, `terminate()`, `drain()`, `flush()`, `unsafe submit_input(*mut AMFData)`, `unsafe query_output(*mut *mut AMFData)`, `get_context()`, `context()`, `property_storage() -> Result<PropertyStorage, Error>` |
-| `Surface` | `AMFSurface` のラッパー | `context()`, `get_memory_type() -> MemoryType`, `set_pts(i64)`, `get_pts() -> i64`, `set_duration(i64)`, `get_plane(PlaneType) -> Result<Plane<'_>, Error>`, `get_plane_at(index) -> Result<Plane<'_>, Error>`, `convert(MemoryType) -> Result<(), Error>`, `property_storage()`, `as_ptr()`, `into_raw()` |
-| `Buffer` | `AMFBuffer` のラッパー | `context()`, `get_memory_type() -> MemoryType`, `get_native() -> *mut c_void`, `get_size() -> usize`, `set_size(usize) -> Result<(), Error>`, `unsafe as_slice() -> Result<&[u8], Error>`, `unsafe as_mut_slice() -> Result<&mut [u8], Error>`, `set_pts(i64)`, `get_pts() -> i64`, `get_duration() -> i64`, `property_storage() -> Result<PropertyStorage, Error>`, `as_ptr()`, `into_raw()` |
+| `Surface` | `AMFSurface` のラッパー | `context()`, `get_memory_type() -> MemoryType`, `set_pts(i64)`, `get_pts() -> i64`, `set_duration(i64)`, `get_plane(PlaneType) -> Result<Plane<'_>, Error>`, `get_plane_at(index) -> Result<Plane<'_>, Error>`, `convert(MemoryType) -> Result<(), Error>`, `data() -> Result<Data, Error>`, `into_data() -> Result<Data, Error>`, `property_storage()`, `as_ptr()`, `into_raw()` |
+| `Buffer` | `AMFBuffer` のラッパー | `context()`, `get_memory_type() -> MemoryType`, `get_native() -> *mut c_void`, `get_size() -> usize`, `set_size(usize) -> Result<(), Error>`, `unsafe as_slice() -> Result<&[u8], Error>`, `unsafe as_mut_slice() -> Result<&mut [u8], Error>`, `set_pts(i64)`, `get_pts() -> i64`, `get_duration() -> i64`, `data() -> Result<Data, Error>`, `into_data() -> Result<Data, Error>`, `property_storage() -> Result<PropertyStorage, Error>`, `as_ptr()`, `into_raw()` |
 | `Plane<'a>` | `AMFPlane` の RAII ラッパー。取得元の `Surface` を借用する | `context()`, `get_native() -> *mut c_void`, `get_hpitch() -> i32`, `get_vpitch() -> i32`, `get_width() -> i32`, `get_height() -> i32`, `is_tiled() -> bool`, `unsafe as_slice() -> Result<&[u8], Error>`, `unsafe as_mut_slice() -> Result<&mut [u8], Error>`, `as_ptr()`, `into_raw()` |
 | `PropertyStorage` | `AMFPropertyStorage` のラッパー | `context()`, `unsafe get_property(name_w, *mut AMFVariantStruct)`, `get_property_int64(name) -> Result<i64, Error>`, `get_property_size(name) -> Result<(i32, i32), Error>`, `set_property_int64(name, value)`, `set_property_size(name, width, height)`, `set_property_rate(name, num, den)`, `unsafe set_property(name_w, AMFVariantStruct)`, `as_ptr()`, `into_raw()` |
+| `Data` | `AMFData` の RAII ハンドル | `context()`, `get_data_type() -> DataType`, `property_storage() -> Result<PropertyStorage, Error>`, `to_buffer() -> Result<Buffer, Error>`, `to_surface() -> Result<Surface, Error>`, `as_ptr()`, `into_raw()`, `unsafe from_raw(*mut AMFData, Context)`, `unsafe from_raw_acquired(*mut AMFData, Context)` |
+| `DataType` | AMF のデータ種別 | `Buffer`, `Surface`, `AudioBuffer`, `User` |
 
 `Context::alloc_surface` / `alloc_buffer` は `&self` に対して呼び出す。`Context` の `Clone` は
 `AMFContext::Acquire`、`Drop` は `AMFContext::Release` を呼ぶ。最後の参照が解放されたときに
@@ -524,7 +526,7 @@ H.264 / HEVC / AV1 で AMF SDK 内部の enum 値順序が異なるが、`shigur
 - `encode()` / `decode()` はメインスレッドから `SubmitInput` を呼ぶ。共通のリトライ対象は `AMF_INPUT_FULL` と `AMF_DECODER_NO_FREE_SURFACES` で、1ms 間隔で最大 100 回リトライし、それ以外のステータスはそのまま返す。エンコーダーは `AMF_OK` / `AMF_NEED_MORE_INPUT` を受理し、`AMF_REPEAT` は想定外としてエラーにする。デコーダーは `AMF_OK` / `AMF_NEED_MORE_INPUT` / `AMF_RESOLUTION_CHANGED` を受理し、`AMF_REPEAT` は複数フレームを含むバッファとしてエラーにする。`AMF_DECODER_NO_FREE_SURFACES` はデコーダー専用だが、一時的なリソース枯渇を表すため共通のリトライ対象に含める。どちらも受理された後で、入力フレームに割り当てた `ShiguredoAmfFrameId` と `UserData` をワーカーへ送る。
 - ワーカーは frame ID から `UserData` を引く表を保持し、`QueryOutput` が返す出力から frame ID を読み取って対応する `UserData` を通知する。対応する `UserData` がまだ届いていない出力は保持する。ワーカーはコマンドを 1 つ処理した後と、コマンド待ちのタイムアウト時に `QueryOutput` を回収する。入力のリトライ中も出力を回収できるよう、保留中の入出力がある間は 1ms 間隔で `QueryOutput` を呼ぶ。
 - `QueryOutput` の出力は `amf::Data` で包む。`Data` は `AMFData` の RAII ラッパーで、`to_buffer` / `to_surface` で参照カウントを増やした `Buffer` / `Surface` を構築できる。
-- `WaitEof` を受け取ると、ワーカーは `Drain` を呼ぶ。`AMF_INPUT_FULL` の間は出力を回収しながら再試行し、受理後は `AMF_EOF` まで出力を回収する。エンコーダーは `AMF_EOF` のほか、保留中の入出力がなくなった時点でも完了する。完了時は出力が得られなかった入力と、対応する入力がない出力をエラーとして通知する。`Drain` に失敗した場合はエラーを呼び出し側へ返し、ワーカーはコマンド待ちに戻る。`QueryOutput` が終端エラーを返した場合は、そのエラーをハンドラーへ通知してワーカーを終了する。
+- `WaitEof` を受け取ると、ワーカーは `Drain` を呼ぶ。`AMF_INPUT_FULL` の間は出力を回収しながら再試行し、受理後は `AMF_EOF` まで出力を回収する。エンコーダーとデコーダーで終了条件は同じで、`AMF_EOF` まで待つ。完了時は出力が得られなかった入力と、対応する入力がない出力をエラーとして通知する。`Drain` に失敗した場合はエラーを呼び出し側へ返し、ワーカーはコマンド待ちに戻る。`QueryOutput` が終端エラーを返した場合は、そのエラーをハンドラーへ通知してワーカーを終了する。
 - `Encoder::finish()` / `Decoder::finish()` は共通の処理で、入力が受理済みなら `WaitEof` で Drain と出力回収をさせてから `Stop` を送り、受理済みの入力がなければ `Stop` だけを送って join まで待つ。`SubmitInput` がハードエラーになって入力を受理していない場合も `Stop` だけを送る。2 回目の `finish()` はエラーを返す。`finish()` がエラーを返した後の操作は `Drop` 以外を保証しない。出力の回収中に発生した終端エラーはハンドラーへ通知される。
 - 解像度の変化を検出すると、`SubmitInput` は `AMF_RESOLUTION_CHANGED` を返し、投入したバッファは AMF に受理されない。`decode()` はワーカーへ `WaitEof` を送り、旧解像度の出力をすべて通知させてから `Terminate` と `Init` で AMF コンポーネントを作り直す。受理されなかったバッファを再投入して同じワーカーへ `RegisterUserData` を送り、ワーカーは通常ループへ戻る。
 - `Drop` は `Stop` コマンドを送り、キューにあるコマンドを処理してからワーカーを join する。drop の処理中に、`encode()` / `decode()` が成功したフレームの出力が通知されることがある。drop は、すべてのフレームの出力が通知されることを保証しない。コンポーネントが初期化済みなら `Component::terminate()` を呼んでから AMF オブジェクトを解放する。ハンドラーの panic は `tracing::error!` で記録する。
@@ -534,7 +536,7 @@ H.264 / HEVC / AV1 で AMF SDK 内部の enum 値順序が異なるが、`shigur
 
 | モジュール | 説明 |
 |-----------|------|
-| `amf` | AMF オブジェクトの RAII ラッパー (`Context`, `Component`, `Surface`, `Buffer`, `Plane`, `PropertyStorage`) |
+| `amf` | AMF オブジェクトの RAII ラッパー (`Context`, `Component`, `Surface`, `Buffer`, `Data`, `Plane`, `PropertyStorage`) |
 | `ffi` | `#[doc(hidden)]`。`sys` モジュールの再公開。semver 保証対象外 |
 
 ## docs.rs 向けビルド

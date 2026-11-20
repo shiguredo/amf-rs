@@ -53,7 +53,7 @@
   - PTS を出力へ引き継ぐ契約を廃止するため、`README.md`、`skills/shiguredo-amf/SKILL.md`、`tests/test_decode.rs`、`CHANGES.md` を更新した。`CHANGES.md` には `[CHANGE]` を追記した
 - `Data` の作成や frame ID の読み取りに失敗した場合は対象入力を特定できないため、未対応出力として通知し、その入力は後で未対応入力として通知する。`Buffer` / `Surface` への変換エラーは `pending` を消費してから通知する。
 - `Encoder::finish` の Drain 失敗時は `Err` を返す。エラー後の再試行は保証せず、呼び出し側に保証するのは `Drop` だけとする。
-  - ワーカーの終了条件は、デコーダーが `AMF_EOF` まで回収し、エンコーダーが `AMF_EOF` または保留中の入出力が空になるまでとする。この差分は終了条件のフックで渡す
+  - ワーカーの終了条件は、エンコーダー・デコーダーとも `AMF_EOF` まで回収する。終了条件のフックは持たない
   - エンコーダーの Drain が `AMF_INPUT_FULL` を返した場合は出力を回収しながら再試行する。Drain 後に `AMF_EOF` が返ることは実機で確認した
 - `SubmitInput` のリトライを共通化した。共通のリトライ対象は `AMF_INPUT_FULL` と `AMF_DECODER_NO_FREE_SURFACES` とし、それ以外の status はそのまま呼び出し側へ返す。
   - エンコーダー: `AMF_OK` と `AMF_NEED_MORE_INPUT` を受理する。`AMF_REPEAT` は AMF のエンコーダー API で定義されていないため、エラーとして扱う

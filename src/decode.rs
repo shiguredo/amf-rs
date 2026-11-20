@@ -167,15 +167,12 @@ impl<H: DecodeHandler> Decoder<H> {
                         result
                             .and_then(|(data, user_data)| {
                                 let surface = data.to_surface()?;
-                                // frame ID は変換前の Surface からワーカーが読み取る。
                                 surface.convert(MemoryType::Host)?;
                                 Ok(DecodedFrame { surface, user_data })
                             })
                             .map_err(Into::into),
                     );
                 }),
-                // デコーダーは AMF_EOF まで出力を回収する
-                drained: Box::new(|_| false),
             },
         )?;
 
@@ -366,7 +363,7 @@ impl<H: DecodeHandler> Decoder<H> {
 impl<H: DecodeHandler> Drop for Decoder<H> {
     fn drop(&mut self) {
         // ワーカースレッドに Stop を送り、キューにあるコマンドを処理してから停止する。
-        // 停止時に残っている入力と出力は通知せずに破棄される。
+        // Stop を処理した時点で残っている入出力は通知せずに破棄される。
         self.worker.shutdown();
 
         // 再初期化の Terminate 後に Init が失敗している場合は、既に

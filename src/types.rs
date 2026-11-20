@@ -159,6 +159,31 @@ impl MemoryType {
     }
 }
 
+/// AMF のデータ種別
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DataType {
+    /// 汎用バッファ
+    Buffer,
+    /// サーフェス
+    Surface,
+    /// オーディオバッファ
+    AudioBuffer,
+    /// ユーザーデータ
+    User,
+}
+
+impl DataType {
+    /// `AMF_DATA_TYPE` の値から変換する
+    pub(crate) fn from_amf(data_type: sys::AMF_DATA_TYPE) -> Self {
+        match data_type {
+            sys::AMF_DATA_TYPE::AMF_DATA_BUFFER => Self::Buffer,
+            sys::AMF_DATA_TYPE::AMF_DATA_SURFACE => Self::Surface,
+            sys::AMF_DATA_TYPE::AMF_DATA_AUDIO_BUFFER => Self::AudioBuffer,
+            sys::AMF_DATA_TYPE::AMF_DATA_USER => Self::User,
+        }
+    }
+}
+
 /// AMF のプレーン種別
 ///
 /// [`crate::amf::Surface::get_plane`] に指定する。
@@ -218,4 +243,30 @@ pub enum HevcProfile {
 pub enum Av1Profile {
     /// Main プロファイル
     Main,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// AMF_DATA_TYPE の各値が DataType に変換されることを確認する
+    #[test]
+    fn test_data_type_from_amf() {
+        assert_eq!(
+            DataType::from_amf(sys::AMF_DATA_TYPE::AMF_DATA_BUFFER),
+            DataType::Buffer
+        );
+        assert_eq!(
+            DataType::from_amf(sys::AMF_DATA_TYPE::AMF_DATA_SURFACE),
+            DataType::Surface
+        );
+        assert_eq!(
+            DataType::from_amf(sys::AMF_DATA_TYPE::AMF_DATA_AUDIO_BUFFER),
+            DataType::AudioBuffer
+        );
+        assert_eq!(
+            DataType::from_amf(sys::AMF_DATA_TYPE::AMF_DATA_USER),
+            DataType::User
+        );
+    }
 }

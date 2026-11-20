@@ -81,10 +81,13 @@
   - @melpon
 - [ADD] `PlaneType` を追加する
   - @melpon
+- [ADD] `DataType` を追加する
+  - `amf::Data::get_data_type()` の戻り値に使う
+  - @melpon
 - [ADD] `amf::Data` を追加する
   - `AMFData` の RAII ラッパーで、`Buffer` / `Surface` から `data()` / `into_data()` で `Data` を取得できる
   - `to_buffer` / `to_surface` で参照カウントを増やした `Buffer` / `Surface` を構築できる
-  - `from_raw` / `from_raw_acquired` / `as_ptr` / `into_raw` / `property_storage` / `context` を提供する
+  - `from_raw` / `from_raw_acquired` / `as_ptr` / `into_raw` / `property_storage` / `context` / `get_data_type() -> DataType` を提供する
   - @melpon
 - [ADD] `amf::Buffer::property_storage` と `amf::PropertyStorage::get_property` / `get_property_int64` を追加する
   - @melpon
@@ -177,6 +180,7 @@
   - 入力の frame ID の発行、入力プロパティへの設定、`SubmitInput` の呼び出しも共通化する
   - コマンドを 1 つ処理した後にも `QueryOutput` を回収する
   - `SubmitInput` のリトライ対象を `AMF_INPUT_FULL` と `AMF_DECODER_NO_FREE_SURFACES` に共通化し、エンコーダーの `AMF_REPEAT` はリトライせずエラーにする
+  - `finish` はエンコーダー・デコーダーとも `AMF_EOF` まで出力を回収する
   - @melpon
 
 ## 2026.3.0

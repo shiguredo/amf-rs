@@ -1,11 +1,13 @@
-use std::sync::mpsc;
+use std::sync::{Arc, Mutex, mpsc};
+use std::time::{Duration, Instant};
 
 use shiguredo_amf::amf::Surface;
 use shiguredo_amf::ffi::AMF_RESULT;
 use shiguredo_amf::{
-    AmfError, Av1EncoderConfig, Av1Profile, CodecConfig, EncodeOptions, Encoder, EncoderConfig,
-    Error, FnEncodeHandler, FrameFormat, H264EncoderConfig, H264Profile, HevcEncoderConfig,
-    HevcProfile, PlaneType, RateControlMode, ReconfigureParams, VideoCodecType, supported_codecs,
+    AmfError, Av1EncoderConfig, Av1Profile, CodecConfig, EncodeHandler, EncodeOptions,
+    EncodedFrame, Encoder, EncoderConfig, Error, FnEncodeHandler, FrameFormat, H264EncoderConfig,
+    H264Profile, HevcEncoderConfig, HevcProfile, PlaneType, RateControlMode, ReconfigureParams,
+    VideoCodecType, supported_codecs,
 };
 
 pub mod helpers;
@@ -74,6 +76,50 @@ fn test_encoder_config(codec: CodecConfig, frame_format: FrameFormat) -> Encoder
 /// 指定した設定でエンコーダーを作成する
 fn create_encoder(config: EncoderConfig) -> Result<Encoder<FnEncodeHandler<()>>, Error> {
     Encoder::new(create_context(), config, FnEncodeHandler::<()>::new(|_| {}))
+}
+
+/// 最初の通知でブロックするハンドラー
+///
+/// Drop 中にキュー済みの入力が処理されても、通知された `user_data` を記録できる。
+struct BlockingDropEncodeHandler {
+    /// 最初の通知を送るチャネル
+    first_seen_tx: mpsc::Sender<()>,
+    /// 最初の通知の処理を再開するチャネル
+    release_rx: mpsc::Receiver<()>,
+    /// 通知された `user_data` の一覧
+    notified: Arc<Mutex<Vec<usize>>>,
+    /// 最初の通知を処理中か
+    blocked: bool,
+}
+
+impl EncodeHandler for BlockingDropEncodeHandler {
+    type UserData = usize;
+    type Error = Error;
+
+    fn on_encoded(&mut self, result: Result<EncodedFrame<usize>, Error>) {
+        let frame = result.expect("エンコード結果がエラーになった");
+        self.notified
+            .lock()
+            .expect("通知一覧のロックに失敗")
+            .push(*frame.user_data());
+        if !self.blocked {
+            self.blocked = true;
+            self.first_seen_tx.send(()).expect("最初の通知の送信に失敗");
+            self.release_rx.recv().expect("解放の受信に失敗");
+        }
+    }
+}
+
+/// 最初の通知で panic するハンドラー
+struct PanicEncodeHandler;
+
+impl EncodeHandler for PanicEncodeHandler {
+    type UserData = ();
+    type Error = Error;
+
+    fn on_encoded(&mut self, _result: Result<EncodedFrame<()>, Error>) {
+        panic!("テスト用のエンコードハンドラー panic");
+    }
 }
 
 /// 入力を 1 つも投入せずに finish した場合、通知がなく完了することを確認する
@@ -149,6 +195,109 @@ fn test_finish_twice_is_rejected() {
     assert!(
         matches!(&error, Error::InvalidState(_)),
         "Encoder::finish の状態エラーであるべき: {error}"
+    );
+}
+
+/// finish を呼ばずに drop しても、キュー済みの入力を処理して停止することを確認する
+///
+/// drop の処理中に通知されるフレームがあっても、通知される `user_data` は送信済みの
+/// フレームの範囲に収まり、重複しないことを確認する。
+#[test]
+fn test_drop_encoder_without_finish_does_not_hang() {
+    let (first_seen_tx, first_seen_rx) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::channel();
+    let notified = Arc::new(Mutex::new(Vec::new()));
+
+    let mut encoder = Encoder::new(
+        create_context(),
+        h264_cbr_test_encoder_config(),
+        BlockingDropEncodeHandler {
+            first_seen_tx,
+            release_rx,
+            notified: Arc::clone(&notified),
+            blocked: false,
+        },
+    )
+    .expect("エンコーダーの作成に失敗");
+
+    let frame_data = generate_dummy_nv12(320, 240, 0);
+    let surface = encoder.alloc_surface().expect("Surface の確保に失敗");
+    copy_nv12_to_surface(&surface, &frame_data, 320, 240);
+    encoder
+        .encode(surface, &EncodeOptions::default(), 0)
+        .expect("1 つ目のフレームのエンコードに失敗");
+
+    first_seen_rx
+        .recv_timeout(Duration::from_secs(5))
+        .expect("最初の通知が届かなかった");
+
+    // ワーカーは最初の通知の処理中なので、この入力はキューに残る。
+    let surface = encoder.alloc_surface().expect("Surface の確保に失敗");
+    copy_nv12_to_surface(&surface, &frame_data, 320, 240);
+    encoder
+        .encode(surface, &EncodeOptions::default(), 1)
+        .expect("2 つ目のフレームのエンコードに失敗");
+
+    // drop はワーカーの停止まで待つため、ブロック中の通知を別スレッドから解放する。
+    let release_thread = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(100));
+        release_tx.send(()).expect("解放の送信に失敗");
+    });
+
+    let started = Instant::now();
+    drop(encoder);
+    let elapsed = started.elapsed();
+    release_thread.join().expect("解放スレッドの join に失敗");
+
+    assert!(
+        elapsed < Duration::from_secs(5),
+        "Encoder の drop に時間がかかりすぎた: {elapsed:?}"
+    );
+
+    let notified = Arc::try_unwrap(notified)
+        .expect("通知一覧の Arc の参照が残っている")
+        .into_inner()
+        .expect("通知一覧のロックに失敗");
+    assert!(
+        notified.contains(&0),
+        "1 つ目のフレームが通知されていない: {notified:?}"
+    );
+    assert!(
+        notified.iter().all(|index| *index <= 1),
+        "送信していないフレームが通知された: {notified:?}"
+    );
+    let mut unique = notified.clone();
+    unique.sort_unstable();
+    unique.dedup();
+    assert_eq!(
+        unique.len(),
+        notified.len(),
+        "同じフレームが複数回通知された: {notified:?}"
+    );
+}
+
+/// finish 中にハンドラーが panic した場合、finish が Err を返すことを確認する
+#[test]
+fn test_finish_returns_error_when_handler_panics() {
+    let mut encoder = Encoder::new(
+        create_context(),
+        h264_cbr_test_encoder_config(),
+        PanicEncodeHandler,
+    )
+    .expect("エンコーダーの作成に失敗");
+
+    let frame_data = generate_dummy_nv12(320, 240, 0);
+    let surface = encoder.alloc_surface().expect("Surface の確保に失敗");
+    copy_nv12_to_surface(&surface, &frame_data, 320, 240);
+    // ハンドラーの panic は encode 中にも起こり得るため、encode の成否は問わない。
+    let _ = encoder.encode(surface, &EncodeOptions::default(), ());
+
+    let error = encoder
+        .finish()
+        .expect_err("ハンドラーが panic したのに finish が成功した");
+    assert!(
+        matches!(error, Error::Internal(_)),
+        "ハンドラー panic 時の finish エラーが Internal でない: {error}"
     );
 }
 

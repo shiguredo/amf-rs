@@ -7,9 +7,9 @@ use std::time::{Duration, Instant};
 
 use shiguredo_amf::amf::{Context, Surface};
 use shiguredo_amf::{
-    CodecConfig, DecodedFrame, Decoder, DecoderCodec, DecoderConfig, EncodeOptions, Encoder,
-    EncoderConfig, Error, FnDecodeHandler, FnEncodeHandler, FrameFormat, H264EncoderConfig,
-    PlaneType, RateControlMode, frame_type,
+    CodecConfig, DecodeHandler, DecodedFrame, Decoder, DecoderCodec, DecoderConfig, EncodeOptions,
+    Encoder, EncoderConfig, Error, FnDecodeHandler, FnEncodeHandler, FrameFormat,
+    H264EncoderConfig, PlaneType, RateControlMode, frame_type,
 };
 
 #[expect(dead_code, reason = "test_decode では一部のヘルパーだけを使う")]
@@ -22,6 +22,18 @@ const H264_BFRAME_STREAM: &[u8] = include_bytes!("data/red-bframe-320x320-h264.h
 
 /// B フレームを含む HEVC の Annex B ビットストリーム
 const HEVC_BFRAME_STREAM: &[u8] = include_bytes!("data/cars-320x240.h265");
+
+/// 最初の通知で panic するハンドラー
+struct PanicDecodeHandler;
+
+impl DecodeHandler for PanicDecodeHandler {
+    type UserData = ();
+    type Error = Error;
+
+    fn on_decoded(&mut self, _result: Result<DecodedFrame<()>, Error>) {
+        panic!("テスト用のデコードハンドラー panic");
+    }
+}
 
 /// H.264 フィクスチャの提示順を入力インデックスで表したもの
 ///
@@ -438,9 +450,10 @@ fn test_decode_after_finish_is_rejected() {
     );
 }
 
-/// finish を呼ばずに Decoder を drop すると、保留中の入力が通知されないことを確認する
+/// finish を呼ばずに Decoder を drop すると、出力が生成されていない場合は
+/// 通知なしで完了することを確認する
 #[test]
-fn test_drop_decoder_without_finish_does_not_notify_pending_input() {
+fn test_drop_decoder_without_output_completes_quickly() {
     let access_units = split_access_units(H264_BFRAME_STREAM, is_h264_vcl);
     // パラメータセットだけではデコード出力が生成されないため、drop による通知の
     // 有無を確実に確認できる。
@@ -488,7 +501,42 @@ fn test_drop_decoder_without_finish_does_not_notify_pending_input() {
         .expect("結果一覧のロックに失敗");
     assert!(
         results.is_empty(),
-        "finish を呼ばずに drop したのに保留中の入力が通知された"
+        "finish を呼ばずに drop したのに、出力が生成されていない入力が通知された"
+    );
+}
+
+/// finish 中にハンドラーが panic した場合、finish が Err を返すことを確認する
+#[test]
+fn test_finish_returns_error_when_handler_panics() {
+    let access_units = split_access_units(H264_BFRAME_STREAM, is_h264_vcl);
+    let mut decoder = Decoder::new(
+        create_context(),
+        DecoderConfig {
+            codec: DecoderCodec::H264,
+        },
+        PanicDecodeHandler,
+    )
+    .expect("デコーダーの作成に失敗");
+
+    for access_unit in &access_units {
+        let mut buffer = decoder
+            .alloc_buffer(access_unit.len())
+            .expect("Buffer の確保に失敗");
+        unsafe { buffer.as_mut_slice() }
+            .expect("Buffer のスライス取得に失敗")
+            .copy_from_slice(access_unit);
+        // ハンドラーの panic は decode 中にも起こり得るため、decode の成否は問わない。
+        if decoder.decode(buffer, ()).is_err() {
+            break;
+        }
+    }
+
+    let error = decoder
+        .finish()
+        .expect_err("ハンドラーが panic したのに finish が成功した");
+    assert!(
+        matches!(error, Error::Internal(_)),
+        "ハンドラー panic 時の finish エラーが Internal でない: {error}"
     );
 }
 

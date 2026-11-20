@@ -103,7 +103,8 @@ pub use error::{
     AmfError, EnvironmentError, Error, InternalError, InvalidArgumentError, InvalidStateError,
 };
 pub use types::{
-    Av1Profile, FrameFormat, H264Profile, HevcProfile, MemoryType, PlaneType, SurfaceFormat,
+    Av1Profile, DataType, FrameFormat, H264Profile, HevcProfile, MemoryType, PlaneType,
+    SurfaceFormat,
 };
 
 /// ビルド時の AMF バージョン文字列

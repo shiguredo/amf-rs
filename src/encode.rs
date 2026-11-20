@@ -465,10 +465,6 @@ where
     }
 }
 
-// ---------------------------------------------------------------------------
-// ワーカースレッド用の型
-// ---------------------------------------------------------------------------
-
 /// コーデックごとに異なる動的プロパティの名前
 struct DynamicPropertyNames {
     /// フレームレート
@@ -650,7 +646,6 @@ impl<H: EncodeHandler> Encoder<H> {
                             .map_err(Into::into),
                     );
                 }),
-                drained: Box::new(|pending| pending.is_empty()),
             },
         )?;
 
@@ -1276,7 +1271,7 @@ impl<H: EncodeHandler> Encoder<H> {
 impl<H: EncodeHandler> Drop for Encoder<H> {
     fn drop(&mut self) {
         // ワーカースレッドに Stop を送り、キューにあるコマンドを処理してから停止する。
-        // 停止時に残っている入力と出力は通知せずに破棄される。
+        // Stop を処理した時点で残っている入出力は通知せずに破棄される。
         self.worker.shutdown();
 
         // 戻り値を返せない後始末であるため、失敗は記録だけ行う。

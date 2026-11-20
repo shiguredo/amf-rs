@@ -101,20 +101,19 @@ fn submit_input_with_retry(component: &Component, data: *mut AMFData) -> Result<
 /// 出力をハンドラーへ通知する関数
 type DeliverFn<U> = Box<dyn FnMut(Result<(Data, U), Error>) + Send>;
 
-/// 保留中の入力がなくなったときに `AMF_EOF` を待たずに終了してよいかを返す関数
-type DrainedFn<U> = Box<dyn Fn(&HashMap<i64, U>) -> bool + Send>;
-
 /// ワーカースレッドの差分
 ///
-/// エンコーダーとデコーダーは、ハンドラーへの通知と終了条件だけをクロージャで
-/// 差し替えて同じループを使う。
+/// エンコーダーとデコーダーは、ハンドラーへの通知だけをクロージャで差し替えて
+/// 同じループを使う。
 pub(crate) struct WorkerConfig<U> {
     /// エラーメッセージとスレッド名に使うワーカーの役割
     pub role: &'static str,
     /// 出力をハンドラーへ通知する
+    ///
+    /// `Data` は出力の frame ID に対応する `user_data` と組み合わせて渡される。
+    /// 出力の frame ID はこの関数を呼ぶ前に読み取り済みであるため、`Data` は
+    /// 自由に変換してよい。
     pub deliver: DeliverFn<U>,
-    /// 保留中の入力がなくなったときに `AMF_EOF` を待たずに終了してよいかを返す
-    pub drained: DrainedFn<U>,
 }
 
 impl<U> WorkerConfig<U> {
@@ -122,18 +121,13 @@ impl<U> WorkerConfig<U> {
     fn deliver(&mut self, result: Result<(Data, U), Error>) {
         (self.deliver)(result);
     }
-
-    /// 保留中の入力がなくなったときに `AMF_EOF` を待たずに終了してよいかを返す
-    fn is_drained(&self, pending: &HashMap<i64, U>) -> bool {
-        (self.drained)(pending)
-    }
 }
 
 /// ワーカースレッドが受け取るコマンド
 enum WorkerCommand<U> {
     /// 入力フレームの frame ID とユーザーデータを登録する
     RegisterUserData { frame_id: i64, user_data: U },
-    /// `AMFComponent::Drain` を呼び、終了条件を満たすまで出力を回収する
+    /// `AMFComponent::Drain` を呼び、`AMF_EOF` まで出力を回収する
     ///
     /// Drain に失敗した場合はエラーを返してコマンド待ちに戻る。回収中に
     /// 終端エラーを検出した場合はハンドラーへ通知してワーカーを終了する。
@@ -174,11 +168,10 @@ impl<U: Send + 'static> Worker<U> {
     pub fn spawn(component: Component, config: WorkerConfig<U>) -> Result<Self, Error> {
         let role = config.role;
         let (cmd_tx, cmd_rx) = mpsc::channel::<WorkerCommand<U>>();
-        let worker_component = component.clone();
         let thread = std::thread::Builder::new()
             .name(format!("amf-{role}-worker"))
             .spawn(move || {
-                run_worker(worker_component, config, cmd_rx);
+                run_worker(component, config, cmd_rx);
             })
             .map_err(|source| {
                 EnvironmentError::new(format!("failed to spawn {role} worker thread"), source)
@@ -367,7 +360,7 @@ impl<U: Send + 'static> Drop for Worker<U> {
 /// ワーカースレッドのエントリポイント
 ///
 /// コマンドを処理し、`QueryOutput` をポーリングして出力をハンドラーへ通知する。
-/// `WaitEof` を受け取ると `Drain` を呼び、終了条件を満たすまで出力を回収する。
+/// `WaitEof` を受け取ると `Drain` を呼び、`AMF_EOF` まで出力を回収する。
 fn run_worker<U: Send + 'static>(
     component: Component,
     mut config: WorkerConfig<U>,
@@ -401,13 +394,6 @@ fn run_worker<U: Send + 'static>(
                         }
                         Ok(DrainStatus::NotReady) => {
                             deliver_buffered(&mut output_buffer, &mut pending, &mut config);
-                            // エンコーダーは保留中の入出力がなくなった時点で
-                            // AMF_EOF を待たずに完了できる。
-                            if output_buffer.is_empty() && config.is_drained(&pending) {
-                                finish_drain(&mut output_buffer, &mut pending, &mut config);
-                                let _ = done.send(Ok(()));
-                                continue;
-                            }
                         }
                         Err(error) => {
                             notify_terminal_error(
@@ -438,9 +424,7 @@ fn run_worker<U: Send + 'static>(
             match drain_output(&mut output_buffer, &component, &config) {
                 Ok(status) => {
                     deliver_buffered(&mut output_buffer, &mut pending, &mut config);
-                    if status == DrainStatus::Eof
-                        || (output_buffer.is_empty() && config.is_drained(&pending))
-                    {
+                    if status == DrainStatus::Eof {
                         finish_drain(&mut output_buffer, &mut pending, &mut config);
                         let _ = done.send(Ok(()));
                         drain_accepted = false;
