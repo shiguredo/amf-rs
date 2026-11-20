@@ -36,7 +36,7 @@ AMD GPU 向けハードウェアアクセラレーションによるビデオエ
 - AMD GPU (RDNA 以降推奨)
 - AMD GPU ドライバー (AMF ランタイムライブラリを含む)
 - Vulkan ドライバー
-- ビルド時: git
+- ビルド時: git、libclang (bindgen 依存、Ubuntu では `libclang-dev` パッケージ)
 
 ## コア API
 

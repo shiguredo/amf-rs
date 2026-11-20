@@ -42,7 +42,7 @@ AMF ランタイムライブラリ (libamfrt64.so.1) は AMD GPU ドライバー
 - AMD GPU (RDNA 以降推奨)
 - AMD GPU ドライバー (AMF ランタイムライブラリを含む)
 - Vulkan ドライバー
-- ビルド時: git
+- ビルド時: git、libclang (bindgen 依存、Ubuntu では `libclang-dev` パッケージ)
 
 対応プラットフォームは Linux x86_64 のみです。Windows と macOS には対応していません。
 
