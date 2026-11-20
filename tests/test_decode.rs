@@ -938,3 +938,78 @@ fn test_decode_continues_after_resolution_change() {
         "解像度変化を挟んでも出力順が入力順と一致しない"
     );
 }
+
+/// 出力の回収を待たずに大量のアクセスユニットを投入し、すべてのフレームが出力されることを確認する
+///
+/// 出力用 Surface を回収できないまま入力が続くと、`SubmitInput` が
+/// `AMF_DECODER_NO_FREE_SURFACES` を返し続けてリトライ上限に達する。出力 Surface を
+/// 保持しないハンドラーで連続投入しても、各 `decode` が成功し、投入したすべての
+/// フレームが出力されることを確認する。
+#[test]
+fn test_decoder_continuous_submit_outputs_all_frames() {
+    /// 連続投入するアクセスユニット数
+    const NUM_FRAMES: usize = 200;
+
+    let width = 320;
+    let height = 240;
+    let context = create_context();
+    let access_units = encode_h264_stream(&context, width, height, NUM_FRAMES);
+    assert_eq!(
+        access_units.len(),
+        NUM_FRAMES,
+        "テスト用ストリームのアクセスユニット数が一致しない"
+    );
+
+    let received = Arc::new(Mutex::new(Vec::new()));
+    let collected = Arc::clone(&received);
+    let mut decoder = Decoder::new(
+        context,
+        DecoderConfig {
+            codec: DecoderCodec::H264,
+        },
+        FnDecodeHandler::<usize>::new(move |result| {
+            let frame = result.expect("デコード結果がエラーになった");
+            // Surface はこのクロージャを抜けるときに解放され、デコーダーの
+            // 出力用 Surface が再利用可能になる。
+            let (_surface, user_data) = frame.into_parts();
+            collected
+                .lock()
+                .expect("出力一覧のロックに失敗")
+                .push(user_data);
+        }),
+    )
+    .expect("デコーダーの作成に失敗");
+
+    // 出力を待たずに連続投入する。
+    for (index, access_unit) in access_units.iter().enumerate() {
+        let mut buffer = decoder
+            .alloc_buffer(access_unit.len())
+            .unwrap_or_else(|error| {
+                panic!("アクセスユニット {index} の Buffer の確保に失敗: {error}")
+            });
+        let buffer_data = unsafe { buffer.as_mut_slice() }.expect("Buffer のスライス取得に失敗");
+        assert!(
+            buffer_data.len() >= access_unit.len(),
+            "Buffer のサイズ {} がアクセスユニットのサイズ {} より小さい",
+            buffer_data.len(),
+            access_unit.len()
+        );
+        buffer_data[..access_unit.len()].copy_from_slice(access_unit);
+        decoder
+            .decode(buffer, index)
+            .unwrap_or_else(|error| panic!("アクセスユニット {index} の投入に失敗: {error}"));
+    }
+    decoder.finish().expect("finish に失敗");
+    drop(decoder);
+
+    let mut user_data = Arc::try_unwrap(received)
+        .expect("出力一覧の Arc の参照が残っている")
+        .into_inner()
+        .expect("出力一覧のロックに失敗");
+    user_data.sort_unstable();
+    assert_eq!(
+        user_data,
+        (0..NUM_FRAMES).collect::<Vec<_>>(),
+        "出力に重複または欠落した user_data がある"
+    );
+}
