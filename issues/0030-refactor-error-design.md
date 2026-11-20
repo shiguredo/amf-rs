@@ -1,7 +1,7 @@
 # `Error` を分類 enum に変更する
 
 - Created: 2026-11-10
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-11-20
 - Branch: feature/refactor-error-design
 - Polished: {YYYY-MM-DD}
 - Reporter: @melpon
@@ -98,3 +98,15 @@ pub enum Error {
 - `Display` のテストが status 名の重複を検出する。
 - `Error` と分類型の public な項目に doc が付き、`cargo test --workspace` と `cargo clippy --workspace --all-targets` が通る。
 - `CHANGES.md` の `## develop` に `[CHANGE]` として追記されている。
+
+## 解決方法
+
+- `Error` を `InvalidArgument` / `InvalidState` / `Amf` / `Environment` / `Internal` の 5 分類 enum に変更し、分類型 (`InvalidArgumentError` / `InvalidStateError` / `AmfError` / `EnvironmentError` / `InternalError`) を追加した。分類型のフィールドは private、コンストラクタは `pub(crate)` にした
+- `AmfError` に `status()` / `operation()` を追加し、`Display` は操作名とステータスを 1 回だけ表示するようにした。`STATUS_TABLE` は削除した
+- 標準エラーから `Error` への `From` を追加し、`Error::source()` で `Environment` / `Internal` の原因を取得できるようにした。`EnvironmentError` / `InternalError` には `std::error::Error` を実装した
+- 各呼び出し側を 5 分類に置き換え、`src` 内の `map_err` を `FrameError` の 2 箇所と `map_err(Into::into)` の 1 箇所だけにした
+- エラーメッセージに不足していた値・操作名・ワーカー種別・最後のステータスを追加し、対応付け失敗の文言を統一した。`OutputError` の `From<Error>` は名前付きコンストラクタに変更した
+- テストを variant の match に更新し、`AmfError::check`、`Encoder::new` / `reconfigure` の不正設定、`dl.rs` の OS エラー経路などのテストを追加した
+- `CHANGES.md` の `## develop` に `[CHANGE]` を追記し、`skills/shiguredo-amf/SKILL.md` のエラー型の説明を更新した
+- AMD GPU 実機で `cargo test --workspace` が全 123 テスト成功した
+- `AMF_RESULT` の未知の値の保持は、issue の範囲外として未対応のままにした
