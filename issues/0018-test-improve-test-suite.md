@@ -1,7 +1,7 @@
 # テスト戦略と構成を規約に合わせ、欠落しているテストを追加する
 
 - Created: 2026-11-10
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-11-20
 - Branch: feature/refactor-test-suite
 - Polished: {YYYY-MM-DD}
 - Reporter: @melpon
@@ -40,3 +40,7 @@
 - YV12 / I420 のクロマ検証と `Encoder::new` の検証テストが追加される。
 - `cargo test --workspace` が通る。
 - `CHANGES.md` の `## develop` の `### misc` にテスト改善として追記する。
+
+## 解決方法
+
+作成後の変更で、issue が挙げていた項目の多くは解消済みだった。残っていたのは `tests/test_roundtrip.rs` の構成整理、YV12 / I420 のクロマ検証、自明なテストと `_ => unimplemented!()` の整理、`CHANGES.md` への追記だが、いずれも現状のテストで実用上の問題になっておらず、対応する価値が低いと判断した。テストヘルパーの YV12 コピー経路には U/V を入れ替える不具合があるが、テストデータの U/V が同値のため顕在化していない。対応しないため closed にする。
