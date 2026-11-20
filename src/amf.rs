@@ -445,6 +445,31 @@ impl Surface {
         ptr
     }
 
+    /// `AMFData` としてアクセスする `Data` ハンドルを作成する
+    ///
+    /// 参照カウントを増やして `Data` を作る。`SubmitInput` に渡す場合は、
+    /// 他のハンドルが残らないよう、この `Surface` を drop すること。
+    ///
+    /// # Errors
+    ///
+    /// `Data` の作成に失敗した場合にエラーを返す。
+    pub fn data(&self) -> Result<Data, Error> {
+        unsafe { Data::from_raw_acquired(self.ptr as *mut sys::AMFData, self.context.clone()) }
+    }
+
+    /// 所有権を `Data` に移す
+    ///
+    /// 元の `Surface` は消費される。
+    ///
+    /// # Errors
+    ///
+    /// `Data` の作成に失敗した場合にエラーを返す。
+    pub fn into_data(self) -> Result<Data, Error> {
+        let context = self.context.clone();
+        let ptr = self.into_raw();
+        unsafe { Data::from_raw(ptr as *mut sys::AMFData, context) }
+    }
+
     /// PTS (100 ナノ秒単位のタイムスタンプ) を設定する
     pub fn set_pts(&self, pts: i64) {
         let _guard = self.state.lock();
@@ -663,6 +688,31 @@ impl Buffer {
         let ptr = self.ptr;
         self.ptr = std::ptr::null_mut();
         ptr
+    }
+
+    /// `AMFData` としてアクセスする `Data` ハンドルを作成する
+    ///
+    /// 参照カウントを増やして `Data` を作る。`SubmitInput` に渡す場合は、
+    /// 他のハンドルが残らないよう、この `Buffer` を drop すること。
+    ///
+    /// # Errors
+    ///
+    /// `Data` の作成に失敗した場合にエラーを返す。
+    pub fn data(&self) -> Result<Data, Error> {
+        unsafe { Data::from_raw_acquired(self.ptr as *mut sys::AMFData, self.context.clone()) }
+    }
+
+    /// 所有権を `Data` に移す
+    ///
+    /// 元の `Buffer` は消費される。
+    ///
+    /// # Errors
+    ///
+    /// `Data` の作成に失敗した場合にエラーを返す。
+    pub fn into_data(self) -> Result<Data, Error> {
+        let context = self.context.clone();
+        let ptr = self.into_raw();
+        unsafe { Data::from_raw(ptr as *mut sys::AMFData, context) }
     }
 
     /// バッファのネイティブポインタを返す
@@ -1138,6 +1188,212 @@ fn checked_mul_len(a: usize, b: usize) -> Result<usize, Error> {
         .ok_or_else(|| InternalError::new("plane size overflows usize"))?;
     validate_slice_len(len)?;
     Ok(len)
+}
+
+// ---------------------------------------------------------------------------
+// Data のラッパー
+// ---------------------------------------------------------------------------
+
+/// `AMFData` の RAII ラッパー
+///
+/// `AMFComponent::QueryOutput` が返したデータを所有し、`Drop` で `Release` する。
+/// `AMFBuffer` / `AMFSurface` のどちらであるかは [`Self::to_buffer`] /
+/// [`Self::to_surface`] で判定し、対応するハンドルに変換する。
+pub struct Data {
+    /// 所有している AMFData
+    ptr: *mut sys::AMFData,
+    f: DataFuncs,
+    state: Arc<AmfObjectState>,
+    context: Context,
+}
+
+#[derive(Clone, Copy)]
+struct DataFuncs {
+    acquire: unsafe extern "C" fn(*mut sys::AMFData) -> sys::amf_long,
+    release: unsafe extern "C" fn(*mut sys::AMFData) -> sys::amf_long,
+    get_data_type: unsafe extern "C" fn(*mut sys::AMFData) -> sys::AMF_DATA_TYPE,
+}
+
+impl std::fmt::Debug for Data {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Data")
+            .field("ptr", &format_args!("{:p}", self.ptr))
+            .finish()
+    }
+}
+
+// SAFETY:
+// AMFData は参照カウントで管理され、Buffer / Surface と同様に複数のスレッドから
+// 扱える。Data はワーカースレッド内で所有し、変換後の Buffer / Surface は
+// 参照カウントを増やした独立したハンドルになる。
+unsafe impl Send for Data {}
+unsafe impl Sync for Data {}
+
+impl Data {
+    /// 生ポインタから `Data` を作成する (Acquire なし)
+    ///
+    /// # Safety
+    ///
+    /// `ptr` は `context` から取得した有効な `AMFData` を指すこと。`ptr` を指す
+    /// 他のハンドルが存在しないこと。
+    pub unsafe fn from_raw(ptr: *mut sys::AMFData, context: Context) -> Result<Self, Error> {
+        unsafe { Self::from_raw_with_acquire(ptr, false, context) }
+    }
+
+    /// 生ポインタから Acquire 付きで `Data` を作成する
+    ///
+    /// # Safety
+    ///
+    /// `ptr` は `context` から取得した有効な `AMFData` を指すこと。
+    pub unsafe fn from_raw_acquired(
+        ptr: *mut sys::AMFData,
+        context: Context,
+    ) -> Result<Self, Error> {
+        unsafe { Self::from_raw_with_acquire(ptr, true, context) }
+    }
+
+    /// 生ポインタから `Data` を作成する
+    unsafe fn from_raw_with_acquire(
+        ptr: *mut sys::AMFData,
+        acquire: bool,
+        context: Context,
+    ) -> Result<Self, Error> {
+        if ptr.is_null() {
+            return Err(InternalError::new("AMFData is null").into());
+        }
+
+        let vtbl = unsafe { &*(*ptr).pVtbl };
+        let Some(acquire_fn) = vtbl.Acquire else {
+            if let Some(release) = vtbl.Release {
+                unsafe { release(ptr) };
+            }
+            return Err(InternalError::new("AMFData::Acquire is not available").into());
+        };
+        let Some(release) = vtbl.Release else {
+            return Err(InternalError::new("AMFData::Release is not available").into());
+        };
+        let Some(get_data_type) = vtbl.GetDataType else {
+            unsafe { release(ptr) };
+            return Err(InternalError::new("AMFData::GetDataType is not available").into());
+        };
+
+        if acquire {
+            unsafe { acquire_fn(ptr) };
+        }
+        let state = AmfObjectState::new();
+        state.inc();
+        Ok(Self {
+            ptr,
+            f: DataFuncs {
+                acquire: acquire_fn,
+                release,
+                get_data_type,
+            },
+            state,
+            context,
+        })
+    }
+
+    /// このハンドルが保持する `Context` を返す
+    pub fn context(&self) -> Context {
+        self.context.clone()
+    }
+
+    /// 生ポインタを返す
+    pub fn as_ptr(&self) -> *mut sys::AMFData {
+        self.ptr
+    }
+
+    /// 所有権を放棄して生ポインタを返す (Release は呼ばない)
+    pub fn into_raw(mut self) -> *mut sys::AMFData {
+        let ptr = self.ptr;
+        self.ptr = std::ptr::null_mut();
+        ptr
+    }
+
+    /// `AMFData::GetDataType` の結果を返す
+    pub fn get_data_type(&self) -> sys::AMF_DATA_TYPE {
+        unsafe { (self.f.get_data_type)(self.ptr) }
+    }
+
+    /// このデータが保持するプロパティストレージを返す
+    pub fn property_storage(&self) -> Result<PropertyStorage, Error> {
+        unsafe {
+            PropertyStorage::from_raw_with_acquire(
+                self.ptr as *mut sys::AMFPropertyStorage,
+                true,
+                Arc::clone(&self.state),
+                self.context.clone(),
+            )
+        }
+    }
+
+    /// `Buffer` を構築する
+    ///
+    /// 参照カウントを増やして独立した `Buffer` を作るため、`Data` はそのまま
+    /// 使い続けられる。
+    ///
+    /// # Errors
+    ///
+    /// `Buffer` 以外のデータの場合、または `Buffer` の構築に失敗した場合に
+    /// エラーを返す。
+    pub fn to_buffer(&self) -> Result<Buffer, Error> {
+        let data_type = self.get_data_type();
+        if !matches!(data_type, sys::AMF_DATA_TYPE::AMF_DATA_BUFFER) {
+            return Err(InternalError::new(format!(
+                "expected an AMFBuffer, but got {data_type:?}"
+            ))
+            .into());
+        }
+
+        unsafe { Buffer::from_raw_acquired(self.ptr as *mut sys::AMFBuffer, self.context.clone()) }
+    }
+
+    /// `Surface` を構築する
+    ///
+    /// 参照カウントを増やして独立した `Surface` を作るため、`Data` はそのまま
+    /// 使い続けられる。
+    ///
+    /// # Errors
+    ///
+    /// `Surface` 以外のデータの場合、または `Surface` の構築に失敗した場合に
+    /// エラーを返す。
+    pub fn to_surface(&self) -> Result<Surface, Error> {
+        let data_type = self.get_data_type();
+        if !matches!(data_type, sys::AMF_DATA_TYPE::AMF_DATA_SURFACE) {
+            return Err(InternalError::new(format!(
+                "expected an AMFSurface, but got {data_type:?}"
+            ))
+            .into());
+        }
+
+        unsafe {
+            Surface::from_raw_acquired(self.ptr as *mut sys::AMFSurface, self.context.clone())
+        }
+    }
+}
+
+impl Clone for Data {
+    fn clone(&self) -> Self {
+        unsafe { (self.f.acquire)(self.ptr) };
+        self.state.inc();
+        Self {
+            ptr: self.ptr,
+            f: self.f,
+            state: Arc::clone(&self.state),
+            context: self.context.clone(),
+        }
+    }
+}
+
+impl Drop for Data {
+    fn drop(&mut self) {
+        self.state.dec();
+        if self.ptr.is_null() {
+            return;
+        }
+        unsafe { (self.f.release)(self.ptr) };
+    }
 }
 
 // ---------------------------------------------------------------------------

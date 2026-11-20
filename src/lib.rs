@@ -76,6 +76,7 @@ mod error;
 mod query_output;
 mod sys;
 mod types;
+mod worker;
 
 use std::cell::UnsafeCell;
 use std::path::Path;

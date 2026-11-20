@@ -157,6 +157,8 @@ for frame in frame_rx.try_iter() {
 
 `EncoderConfig::b_pic_pattern` に GOP 内の連続 B フレーム数を指定すると、B フレームを有効にできます。AMF の仕様上の値域は H.264 が 0-3、AV1 が 0-127 で、0 は B フレームなしです。HEVC は B フレームを扱わないため指定できません。B フレームを有効にすると、ハンドラーへの通知順は入力順 (提示順) と異なる符号化順になりますが、`encode()` に渡したユーザーデータは対応する入力フレームの出力に付きます。B フレームに対応していない GPU で 1 以上を指定した場合は `Encoder::new` がエラーを返します。
 
+`Encoder` は入出力の対応付けに `ShiguredoAmfFrameId` プロパティを使います。この名前はライブラリの予約名であり、利用者は入力 `Surface` に設定しないでください。`encode()` は入力 `Surface` の PTS を変更せず、出力 `Buffer` の PTS も設定しません。出力 `Buffer` の PTS は AMF が付けた値になります。
+
 `reconfigure` で変更できる項目は codec ごとに異なります。
 
 - H.264: `framerate_num` / `framerate_den` / `target_kbps` / `max_kbps` / `qpi` / `qpp` / `qpb` / `gop_pic_size`
@@ -223,9 +225,11 @@ for frame in frame_rx.try_iter() {
 `decode()` には 1 フレーム分のビットストリームを格納した `Buffer` を渡します。
 複数フレームを含むバッファは未対応で、`AMF_REPEAT` が返された場合はエラーになります。
 B フレームを含むストリームでは出力順が入力順と異なりますが、`decode()` に渡した
-`user_data` は対応する出力フレームに付きます。`decode()` は入力 `Buffer` に設定した
-PTS を対応する出力 `Surface` に引き継ぎます。PTS を設定していない場合は 0 になります。
-B フレームを含むストリームでは出力 `Surface` の PTS も入力順には並びません。
+`user_data` は対応する出力フレームに付きます。`decode()` は入力 `Buffer` の PTS を
+変更せず、出力 `Surface` の PTS も設定しません。出力 `Surface` の PTS は AMF が
+付けた値になります。入出力の対応付けには `ShiguredoAmfFrameId` プロパティを
+使います。この名前はライブラリの予約名であり、利用者は入力 `Buffer` に
+設定しないでください。
 
 フレームデータは unsafe な `Plane::as_slice` / `Plane::as_mut_slice` で、ビットストリームは
 unsafe な `Buffer::as_slice` / `Buffer::as_mut_slice` で読み書きします。`Plane` のスライスは

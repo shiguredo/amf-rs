@@ -3,20 +3,12 @@
 //! AMD GPU を使ったハードウェアビデオエンコードを提供する。
 //! H.264/AVC、H.265/HEVC、AV1 コーデックに対応する。
 
-use std::collections::{HashMap, VecDeque};
-use std::ptr;
-use std::sync::mpsc;
-use std::thread::JoinHandle;
-use std::time::Duration;
-
 use crate::AmfLibrary;
 use crate::amf::{Buffer, Component, Context, PropertyStorage, Surface};
-use crate::error::{
-    AmfError, EnvironmentError, Error, InternalError, InvalidArgumentError, InvalidStateError,
-};
-use crate::query_output::{DrainStatus, QueryOutputKind, classify_query_output};
-use crate::sys::{self, AMF_RESULT, AMFBuffer, AMFData, amf_int32, amf_int64};
+use crate::error::{AmfError, Error, InternalError, InvalidArgumentError, InvalidStateError};
+use crate::sys::{self, AMF_RESULT, amf_int32, amf_int64};
 use crate::types::{Av1Profile, FrameFormat, H264Profile, HevcProfile, MemoryType, SurfaceFormat};
+use crate::worker::{Worker, WorkerConfig};
 
 // ---------------------------------------------------------------------------
 // 公開型
@@ -396,11 +388,6 @@ impl<T> EncodedFrame<T> {
     }
 }
 
-// 入出力の対応付け用の値を入力 Surface から出力 Buffer へ引き継ぐプロパティ名。
-// AMF は入力 Surface に設定したプロパティを、同じフレームの出力 Buffer へ引き継ぐ。
-// AMF が出力 Buffer に付ける PTS はフレームの識別に使えないため、このプロパティを使う。
-const FRAME_ID_PROPERTY: &str = "ShiguredoAmfFrameId";
-
 // ---------------------------------------------------------------------------
 // frame_type 定数
 // ---------------------------------------------------------------------------
@@ -479,43 +466,8 @@ where
 }
 
 // ---------------------------------------------------------------------------
-// ワーカースレッド用コマンド
+// ワーカースレッド用の型
 // ---------------------------------------------------------------------------
-
-/// 出力 Buffer の抽出エラー
-struct OutputError {
-    /// このエラーを通知する対象の対応付け用の値。対応付けできない場合は None
-    frame_id: Option<i64>,
-    /// ハンドラーへ通知するエラー
-    error: Error,
-}
-
-impl OutputError {
-    /// 対応付け用の値を取得する前の失敗から、対象の入力を特定できないエラーを作成する
-    fn unidentified(error: Error) -> Self {
-        Self {
-            frame_id: None,
-            error,
-        }
-    }
-}
-
-/// 対応付け用の値を取得する前の失敗を `OutputError` に変換する
-fn without_frame_id<T>(result: Result<T, Error>) -> Result<T, OutputError> {
-    match result {
-        Ok(value) => Ok(value),
-        Err(error) => Err(OutputError::unidentified(error)),
-    }
-}
-
-enum WorkerCommand<T> {
-    /// 入力フレームの対応付け用の値とユーザーデータを登録する
-    Submit {
-        frame_id: i64,
-        user_data: T,
-    },
-    Finish(mpsc::SyncSender<()>),
-}
 
 /// コーデックごとに異なる動的プロパティの名前
 struct DynamicPropertyNames {
@@ -543,10 +495,15 @@ struct DynamicPropertyNames {
 ///
 /// エンコード結果は、[`Encoder::new`] に渡したハンドラーへワーカースレッドから通知される。
 ///
+/// [`Encoder::encode`] / [`Encoder::finish`] がエラーを返した場合、その後は
+/// `Drop` 以外の操作を保証しない。`Drop` は安全に呼び出せる。
+///
 /// # Drop
 ///
-/// [`Encoder::finish`] を呼ばずに drop した場合、ワーカーが保留している入力の
-/// `user_data` と出力は通知されずに破棄される。
+/// [`Encoder::finish`] を呼ばずに drop した場合、drop はワーカーが停止するまで
+/// 待つ。停止処理の途中で、すでに [`Encoder::encode`] が成功したフレームの出力が
+/// 通知されることがある。drop は、すべてのフレームの出力が通知されることを
+/// 保証しない。
 pub struct Encoder<H: EncodeHandler> {
     component: Component,
     context: Context,
@@ -554,10 +511,10 @@ pub struct Encoder<H: EncodeHandler> {
     width: i32,
     height: i32,
     codec_config: CodecConfig,
-    cmd_tx: Option<mpsc::Sender<WorkerCommand<H::UserData>>>,
-    poll_thread: Option<JoinHandle<()>>,
-    /// 次に投入する入力フレームへ割り当てる対応付け用の値
-    next_frame_id: i64,
+    /// ワーカースレッドの制御
+    worker: Worker<H::UserData>,
+    /// AMF が入力を受け付けており、終了時に Drain が必要か
+    drain_required: bool,
 }
 
 impl<H: EncodeHandler> Encoder<H> {
@@ -574,7 +531,7 @@ impl<H: EncodeHandler> Encoder<H> {
     ///
     /// `config` の値が不正な場合、または AMF のエンコーダーを初期化できない場合に
     /// エラーを返す。GPU と AMF の実装が指定した設定に対応していない場合も含む。
-    pub fn new(context: Context, config: EncoderConfig, handler: H) -> Result<Self, Error> {
+    pub fn new(context: Context, config: EncoderConfig, mut handler: H) -> Result<Self, Error> {
         // 入力パラメータのバリデーション
         if config.width == 0 || config.height == 0 {
             return Err(InvalidArgumentError::new(format!(
@@ -672,22 +629,30 @@ impl<H: EncodeHandler> Encoder<H> {
         let codec_config = config.codec;
 
         // ワーカースレッドを起動する
-        let (cmd_tx, cmd_rx) = mpsc::channel::<WorkerCommand<H::UserData>>();
-        let worker_component = component.clone();
         let worker_codec_config = codec_config.clone();
-        let poll_thread = std::thread::Builder::new()
-            .name("amf-encoder-worker".into())
-            .spawn(move || {
-                worker(worker_component, handler, cmd_rx, worker_codec_config);
-            });
-        let poll_thread = match poll_thread {
-            Ok(handle) => handle,
-            Err(source) => {
-                return Err(
-                    EnvironmentError::new("failed to spawn encoder worker thread", source).into(),
-                );
-            }
-        };
+        let worker = Worker::spawn(
+            component.clone(),
+            WorkerConfig {
+                role: "encoder",
+                deliver: Box::new(move |result| {
+                    handler.on_encoded(
+                        result
+                            .and_then(|(data, user_data)| {
+                                let buffer = data.to_buffer()?;
+                                let (buffer, picture_type) =
+                                    validate_encoded_output(buffer, &worker_codec_config)?;
+                                Ok(EncodedFrame {
+                                    buffer,
+                                    picture_type,
+                                    user_data,
+                                })
+                            })
+                            .map_err(Into::into),
+                    );
+                }),
+                drained: Box::new(|pending| pending.is_empty()),
+            },
+        )?;
 
         Ok(Self {
             component,
@@ -696,9 +661,8 @@ impl<H: EncodeHandler> Encoder<H> {
             width: config.width as i32,
             height: config.height as i32,
             codec_config,
-            cmd_tx: Some(cmd_tx),
-            poll_thread: Some(poll_thread),
-            next_frame_id: 1,
+            worker,
+            drain_required: false,
         })
     }
 
@@ -753,7 +717,7 @@ impl<H: EncodeHandler> Encoder<H> {
     /// した場合にエラーを返す。利用するコーデックが指定した項目に対応していない
     /// 場合も含む。
     pub fn reconfigure(&mut self, params: ReconfigureParams) -> Result<(), Error> {
-        if self.cmd_tx.is_none() {
+        if !self.worker.is_running() {
             return Err(InvalidStateError::new("encoder is already finished").into());
         }
 
@@ -1138,6 +1102,9 @@ impl<H: EncodeHandler> Encoder<H> {
     /// 共有されていない Surface であること。
     /// 別の Context の Surface や、他のハンドルと共有されている Surface はエラーになる。
     ///
+    /// 入出力の対応付けに `ShiguredoAmfFrameId` プロパティを使う。この名前は
+    /// ライブラリの予約名であり、利用者は `surface` に設定しないこと。
+    ///
     /// # Errors
     ///
     /// `finish` 済みの場合、`surface` の状態が操作に適していない場合、または
@@ -1148,7 +1115,7 @@ impl<H: EncodeHandler> Encoder<H> {
         options: &EncodeOptions,
         user_data: H::UserData,
     ) -> Result<(), Error> {
-        if self.cmd_tx.is_none() {
+        if !self.worker.is_running() {
             return Err(InvalidStateError::new("encoder is already finished").into());
         }
 
@@ -1170,65 +1137,27 @@ impl<H: EncodeHandler> Encoder<H> {
             .into());
         }
 
-        // 入力と出力の対応付けに使う一意な値を割り当てる。
-        let frame_id = self.next_frame_id;
-        self.next_frame_id = self
-            .next_frame_id
-            .checked_add(1)
-            .ok_or_else(|| InternalError::new("frame ID counter overflowed"))?;
-
         {
+            // フレームタイプを強制する。SubmitInput の前にプロパティのハンドルを
+            // 解放し、Surface が共有状態のまま投入されないようにする。
             let property = surface.property_storage()?;
-            // 入出力の対応付け用の値を出力 Buffer へ引き継ぐ
-            property.set_property_int64(FRAME_ID_PROPERTY, frame_id)?;
-            // フレームタイプの強制
-            self.force_picture_type(&property, options.frame_type)?;
+            Self::force_picture_type(&self.codec_config, &property, options.frame_type)?;
         }
 
         tracing::trace!("Encoder::encode: SubmitInput");
-        // SubmitInput (INPUT_FULL の場合はリトライする)
-        let max_retries = 100;
-        let mut last_result = AMF_RESULT::AMF_OK;
-        let mut submitted = false;
-        for retry in 0..max_retries {
-            let result = unsafe {
-                self.component
-                    .submit_input(surface.as_ptr() as *mut AMFData)
-            };
-            last_result = result;
-
-            // AMF_NEED_MORE_INPUT は入力を受け付けたが、まだ出力を生成できないことを
-            // 示す。B フレームでは複数の入力を必要とするため、受理として扱う。
-            if matches!(result, AMF_RESULT::AMF_OK | AMF_RESULT::AMF_NEED_MORE_INPUT) {
-                tracing::trace!("Encoder::SubmitInput: accepted, result={result:?}");
-                submitted = true;
-                break;
-            }
-            if result == AMF_RESULT::AMF_INPUT_FULL || result == AMF_RESULT::AMF_REPEAT {
-                if retry > 0 && retry % 10 == 0 {
-                    tracing::trace!("Encoder::SubmitInput: retry={retry}, result={result:?}");
-                }
-                std::thread::sleep(Duration::from_millis(1));
-                continue;
-            }
-            // その他のエラー
-            return AmfError::check(result, "AMFComponent::SubmitInput").map_err(Into::into);
-        }
-        if !submitted {
-            return Err(InternalError::new(format!(
-                "AMFComponent::SubmitInput did not accept input after {max_retries} retries (last status: {last_result:?})"
-            ))
-            .into());
+        // `AMF_NEED_MORE_INPUT` は入力を受け付けたが、まだ出力を生成できないことを
+        // 示す。B フレームでは複数の入力を必要とするため、受理として扱う。
+        let data = surface.into_data()?;
+        let (frame_id, status) = self.worker.submit_input(&self.component, &data)?;
+        if !matches!(status, AMF_RESULT::AMF_OK | AMF_RESULT::AMF_NEED_MORE_INPUT) {
+            return Err(AmfError::new(status, "AMFComponent::SubmitInput").into());
         }
 
-        // ワーカースレッドに Submit コマンドを送信する
-        self.cmd_tx
-            .as_ref()
-            .expect("cmd_tx must be set before encode")
-            .send(WorkerCommand::Submit {
-                frame_id,
-                user_data,
-            })?;
+        // AMF が入力を受け付けたため、終了時には Drain が必要になる。
+        self.drain_required = true;
+
+        // ワーカースレッドに user_data の登録コマンドを送信する
+        self.worker.register_user_data(frame_id, user_data)?;
 
         Ok(())
     }
@@ -1250,7 +1179,7 @@ impl<H: EncodeHandler> Encoder<H> {
 
     /// 指定されたフレームタイプを AMF に強制する
     fn force_picture_type(
-        &self,
+        codec_config: &CodecConfig,
         prop: &PropertyStorage,
         frame_type_value: u16,
     ) -> Result<(), Error> {
@@ -1259,11 +1188,11 @@ impl<H: EncodeHandler> Encoder<H> {
         };
 
         // AV1 には P を強制する値がない。
-        if resolved == frame_type::P && matches!(&self.codec_config, CodecConfig::Av1(_)) {
+        if resolved == frame_type::P && matches!(codec_config, CodecConfig::Av1(_)) {
             return Ok(());
         }
 
-        match &self.codec_config {
+        match codec_config {
             CodecConfig::H264(_) => {
                 let value: amf_int64 = match resolved {
                     frame_type::IDR => {
@@ -1326,51 +1255,19 @@ impl<H: EncodeHandler> Encoder<H> {
 
     /// 残りのフレームを出力させ、ハンドラーへの通知が完了するまで待つ。
     ///
-    /// 処理中に発生したエラーはハンドラーへ通知される。
+    /// 入力が受理済みの場合はワーカーに Drain と出力の回収をさせる。受理済みの
+    /// 入力がない場合はワーカーを停止するだけである。出力の回収中に発生した
+    /// 終端エラーはハンドラーへ通知される。
     ///
     /// # Errors
     ///
-    /// `finish` 済みの場合、AMF の操作に失敗した場合、またはワーカーが停止して
-    /// いる場合にエラーを返す。ハンドラーが panic した場合もワーカーが停止したもの
-    /// として扱う。
+    /// `finish` 済みの場合、残りの出力を回収できなかった場合、または
+    /// ハンドラーが panic した場合にエラーを返す。エラーを返した後の操作は
+    /// `Drop` 以外を保証しない。
     pub fn finish(&mut self) -> Result<(), Error> {
-        if self.cmd_tx.is_none() {
-            return Err(InvalidStateError::new("encoder is already finished").into());
-        }
-
-        // Drain を呼び出して残りのフレームを出力させる
-        let result = self.component.drain();
-        // AMF_INPUT_FULL は Drain 中に返ることがあるが無視する
-        if result != AMF_RESULT::AMF_OK && result != AMF_RESULT::AMF_INPUT_FULL {
-            return Err(AmfError::new(result, "AMFComponent::Drain").into());
-        }
-
-        // Drain に成功してから `cmd_tx` を取り出す。以降は終了済みとして扱い、
-        // `encode` / `reconfigure` / 再度の `finish` を拒否する。Drain がエラーに
-        // なった場合は `cmd_tx` を保持したままなので、呼び出し側は `finish` をやり直せる。
-        let cmd_tx = self
-            .cmd_tx
-            .take()
-            .expect("cmd_tx must be set before finish");
-
-        // Finish コマンドでワーカースレッドに残りの出力を処理させる
-        let (tx, rx) = mpsc::sync_channel(1);
-        let worker_replied = cmd_tx.send(WorkerCommand::Finish(tx)).is_ok() && rx.recv().is_ok();
-
-        // Finish を送れなかった場合はワーカーの受信側が既に破棄されているため、
-        // ワーカーは終了済みか終了処理中である。なので送信結果にかかわらず
-        // join で待つ。
-        let join_result = match self.poll_thread.take() {
-            Some(handle) => handle.join(),
-            None => Ok(()),
-        };
-
-        match (worker_replied, join_result) {
-            (true, Ok(())) => Ok(()),
-            // ハンドラーの panic は、panic の内容をエラーに含めずに返す。
-            (_, Err(_)) => Err(InternalError::new("encoder worker thread panicked").into()),
-            (false, Ok(())) => Err(InternalError::new("encoder worker thread terminated").into()),
-        }
+        self.worker.finish(self.drain_required)?;
+        self.drain_required = false;
+        Ok(())
     }
 }
 
@@ -1378,15 +1275,9 @@ impl<H: EncodeHandler> Encoder<H> {
 // Drop 内でのみ component を解放する。ワーカースレッドは Drop より先に停止させる。
 impl<H: EncodeHandler> Drop for Encoder<H> {
     fn drop(&mut self) {
-        // ワーカースレッドを停止する (cmd_tx を drop → チャネル切断 → ワーカー終了)
-        self.cmd_tx = None;
-
-        if let Some(handle) = self.poll_thread.take() {
-            // Drop はエラーを返せないため、ハンドラーの panic はログに記録する。
-            if handle.join().is_err() {
-                tracing::error!("Encoder::drop: encoder worker thread panicked");
-            }
-        }
+        // ワーカースレッドに Stop を送り、キューにあるコマンドを処理してから停止する。
+        // 停止時に残っている入力と出力は通知せずに破棄される。
+        self.worker.shutdown();
 
         // 戻り値を返せない後始末であるため、失敗は記録だけ行う。
         let result = self.component.terminate();
@@ -1396,301 +1287,28 @@ impl<H: EncodeHandler> Drop for Encoder<H> {
     }
 }
 
-// ---------------------------------------------------------------------------
-// ワーカースレッド
-// ---------------------------------------------------------------------------
-
-/// ワーカースレッドのエントリポイント
+/// 出力バッファを検証し、ピクチャタイプと一緒に返す。
 ///
-/// メインスレッドから `Submit` コマンドを受け取り、AMFComponent::QueryOutput を
-/// ポーリングしてエンコード済みフレームを取得し、ハンドラーを呼び出す。
-fn worker<H: EncodeHandler>(
-    component: Component,
-    mut handler: H,
-    cmd_rx: mpsc::Receiver<WorkerCommand<H::UserData>>,
-    codec_config: CodecConfig,
-) {
-    // 対応付け用の値から入力フレームのユーザーデータを引くための表。値は
-    // `Encoder::encode` が入力ごとに一意に割り当てるため、重複はない。
-    let mut pending: HashMap<i64, H::UserData> = HashMap::new();
-    // Submit コマンドの処理が出力の取得より遅れた場合に備え、対応する user_data が
-    // 登録されるまで出力を保持する。
-    let mut output_buffer: VecDeque<Result<(Buffer, PictureType, i64), OutputError>> =
-        VecDeque::new();
-    let mut finish: Option<mpsc::SyncSender<()>> = None;
-
-    loop {
-        if finish.is_some() {
-            // Drain 後は、AMF_EOF が返るか、保持している入出力がなくなるまで
-            // ポーリングする。
-            match drain_output(&mut output_buffer, &component, &codec_config) {
-                Ok(status) => {
-                    deliver_buffered(&mut output_buffer, &mut pending, &mut handler);
-                    if status == DrainStatus::Eof {
-                        flush_buffered_outputs(&mut output_buffer, &mut pending, &mut handler);
-                        report_unmatched_inputs(&mut pending, &mut handler);
-                        break;
-                    }
-                    if pending.is_empty() && output_buffer.is_empty() {
-                        break;
-                    }
-                }
-                Err(error) => {
-                    // 終端エラーでは AMF_EOF を待たず、取得済みの出力と残りの入力を
-                    // 通知してワーカーを終了する。
-                    notify_terminal_error(error, &mut output_buffer, &mut pending, &mut handler);
-                    break;
-                }
-            }
-
-            std::thread::sleep(Duration::from_millis(1));
-            continue;
-        }
-
-        let cmd = if pending.is_empty() {
-            match cmd_rx.recv() {
-                Ok(cmd) => cmd,
-                Err(_) => break,
-            }
-        } else {
-            match cmd_rx.recv_timeout(Duration::from_millis(1)) {
-                Ok(cmd) => cmd,
-                Err(mpsc::RecvTimeoutError::Timeout) => {
-                    match drain_output(&mut output_buffer, &component, &codec_config) {
-                        Ok(_) => {
-                            deliver_buffered(&mut output_buffer, &mut pending, &mut handler);
-                        }
-                        Err(error) => {
-                            // 通常のエンコード中でも終端エラーは起き得るため、同じように
-                            // 取得済みの出力と残りの入力を通知して終了する。
-                            notify_terminal_error(
-                                error,
-                                &mut output_buffer,
-                                &mut pending,
-                                &mut handler,
-                            );
-                            break;
-                        }
-                    }
-                    continue;
-                }
-                Err(mpsc::RecvTimeoutError::Disconnected) => break,
-            }
-        };
-
-        match cmd {
-            WorkerCommand::Submit {
-                frame_id,
-                user_data,
-            } => {
-                pending.insert(frame_id, user_data);
-                // Submit によって対応付けが変わったため、保持している出力を再確認する。
-                deliver_buffered(&mut output_buffer, &mut pending, &mut handler);
-            }
-            WorkerCommand::Finish(tx) => {
-                finish = Some(tx);
-            }
-        }
-    }
-
-    if let Some(tx) = finish {
-        let _ = tx.send(());
-    }
-}
-
-/// `QueryOutput` から取得できた出力を `output_buffer` に追加する。
+/// # Errors
 ///
-/// 出力が尽きた場合は [`DrainStatus::NotReady`]、ドレインが完了した場合は
-/// [`DrainStatus::Eof`] を返す。終端エラーの場合は `Err` を返す。
-fn drain_output(
-    output_buffer: &mut VecDeque<Result<(Buffer, PictureType, i64), OutputError>>,
-    component: &Component,
+/// 出力バッファのサイズが 0 の場合、ネイティブポインタが null の場合、または
+/// ピクチャタイプを取得できない場合にエラーを返す。
+fn validate_encoded_output(
+    buffer: Buffer,
     codec_config: &CodecConfig,
-) -> Result<DrainStatus, Error> {
-    let context = component.context();
-    loop {
-        let mut data: *mut AMFData = ptr::null_mut();
-        let result = unsafe { component.query_output(&mut data) };
-        tracing::trace!("worker: QueryOutput result={result:?}");
-        let kind = classify_query_output(result, !data.is_null());
-        // QueryOutput が返した参照は呼び出し元が所有する。
-        if kind != QueryOutputKind::Output && !data.is_null() {
-            let vtbl = unsafe { &*(*data).pVtbl };
-            if let Some(release) = vtbl.Release {
-                unsafe { release(data) };
-            }
-        }
-        match kind {
-            QueryOutputKind::Output => {
-                output_buffer.push_back(extract_encoded_output(data, codec_config, &context));
-            }
-            QueryOutputKind::NoOutput => {
-                return Ok(DrainStatus::NotReady);
-            }
-            QueryOutputKind::Eof => {
-                return Ok(DrainStatus::Eof);
-            }
-            QueryOutputKind::TerminalError => {
-                return Err(AmfError::new(result, "AMFComponent::QueryOutput").into());
-            }
-        }
-    }
-}
-
-/// 対応する入力がある出力を、出力順にハンドラーへ通知する。
-///
-/// 対応する入力がまだない出力は通知せずに保持する。出力の抽出エラーは `Err` として通知する。
-fn deliver_buffered<H: EncodeHandler>(
-    output_buffer: &mut VecDeque<Result<(Buffer, PictureType, i64), OutputError>>,
-    pending: &mut HashMap<i64, H::UserData>,
-    handler: &mut H,
-) {
-    loop {
-        match output_buffer.front() {
-            None => return,
-            Some(Err(_)) => {
-                let output = output_buffer.pop_front().expect("front output must exist");
-                let output_error = match output {
-                    Err(error) => error,
-                    Ok(_) => unreachable!("front output must be an error"),
-                };
-                // エラーを通知した入力は、未対応入力として再通知しない。
-                if let Some(frame_id) = output_error.frame_id {
-                    pending.remove(&frame_id);
-                }
-                handler.on_encoded(Err(output_error.error.into()));
-            }
-            Some(Ok((_, _, frame_id))) => {
-                let frame_id = *frame_id;
-                let Some(user_data) = pending.remove(&frame_id) else {
-                    return;
-                };
-                let output = output_buffer.pop_front().expect("front output must exist");
-                let (buffer, picture_type, _) = match output {
-                    Ok(output) => output,
-                    Err(_) => unreachable!("front output must be a success"),
-                };
-                handler.on_encoded(Ok(EncodedFrame {
-                    buffer,
-                    picture_type,
-                    user_data,
-                }));
-            }
-        }
-    }
-}
-
-/// 保持している出力をすべてハンドラーへ通知する。
-///
-/// 対応する入力がある出力は `Ok`、ない出力は `Err` として通知する。抽出エラーも
-/// `Err` として通知する。ドレイン完了時と終端エラー時に呼ぶ。
-fn flush_buffered_outputs<H: EncodeHandler>(
-    output_buffer: &mut VecDeque<Result<(Buffer, PictureType, i64), OutputError>>,
-    pending: &mut HashMap<i64, H::UserData>,
-    handler: &mut H,
-) {
-    while let Some(output) = output_buffer.pop_front() {
-        match output {
-            Ok((buffer, picture_type, frame_id)) => match pending.remove(&frame_id) {
-                Some(user_data) => handler.on_encoded(Ok(EncodedFrame {
-                    buffer,
-                    picture_type,
-                    user_data,
-                })),
-                None => handler.on_encoded(Err(Error::Internal(InternalError::new(format!(
-                    "the encoder produced output that matches no submitted input (frame ID {frame_id})"
-                )))
-                .into())),
-            },
-            Err(output_error) => {
-                // エラーを通知した入力は、未対応入力として再通知しない。
-                if let Some(frame_id) = output_error.frame_id {
-                    pending.remove(&frame_id);
-                }
-                handler.on_encoded(Err(output_error.error.into()));
-            }
-        }
-    }
-}
-
-/// 出力が得られなかった入力を `Err` として通知する。
-///
-/// 通知順は入力順とする。
-fn report_unmatched_inputs<H: EncodeHandler>(
-    pending: &mut HashMap<i64, H::UserData>,
-    handler: &mut H,
-) {
-    let mut frame_ids: Vec<_> = pending.drain().map(|(frame_id, _)| frame_id).collect();
-    frame_ids.sort_unstable();
-    for frame_id in frame_ids {
-        handler.on_encoded(Err(Error::Internal(InternalError::new(format!(
-            "the encoder did not produce output for the submitted input (frame ID {frame_id})"
-        )))
-        .into()));
-    }
-}
-
-/// 終端エラー発生時に、保持している出力、原因のエラー、出力が得られなかった入力の
-/// 順にハンドラーへ通知する。
-fn notify_terminal_error<H: EncodeHandler>(
-    error: Error,
-    output_buffer: &mut VecDeque<Result<(Buffer, PictureType, i64), OutputError>>,
-    pending: &mut HashMap<i64, H::UserData>,
-    handler: &mut H,
-) {
-    flush_buffered_outputs(output_buffer, pending, handler);
-    handler.on_encoded(Err(error.into()));
-    report_unmatched_inputs(pending, handler);
-}
-
-/// 出力バッファ、ピクチャタイプ、対応付け用の値を返す。
-///
-/// 出力バッファを返せない場合は `Err` を返す。対応付け用の値を取得できた後の
-/// エラーにはその値を付け、取得前のエラーには付けない。
-fn extract_encoded_output(
-    data: *mut AMFData,
-    codec_config: &CodecConfig,
-    context: &Context,
-) -> Result<(Buffer, PictureType, i64), OutputError> {
-    let buffer = data as *mut AMFBuffer;
-    if buffer.is_null() {
-        return Err(OutputError {
-            frame_id: None,
-            error: InternalError::new("output buffer is null").into(),
-        });
-    }
-    // エンコーダーの出力バッファは、エンコーダーが作成された Context から確保されている
-    let buffer = without_frame_id(unsafe { Buffer::from_raw(buffer, context.clone()) })?;
-    // `Encoder::encode` が入力 Surface に設定した値を、AMF が同じフレームの出力 Buffer へ
-    // 引き継ぐ。`Buffer::get_pts()` はフレームの識別に使えないため参照しない。
-    let property = without_frame_id(buffer.property_storage())?;
-    let frame_id = without_frame_id(property.get_property_int64(FRAME_ID_PROPERTY))?;
+) -> Result<(Buffer, PictureType), Error> {
     let buf_size = buffer.get_size();
     if buf_size == 0 {
-        return Err(OutputError {
-            frame_id: Some(frame_id),
-            error: InternalError::new("output buffer size is 0").into(),
-        });
+        return Err(InternalError::new("output buffer size is 0").into());
     }
     // エンコーダーの出力バッファはホストメモリとは限らないため、メモリ種別ではなく
     // GetNative がデータへのポインタを返すことだけを確認する。
     let buf_native = buffer.get_native() as *const u8;
     if buf_native.is_null() {
-        return Err(OutputError {
-            frame_id: Some(frame_id),
-            error: InternalError::new("output buffer native pointer is null").into(),
-        });
+        return Err(InternalError::new("output buffer native pointer is null").into());
     }
-    let picture_type = match get_output_picture_type(&buffer, codec_config) {
-        Ok(picture_type) => picture_type,
-        Err(error) => {
-            return Err(OutputError {
-                frame_id: Some(frame_id),
-                error,
-            });
-        }
-    };
-    Ok((buffer, picture_type, frame_id))
+    let picture_type = get_output_picture_type(&buffer, codec_config)?;
+    Ok((buffer, picture_type))
 }
 
 /// 出力バッファからピクチャタイプを取得する

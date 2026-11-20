@@ -67,7 +67,24 @@
   - 標準エラーから `Error` への `From` を実装し、`Error::source()` で内側の標準エラーを取得できるようにする
   - `Display` の形式を変更し、AMF のエラーは操作名とステータスを 1 回だけ表示する。Rust の関数名はメッセージに含めない
   - @melpon
+- [CHANGE] `Decoder` が入力 `Buffer` の PTS を変更し、出力 `Surface` へ引き継ぐ挙動を削除する
+  - 入力 `Buffer` の PTS は変更せず、出力 `Surface` の PTS も設定しない。出力 `Surface` の PTS は AMF が付けた値になる
+  - 入出力の対応付けには `ShiguredoAmfFrameId` プロパティを使う。この名前はライブラリの予約名になる
+  - @melpon
+- [CHANGE] `Decoder::finish()` が残りの出力を回収できなかった場合に `Err` を返すように変更する
+  - `Drain` の失敗時や、`AMF_EOF` の待機中の終端エラーで `Ok` を返していたのを `Err` にする
+  - `Encoder::finish()` / `Decoder::finish()` がエラーを返した後の操作は `Drop` 以外を保証しない
+  - @melpon
+- [CHANGE] `Encoder` / `Decoder` を `finish` せずに drop した場合の挙動を変更する
+  - drop の処理中に、すでに `encode()` / `decode()` が成功したフレームの出力が通知されることがある
+  - drop は、すべてのフレームの出力が通知されることを保証しない
+  - @melpon
 - [ADD] `PlaneType` を追加する
+  - @melpon
+- [ADD] `amf::Data` を追加する
+  - `AMFData` の RAII ラッパーで、`Buffer` / `Surface` から `data()` / `into_data()` で `Data` を取得できる
+  - `to_buffer` / `to_surface` で参照カウントを増やした `Buffer` / `Surface` を構築できる
+  - `from_raw` / `from_raw_acquired` / `as_ptr` / `into_raw` / `property_storage` / `context` を提供する
   - @melpon
 - [ADD] `amf::Buffer::property_storage` と `amf::PropertyStorage::get_property` / `get_property_int64` を追加する
   - @melpon
@@ -85,8 +102,8 @@
 - [ADD] `amf::PropertyStorage::get_property_size` を追加する
   - @melpon
 - [FIX] `Decoder::decode` の `user_data` が B フレームを含むストリームで誤ったフレームに付く問題を修正する
-  - 入力 `Buffer` に一意な PTS を設定し、出力 `Surface` の PTS で `user_data` を引き当てる
-  - 対応付けに使った PTS は、通知前に呼び出し元が設定した値へ戻す
+  - 入力 `Buffer` に一意な frame ID を設定し、出力 `Surface` の frame ID で `user_data` を引き当てる
+  - 入力 `Buffer` の PTS を対応付けに使わず、変更もしない
   - `finish()` を呼び出した後に `decode()` を呼ぶとエラーを返す
   - `finish()` はワーカーの完了まで待つ
   - 複数フレームを含むバッファは `AMF_REPEAT` を検出してエラーを返す
@@ -117,10 +134,10 @@
   - `KEY` / `INTRA_ONLY` / `INTER` を `Idr` / `I` / `P` に対応付ける
   - `SWITCH` / `SHOW_EXISTING` と未知の値は `Unknown` にする
   - @melpon
-- [FIX] `finish` 後の操作を拒否し、`Drop` で破棄する入出力の扱いを明確にする
+- [FIX] `finish` 後の操作を拒否し、`Drop` の後始末を明確にする
   - `Encoder::encode()` / `Encoder::reconfigure()` / `Encoder::finish()` は `finish` 済みの場合に AMF を呼ばずにエラーを返す
   - `Encoder::finish()` / `Decoder::finish()` はワーカーの終了を join まで待つ
-  - `Drop` では通知前の入出力を破棄し、ハンドラーの panic と `Component::terminate` の失敗を `tracing::error!` で記録する
+  - `Drop` ではハンドラーの panic と `Component::terminate` の失敗を `tracing::error!` で記録する
   - @melpon
 - [FIX] `AmfLibrary::create_context` が `AMFContext1` の `InitVulkan` を取得できない場合に参照を解放しない問題を修正する
   - @melpon
@@ -152,6 +169,14 @@
   - Vulkan デバイスの初期化とコーデックのプローブの重複をなくす
   - @melpon
 - [UPDATE] Windows / macOS 向けの未使用の分岐を削除する
+  - @melpon
+
+- [UPDATE] encode / decode のワーカー実装を共通化する
+  - コマンド処理、`QueryOutput` のポーリング、frame ID による入出力の対応付け、終了処理、`Drop` を `src/worker.rs` にまとめる
+  - `QueryOutput` が返す出力は共通の `Data` 型で保持し、ハンドラーへの通知時に最終的なフレーム型へ変換する
+  - 入力の frame ID の発行、入力プロパティへの設定、`SubmitInput` の呼び出しも共通化する
+  - コマンドを 1 つ処理した後にも `QueryOutput` を回収する
+  - `SubmitInput` のリトライ対象を `AMF_INPUT_FULL` と `AMF_DECODER_NO_FREE_SURFACES` に共通化し、エンコーダーの `AMF_REPEAT` はリトライせずエラーにする
   - @melpon
 
 ## 2026.3.0

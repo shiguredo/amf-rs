@@ -1,13 +1,11 @@
-use std::sync::{Arc, Mutex, mpsc};
-use std::time::Duration;
+use std::sync::mpsc;
 
 use shiguredo_amf::amf::Surface;
 use shiguredo_amf::ffi::AMF_RESULT;
 use shiguredo_amf::{
-    AmfError, Av1EncoderConfig, Av1Profile, CodecConfig, EncodeHandler, EncodeOptions,
-    EncodedFrame, Encoder, EncoderConfig, Error, FnEncodeHandler, FrameFormat, H264EncoderConfig,
-    H264Profile, HevcEncoderConfig, HevcProfile, PlaneType, RateControlMode, ReconfigureParams,
-    VideoCodecType, supported_codecs,
+    AmfError, Av1EncoderConfig, Av1Profile, CodecConfig, EncodeOptions, Encoder, EncoderConfig,
+    Error, FnEncodeHandler, FrameFormat, H264EncoderConfig, H264Profile, HevcEncoderConfig,
+    HevcProfile, PlaneType, RateControlMode, ReconfigureParams, VideoCodecType, supported_codecs,
 };
 
 pub mod helpers;
@@ -76,40 +74,6 @@ fn test_encoder_config(codec: CodecConfig, frame_format: FrameFormat) -> Encoder
 /// 指定した設定でエンコーダーを作成する
 fn create_encoder(config: EncoderConfig) -> Result<Encoder<FnEncodeHandler<()>>, Error> {
     Encoder::new(create_context(), config, FnEncodeHandler::<()>::new(|_| {}))
-}
-
-/// 最初の通知でワーカーを停止させるハンドラー
-///
-/// 最初のエンコード結果を記録すると `first_seen_tx` で通知し、`release_rx` を
-/// 受け取るまで [`EncodeHandler::on_encoded`] から戻らない。ワーカーが停止して
-/// いる間に `encode` を呼ぶと、その入力はワーカーに処理されずチャネルに残る。
-struct BlockingEncodeHandler {
-    /// 最初の通知を送るチャネル
-    first_seen_tx: mpsc::Sender<()>,
-    /// 最初の通知の処理を再開するチャネル
-    release_rx: mpsc::Receiver<()>,
-    /// 通知された user_data の一覧
-    notified: Arc<Mutex<Vec<usize>>>,
-    /// 最初の通知の処理中か
-    blocked: bool,
-}
-
-impl EncodeHandler for BlockingEncodeHandler {
-    type UserData = usize;
-    type Error = Error;
-
-    fn on_encoded(&mut self, result: Result<EncodedFrame<usize>, Error>) {
-        let frame = result.expect("エンコード結果がエラーになった");
-        self.notified
-            .lock()
-            .expect("通知一覧のロックに失敗")
-            .push(*frame.user_data());
-        if !self.blocked {
-            self.blocked = true;
-            self.first_seen_tx.send(()).expect("最初の通知の送信に失敗");
-            self.release_rx.recv().expect("解放の受信に失敗");
-        }
-    }
 }
 
 /// 入力を 1 つも投入せずに finish した場合、通知がなく完了することを確認する
@@ -185,64 +149,6 @@ fn test_finish_twice_is_rejected() {
     assert!(
         matches!(&error, Error::InvalidState(_)),
         "Encoder::finish の状態エラーであるべき: {error}"
-    );
-}
-
-/// finish を呼ばずに drop すると、保留中の入力が通知されないことを確認する
-#[test]
-fn test_drop_encoder_without_finish_does_not_notify_pending_input() {
-    let (first_seen_tx, first_seen_rx) = mpsc::channel();
-    let (release_tx, release_rx) = mpsc::channel();
-    let notified = Arc::new(Mutex::new(Vec::new()));
-
-    let mut encoder = Encoder::new(
-        create_context(),
-        h264_cbr_test_encoder_config(),
-        BlockingEncodeHandler {
-            first_seen_tx,
-            release_rx,
-            notified: Arc::clone(&notified),
-            blocked: false,
-        },
-    )
-    .expect("エンコーダーの作成に失敗");
-
-    let frame_data = generate_dummy_nv12(320, 240, 0);
-    let surface = encoder.alloc_surface().expect("Surface の確保に失敗");
-    copy_nv12_to_surface(&surface, &frame_data, 320, 240);
-    encoder
-        .encode(surface, &EncodeOptions::default(), 0)
-        .expect("1 つ目のフレームのエンコードに失敗");
-
-    first_seen_rx
-        .recv_timeout(Duration::from_secs(5))
-        .expect("最初の通知が届かなかった");
-
-    // ワーカーは最初の通知の処理中でチャネルを読まないため、この入力は保留になる。
-    let surface = encoder.alloc_surface().expect("Surface の確保に失敗");
-    copy_nv12_to_surface(&surface, &frame_data, 320, 240);
-    encoder
-        .encode(surface, &EncodeOptions::default(), 1)
-        .expect("2 つ目のフレームのエンコードに失敗");
-
-    // drop が cmd_tx を切断してから最初の通知を解放する。解放後のワーカーは
-    // 保留中の入力と取得済みの出力を通知せずに終了する。
-    let release_thread = std::thread::spawn(move || {
-        std::thread::sleep(Duration::from_millis(100));
-        release_tx.send(()).expect("解放の送信に失敗");
-    });
-
-    drop(encoder);
-    release_thread.join().expect("解放スレッドの join に失敗");
-
-    let notified = Arc::try_unwrap(notified)
-        .expect("通知一覧の Arc の参照が残っている")
-        .into_inner()
-        .expect("通知一覧のロックに失敗");
-    assert_eq!(
-        notified,
-        vec![0],
-        "finish を呼ばずに drop したのに保留中の入力が通知された"
     );
 }
 

@@ -33,9 +33,10 @@ const H264_PRESENTATION_ORDER: [usize; 50] = [
 
 /// 入力フレームに設定する PTS を返す
 ///
-/// 入力 PTS が復元されることを確認できるよう、フレームごとに異なる値を返す。
+/// 入出力の対応付けが PTS に依存しないことを確認できるよう、入力順に対して
+/// 単調でも一意でもない値を返す。
 fn input_pts(index: usize) -> i64 {
-    1_000_000 + index as i64 * 7
+    1_000_000 + (index as i64 * 7) % 19
 }
 
 /// Annex B 形式のビットストリームをアクセスユニット単位に分割する
@@ -173,8 +174,8 @@ fn decode_access_units(
         );
         buffer_data[..access_unit.len()].copy_from_slice(access_unit);
 
-        // 入力時の PTS がデコード結果に保持されることを確認できるよう、内部の
-        // 対応付け用 ID とは異なる値を設定する。
+        // 入出力の対応付けが PTS に依存しないことを確認できるよう、入力順とは
+        // 無関係な PTS を設定する。
         buffer.set_pts(input_pts(index));
         decoder
             .decode(buffer, index)
@@ -190,19 +191,24 @@ fn decode_access_units(
         .expect("結果一覧のロックに失敗")
 }
 
-/// 出力フレームの PTS が入力時の PTS と一致し、出力順が入力順と異なることを確認する
+/// 出力フレームの `user_data` が入力フレームと正しく対応し、出力順が入力順と
+/// 異なることを確認する
 ///
-/// B フレームを含むストリームでは出力が提示順になるため、PTS の並びは入力順と
-/// 一致しない。各出力の `user_data` がその PTS に対応する入力のインデックスで
-/// あれば、入力と出力の対応付けが正しいと判断できる。
-fn assert_user_data_follows_pts(
+/// B フレームを含むストリームでは出力が提示順になるため、出力順は入力順と
+/// 一致しない。各出力の `user_data` が入力順のインデックスであれば、入力と出力の
+/// 対応付けが正しいと判断できる。
+fn assert_user_data_mapping(
     results: Vec<Result<DecodedFrame<usize>, Error>>,
     expected_frames: usize,
 ) -> Vec<usize> {
     let summaries = results
         .iter()
         .map(|result| match result {
-            Ok(frame) => format!("ok: pts={}", frame.surface().get_pts()),
+            Ok(frame) => format!(
+                "ok: user_data={}, pts={}",
+                frame.user_data(),
+                frame.surface().get_pts()
+            ),
             Err(error) => format!("err: {error}"),
         })
         .collect::<Vec<_>>();
@@ -212,32 +218,24 @@ fn assert_user_data_follows_pts(
         "デコードされたフレーム数が一致しない: {summaries:?}"
     );
 
-    let mut output_pts = Vec::new();
     let mut user_data_order = Vec::new();
     for (index, result) in results.into_iter().enumerate() {
         let frame = result.unwrap_or_else(|error| panic!("出力 {index} のデコードに失敗: {error}"));
-        let (surface, user_data) = frame.into_parts();
-        let pts = surface.get_pts();
+        let (_surface, user_data) = frame.into_parts();
         user_data_order.push(user_data);
-        assert_eq!(
-            pts,
-            input_pts(user_data),
-            "出力 {index} の user_data ({user_data}) と PTS ({pts}) が対応しない"
-        );
-        output_pts.push(pts);
     }
 
-    let mut sorted = output_pts.clone();
+    let mut sorted = user_data_order.clone();
     sorted.sort_unstable();
     assert_eq!(
         sorted,
-        (0..expected_frames).map(input_pts).collect::<Vec<_>>(),
-        "出力に重複または欠落した PTS がある"
+        (0..expected_frames).collect::<Vec<_>>(),
+        "出力に重複または欠落した user_data がある: {user_data_order:?}"
     );
 
     assert!(
-        output_pts.windows(2).any(|pair| pair[0] > pair[1]),
-        "B フレームを含むストリームの出力 PTS が入力順のままである: {output_pts:?}"
+        user_data_order.windows(2).any(|pair| pair[0] > pair[1]),
+        "B フレームを含むストリームの出力順が入力順のままである: {user_data_order:?}"
     );
 
     user_data_order
@@ -496,7 +494,7 @@ fn test_drop_decoder_without_finish_does_not_notify_pending_input() {
 
 /// 重複した入力 PTS と PTS 0 でも、フレームごとに正しく対応付けられることを確認する
 #[test]
-fn test_decode_preserves_duplicate_zero_pts() {
+fn test_decode_maps_user_data_with_duplicate_zero_pts() {
     let access_units = split_access_units(H264_BFRAME_STREAM, is_h264_vcl);
     let frame_count = 10;
     assert!(
@@ -527,8 +525,8 @@ fn test_decode_preserves_duplicate_zero_pts() {
         unsafe { buffer.as_mut_slice() }
             .expect("Buffer のスライス取得に失敗")
             .copy_from_slice(access_unit);
-        // すべての入力に同じ PTS 0 を設定する。PTS が重複しても内部の
-        // 対応付け用 ID で区別できることを確認する。
+        // すべての入力に同じ PTS 0 を設定する。PTS が重複しても frame ID で
+        // 区別できることを確認する。
         buffer.set_pts(0);
         decoder
             .decode(buffer, index)
@@ -547,12 +545,7 @@ fn test_decode_preserves_duplicate_zero_pts() {
     let mut user_data_order = Vec::new();
     for result in results {
         let frame = result.expect("デコードに失敗した");
-        let (surface, user_data) = frame.into_parts();
-        assert_eq!(
-            surface.get_pts(),
-            0,
-            "入力 PTS 0 が出力 Surface に保持されていない"
-        );
+        let (_surface, user_data) = frame.into_parts();
         user_data_order.push(user_data);
     }
     user_data_order.sort_unstable();
@@ -595,8 +588,6 @@ fn test_decode_reports_input_without_output() {
     unsafe { buffer.as_mut_slice() }
         .expect("Buffer のスライス取得に失敗")
         .copy_from_slice(&parameter_sets);
-    // 利用者が設定した PTS が、未対応入力のエラーメッセージに使われることを確認する。
-    buffer.set_pts(100_000);
     decoder.decode(buffer, 0).expect("SPS/PPS だけの投入に失敗");
 
     decoder.finish().expect("finish に失敗");
@@ -617,8 +608,12 @@ fn test_decode_reports_input_without_output() {
         "未対応入力のエラーが Internal ではない: {error}"
     );
     assert!(
-        error.to_string().contains("PTS 100000"),
-        "未対応入力のエラーメッセージが想定と異なる: {error}"
+        error.to_string().contains("frame ID"),
+        "未対応入力のエラーメッセージに frame ID がない: {error}"
+    );
+    assert!(
+        !error.to_string().contains("PTS"),
+        "未対応入力のエラーメッセージに PTS が使われている: {error}"
     );
 }
 
@@ -648,7 +643,7 @@ fn test_finish_twice_is_rejected() {
 
 /// B フレームを含む H.264 ストリームで、user_data が対応するフレームに付くことを確認する
 #[test]
-fn test_decode_h264_bframes_maps_user_data_by_pts() {
+fn test_decode_h264_bframes_maps_user_data() {
     let access_units = split_access_units(H264_BFRAME_STREAM, is_h264_vcl);
     assert!(
         access_units.len() > 1,
@@ -662,7 +657,7 @@ fn test_decode_h264_bframes_maps_user_data_by_pts() {
     );
 
     let results = decode_access_units(DecoderCodec::H264, &access_units);
-    let user_data_order = assert_user_data_follows_pts(results, access_units.len());
+    let user_data_order = assert_user_data_mapping(results, access_units.len());
     assert_eq!(
         user_data_order, H264_PRESENTATION_ORDER,
         "user_data の並びが MP4 の ctts から求めた提示順と一致しない"
@@ -671,7 +666,7 @@ fn test_decode_h264_bframes_maps_user_data_by_pts() {
 
 /// B フレームを含む HEVC ストリームで、user_data が対応するフレームに付くことを確認する
 #[test]
-fn test_decode_hevc_bframes_maps_user_data_by_pts() {
+fn test_decode_hevc_bframes_maps_user_data() {
     let access_units = split_access_units(HEVC_BFRAME_STREAM, is_hevc_vcl);
     assert!(
         access_units.len() > 1,
@@ -685,7 +680,7 @@ fn test_decode_hevc_bframes_maps_user_data_by_pts() {
     );
 
     let results = decode_access_units(DecoderCodec::Hevc, &access_units);
-    assert_user_data_follows_pts(results, access_units.len());
+    assert_user_data_mapping(results, access_units.len());
 }
 
 // ---------------------------------------------------------------------------
@@ -834,6 +829,8 @@ fn test_decode_continues_after_resolution_change() {
         unsafe { buffer.as_mut_slice() }
             .expect("Buffer のスライス取得に失敗")
             .copy_from_slice(access_unit);
+        // 解像度変化を挟んでも PTS ではなく frame ID で対応付くことを確認するため、
+        // 入力順とは無関係な PTS を設定する。
         buffer.set_pts(input_pts(index));
         decoder
             .decode(buffer, index)
@@ -874,11 +871,6 @@ fn test_decode_continues_after_resolution_change() {
             "未知の user_data {index} が通知された"
         );
         order.push(index);
-        assert_eq!(
-            surface.get_pts(),
-            input_pts(index),
-            "フレーム {index} の PTS が入力時の値と一致しない"
-        );
         let expected = if index < RESOLUTION_CHANGE_INITIAL_FRAMES {
             (320, 240)
         } else if index < RESOLUTION_CHANGE_INITIAL_FRAMES + RESOLUTION_CHANGE_SMALLER_FRAMES {
