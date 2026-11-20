@@ -1,7 +1,7 @@
 # `reconfigure` のフレームレート変更で PTS が不連続・逆行しないようにする
 
 - Created: 2026-11-10
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-11-20
 - Branch: feature/fix-reconfigure-pts
 - Polished: {YYYY-MM-DD}
 - Reporter: @melpon
@@ -34,3 +34,7 @@
 - 30/1 から 60/1、30/1 から 15/1 のテストが追加される。
 - `cargo test --workspace` が通る。
 - `CHANGES.md` の `## develop` に `[FIX]` を追記する。
+
+## 解決方法
+
+B フレーム対応で入出力の対応付けを `ShiguredoAmfFrameId` プロパティに変更した際に、`Encoder::encode` が投入フレーム数から PTS を計算して入力 `Surface` に設定する処理と、出力 `Buffer` の PTS を設定する処理を削除した。現在の `Encoder` は入力 `Surface` の PTS を変更せず、出力 `Buffer` の PTS も設定しない。`Encoder::reconfigure` は AMF のフレームレートプロパティを設定するだけで、PTS の状態を持たない。そのため、フレームレート変更による PTS の再計算、不連続、逆行、および未検査の乗算によるオーバーフローは発生しない。対象となる実装が存在しないため、対応不要として closed にする。
