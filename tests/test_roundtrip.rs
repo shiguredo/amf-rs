@@ -248,7 +248,7 @@ where
         let surface = encoder.alloc_surface().expect("Surface の確保に失敗");
         copy_frame_to_surface(&surface, frame, format, width, height);
         encoder
-            .encode(surface, &options, user_data(index))
+            .encode(surface, options, user_data(index))
             .expect("エンコードに失敗");
     }
     encoder.finish().expect("finish に失敗");
@@ -331,7 +331,7 @@ fn encode_with_frame_types(
         let surface = encoder.alloc_surface().expect("Surface の確保に失敗");
         copy_frame_to_surface(&surface, &frame, format, width, height);
         encoder
-            .encode(surface, &EncodeOptions { frame_type }, ())
+            .encode(surface, EncodeOptions { frame_type }, ())
             .expect("エンコードに失敗");
     }
     encoder.finish().expect("finish に失敗");
@@ -778,7 +778,7 @@ fn test_roundtrip_h264_force_idr() {
             }
         };
         encoder
-            .encode(surface, &options, ())
+            .encode(surface, options, ())
             .expect("エンコードに失敗");
     }
     encoder.finish().expect("finish に失敗");
@@ -1338,7 +1338,7 @@ fn test_reconfigure_h264_runtime_change() {
         let surface = encoder.alloc_surface().expect("Surface の確保に失敗");
         copy_frame_to_surface(&surface, &frame, format, 320, 240);
         encoder
-            .encode(surface, &options, ())
+            .encode(surface, options, ())
             .expect("エンコードに失敗");
     }
 
@@ -1356,7 +1356,7 @@ fn test_reconfigure_h264_runtime_change() {
         let surface = encoder.alloc_surface().expect("Surface の確保に失敗");
         copy_frame_to_surface(&surface, &frame, format, 320, 240);
         encoder
-            .encode(surface, &options, ())
+            .encode(surface, options, ())
             .expect("エンコードに失敗");
     }
 
@@ -1478,7 +1478,7 @@ fn test_reconfigure_av1_qpb_and_gop() {
         let surface = encoder.alloc_surface().expect("Surface の確保に失敗");
         copy_frame_to_surface(&surface, &frame, format, 320, 240);
         encoder
-            .encode(surface, &options, ())
+            .encode(surface, options, ())
             .expect("エンコードに失敗");
     }
 
@@ -1500,7 +1500,7 @@ fn test_reconfigure_av1_qpb_and_gop() {
         let surface = encoder.alloc_surface().expect("Surface の確保に失敗");
         copy_frame_to_surface(&surface, &frame, format, 320, 240);
         encoder
-            .encode(surface, &options, ())
+            .encode(surface, options, ())
             .expect("エンコードに失敗");
     }
 
@@ -1686,19 +1686,6 @@ fn roundtrip_format(
     let input_frames: Vec<Vec<u8>> = (0..num_frames)
         .map(|i| generate_dummy_frame(format, width as usize, height as usize, i))
         .collect();
-
-    // フレームサイズが FrameFormat::frame_size() と一致することを確認する
-    let expected_size = format
-        .frame_size(width as usize, height as usize)
-        .expect("フレームサイズがオーバーフロー");
-    for (i, frame) in input_frames.iter().enumerate() {
-        assert_eq!(
-            frame.len(),
-            expected_size,
-            "フレーム {i}: サイズ {len} != 期待値 {expected_size} ({format:?})",
-            len = frame.len()
-        );
-    }
 
     let decoded_frames = roundtrip(config, decoder_codec, &input_frames);
 
@@ -1962,7 +1949,7 @@ fn test_user_data_delivered_in_submit_order() {
         let surface = encoder.alloc_surface().expect("Surface の確保に失敗");
         copy_nv12_to_surface(&surface, &data, width, height);
         encoder
-            .encode(surface, &options, i)
+            .encode(surface, options, i)
             .expect("エンコードに失敗");
     }
     encoder.finish().expect("finish に失敗");
@@ -2000,7 +1987,7 @@ fn test_encode_rejects_surface_with_cloned_handle() {
     copy_nv12_to_surface(&surface, &data, width, height);
     let cloned = surface.clone();
 
-    let result = encoder.encode(surface, &options, ());
+    let result = encoder.encode(surface, options, ());
     let err = result.expect_err("クローンが残っている Surface のエンコードは失敗するはず");
     assert!(
         matches!(&err, Error::InvalidState(_)),
@@ -2016,7 +2003,7 @@ fn test_encode_rejects_surface_with_cloned_handle() {
     let surface = encoder.alloc_surface().expect("Surface の確保に失敗");
     copy_nv12_to_surface(&surface, &data, width, height);
     encoder
-        .encode(surface, &options, ())
+        .encode(surface, options, ())
         .expect("クローン破棄後のエンコードに失敗");
     encoder.finish().expect("finish に失敗");
 }
@@ -2043,7 +2030,7 @@ fn test_encode_rejects_surface_with_live_property_storage() {
         .property_storage()
         .expect("PropertyStorage の取得に失敗");
 
-    let result = encoder.encode(surface, &options, ());
+    let result = encoder.encode(surface, options, ());
     let err = result.expect_err("PropertyStorage が残っている Surface のエンコードは失敗するはず");
     assert!(
         matches!(&err, Error::InvalidState(_)),
@@ -2131,7 +2118,7 @@ fn test_decoded_surface_can_be_reencoded() {
     for frame in decoded_frames {
         let (surface, _) = frame.into_parts();
         encoder
-            .encode(surface, &EncodeOptions::default(), ())
+            .encode(surface, EncodeOptions::default(), ())
             .expect("デコード済み Surface の再エンコードに失敗");
     }
     encoder.finish().expect("finish に失敗");
@@ -2175,7 +2162,7 @@ fn test_encode_rejects_surface_from_other_context() {
         )
         .expect("別 Context の Surface の確保に失敗");
 
-    let result = encoder.encode(surface, &EncodeOptions::default(), ());
+    let result = encoder.encode(surface, EncodeOptions::default(), ());
     let err = result.expect_err("別 Context の Surface のエンコードは失敗するはず");
     assert!(
         matches!(&err, Error::InvalidArgument(_)),
@@ -2239,7 +2226,7 @@ fn test_multiple_contexts_encode_independently() {
         let surface = encoder.alloc_surface().expect("Surface の確保に失敗");
         copy_nv12_to_surface(&surface, &frame, 320, 240);
         encoder
-            .encode(surface, &EncodeOptions::default(), ())
+            .encode(surface, EncodeOptions::default(), ())
             .expect("エンコードに失敗");
         encoder.finish().expect("finish に失敗");
     }

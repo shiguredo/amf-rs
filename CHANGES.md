@@ -11,6 +11,14 @@
 
 ## develop
 
+- [CHANGE] `AmfLibrary::query_version` の戻り値を `AmfVersion` に変更する
+  - `AmfVersion` の `major` / `minor` / `release` / `build` フィールドで各成分を取得できる
+  - `Display` は `major.minor.release.build` 形式で表示する
+  - @melpon
+- [CHANGE] `Encoder::encode` の `EncodeOptions` を値で受け取るように変更する
+  - @melpon
+- [CHANGE] `FrameFormat::frame_size` を削除する
+  - @melpon
 - [CHANGE] `supported_codecs` の戻り値と `CodecInfo` の能力情報を AMF が返す値に基づく形に変更する
   - `supported_codecs` は `Result<Vec<CodecInfo>, Error>` を返す
   - `CodecInfo` の `decoding` / `encoding` を `Option` に変更する
@@ -78,6 +86,9 @@
 - [CHANGE] `Encoder` / `Decoder` を `finish` せずに drop した場合の挙動を変更する
   - drop の処理中に、すでに `encode()` / `decode()` が成功したフレームの出力が通知されることがある
   - drop は、すべてのフレームの出力が通知されることを保証しない
+  - @melpon
+- [ADD] `amf::Plane` / `amf::Context` / `amf::Component` / `amf::PropertyStorage` に `Debug` を実装する
+  - 生ポインタはアドレスだけを表示する
   - @melpon
 - [ADD] `PlaneType` を追加する
   - @melpon

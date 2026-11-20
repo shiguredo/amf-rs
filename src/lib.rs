@@ -49,7 +49,7 @@
 //! encoder
 //!     .encode(
 //!         surface,
-//!         &EncodeOptions {
+//!         EncodeOptions {
 //!             frame_type: frame_type::IDR,
 //!         },
 //!         (),
@@ -109,6 +109,32 @@ pub use types::{
 
 /// ビルド時の AMF バージョン文字列
 pub const BUILD_VERSION: &str = sys::BUILD_METADATA_VERSION;
+
+/// AMF ランタイムのバージョン
+///
+/// `major.minor.release.build` の 4 成分からなる。`Display` はこの順に
+/// ドットで区切って表示する。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AmfVersion {
+    /// メジャーバージョン
+    pub major: u16,
+    /// マイナーバージョン
+    pub minor: u16,
+    /// リリース番号
+    pub release: u16,
+    /// ビルド番号
+    pub build: u16,
+}
+
+impl std::fmt::Display for AmfVersion {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{}.{}.{}.{}",
+            self.major, self.minor, self.release, self.build
+        )
+    }
+}
 
 /// FFI モジュール (内部用、semver 保証対象外)
 #[doc(hidden)]
@@ -205,7 +231,12 @@ impl AmfLibrary {
     }
 
     /// AMF ランタイムのバージョンを問い合わせる
-    pub fn query_version(&self) -> Result<(u16, u16, u16, u16), Error> {
+    ///
+    /// # Errors
+    ///
+    /// AMF ランタイムをロードできない場合、またはバージョンの取得に失敗した場合に
+    /// エラーを返す。
+    pub fn query_version(&self) -> Result<AmfVersion, Error> {
         let guard = self.state.lock();
         let inner = self.ensure_inner(&guard)?;
         let amf_query_version: AmfQueryVersionFn = unsafe { inner.lib.get(b"AMFQueryVersion") }?;
@@ -218,7 +249,12 @@ impl AmfLibrary {
         let minor = ((version >> 32) & 0xFFFF) as u16;
         let release = ((version >> 16) & 0xFFFF) as u16;
         let build = (version & 0xFFFF) as u16;
-        Ok((major, minor, release, build))
+        Ok(AmfVersion {
+            major,
+            minor,
+            release,
+            build,
+        })
     }
 
     /// 新しい AMFContext を作成し、既定の Vulkan デバイスで初期化する
