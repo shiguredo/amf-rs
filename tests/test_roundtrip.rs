@@ -613,6 +613,42 @@ fn test_roundtrip_h264_cqp() {
     roundtrip_colorbar(config, DecoderCodec::H264, 10, 25.0);
 }
 
+/// デコード結果の `user_data` が入力フレームの内容と対応することを確認する
+///
+/// 各 `user_data` が 1 回ずつ通知され、デコード結果の画素がその `user_data` の
+/// 入力フレームに最も近いことを確認する。
+fn assert_user_data_matches_input(
+    decoded_frames: &[shiguredo_amf::DecodedFrame<usize>],
+    input_frames: &[Vec<u8>],
+    width: usize,
+    height: usize,
+) {
+    let mut seen = vec![false; input_frames.len()];
+    for frame in decoded_frames {
+        let index = *frame.user_data();
+        assert!(index < input_frames.len(), "user_data {index} が範囲外");
+        assert!(!seen[index], "user_data {index} が重複して通知された");
+        seen[index] = true;
+
+        let own_psnr = psnr_y(&input_frames[index], frame.surface(), width, height);
+        for (other, other_frame) in input_frames.iter().enumerate() {
+            if other == index {
+                continue;
+            }
+            let other_psnr = psnr_y(other_frame, frame.surface(), width, height);
+            assert!(
+                own_psnr > other_psnr + 3.0,
+                "user_data {index} のフレームが入力 {other} に近い \
+                 (一致する入力との PSNR {own_psnr:.1} dB, 入力 {other} との PSNR {other_psnr:.1} dB)"
+            );
+        }
+    }
+    assert!(
+        seen.iter().all(|seen| *seen),
+        "通知されなかった user_data がある: {seen:?}"
+    );
+}
+
 /// H.264 で B フレームを有効にしたとき、全フレームが 1 回ずつ出力され、
 /// user_data が対応する入力フレームに付くことを確認する
 ///
@@ -689,21 +725,7 @@ fn test_roundtrip_h264_b_pic_pattern_user_data() {
         num_frames,
         "デコードされたフレーム数が入力したフレーム数と一致しない"
     );
-    for frame in &decoded_frames {
-        let index = *frame.user_data();
-        let own_psnr = psnr_y(&input_frames[index], frame.surface(), width, height);
-        for (other, other_frame) in input_frames.iter().enumerate() {
-            if other == index {
-                continue;
-            }
-            let other_psnr = psnr_y(other_frame, frame.surface(), width, height);
-            assert!(
-                own_psnr > other_psnr + 3.0,
-                "user_data {index} のフレームが入力 {other} に近い \
-                 (一致する入力との PSNR {own_psnr:.1} dB, 入力 {other} との PSNR {other_psnr:.1} dB)"
-            );
-        }
-    }
+    assert_user_data_matches_input(&decoded_frames, &input_frames, width, height);
 }
 
 /// H.264 で IDR フレームを強制してラウンドトリップする
@@ -1058,6 +1080,47 @@ fn test_roundtrip_av1_cqp() {
     config.gop_pic_size = Some(10);
 
     roundtrip_colorbar(config, DecoderCodec::Av1, 10, 25.0);
+}
+
+/// AV1 で user_data が対応する入力フレームに付くことを確認する
+#[test]
+fn test_roundtrip_av1_user_data_mapping() {
+    let mut config = EncoderConfig::new(
+        CodecConfig::Av1(Av1EncoderConfig {
+            profile: Some(Av1Profile::Main),
+        }),
+        320,
+        240,
+        FrameFormat::Nv12,
+        30,
+        1,
+        RateControlMode::Cbr,
+    );
+    config.target_kbps = Some(1000);
+    config.gop_pic_size = Some(30);
+
+    let num_frames = 15;
+    let width = config.width as usize;
+    let height = config.height as usize;
+    let input_frames: Vec<Vec<u8>> = (0..num_frames)
+        .map(|index| generate_dummy_nv12(width, height, index))
+        .collect();
+
+    let context = create_context();
+    let encoded_frames = encode_with_user_data(&context, config, &input_frames, |index| index);
+    assert_eq!(
+        encoded_frames.len(),
+        num_frames,
+        "入力したフレーム数と出力フレーム数が一致しない"
+    );
+
+    let decoded_frames = decode(&context, DecoderCodec::Av1, encoded_frames);
+    assert_eq!(
+        decoded_frames.len(),
+        num_frames,
+        "デコードされたフレーム数が入力したフレーム数と一致しない"
+    );
+    assert_user_data_matches_input(&decoded_frames, &input_frames, width, height);
 }
 
 /// AV1 で先頭フレームがキーフレーム、後続の INTER フレームが P と通知されることを確認する

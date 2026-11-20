@@ -50,7 +50,7 @@ AMD GPU 向けハードウェアアクセラレーションによるビデオエ
 | `supported_codecs() -> Result<Vec<CodecInfo>, Error>` | このバックエンドで利用可能なコーデック情報の一覧を返す (AMF ランタイムを初期化できない場合はエラー) | - |
 | `BUILD_VERSION` | ビルド時の AMF バージョン文字列 (`&'static str`) | - |
 
-`Encoder` / `Decoder` は内部でワーカースレッドを起動し、`encode()` / `decode()` で投入したフレームの結果は `EncodeHandler::on_encoded` / `DecodeHandler::on_decoded` に非同期で通知される。`finish()` は残りのフレームをハンドラーが受け取り終わるまで待機する。`finish()` が成功した後に `encode()` / `reconfigure()` / `decode()` を呼ぶとエラーになる。2 回目の `finish()` もエラーになる。`finish()` を呼ばずに drop すると、ワーカーが保持する通知前の入出力は破棄される。
+`Encoder` / `Decoder` は内部でワーカースレッドを起動し、`encode()` / `decode()` で投入したフレームの結果は `EncodeHandler::on_encoded` / `DecodeHandler::on_decoded` に非同期で通知される。`finish()` は残りのフレームをハンドラーが受け取り終わるまで待機する。`finish()` が成功した後に `encode()` / `reconfigure()` / `decode()` を呼ぶとエラーになる。2 回目の `finish()` もエラーになる。`finish()` を呼ばずに drop すると、drop の処理中に、すでに `encode()` / `decode()` が成功したフレームの出力が通知されることがある。drop は、すべてのフレームの出力が通知されることを保証しない。
 
 `AmfLibrary::instance().create_context()` は呼び出しごとに新しい `Context` を作成する。
 同じ `Context` を Clone して Encoder と Decoder に渡すと、Decoder の `on_decoded` で受け取った
@@ -138,10 +138,12 @@ AMD GPU 向けハードウェアアクセラレーションによるビデオエ
 |----|------|-------------|
 | `Context` | `AMFContext` の参照カウントを管理する Clone 可能なハンドル | `alloc_surface(MemoryType, SurfaceFormat, width, height)`, `alloc_buffer(MemoryType, size)`, `as_ptr()` |
 | `Component` | `AMFComponent` のラッパー | `init(SurfaceFormat, width, height)`, `re_init(width, height)`, `terminate()`, `drain()`, `flush()`, `unsafe submit_input(*mut AMFData)`, `unsafe query_output(*mut *mut AMFData)`, `get_context()`, `context()`, `property_storage() -> Result<PropertyStorage, Error>` |
-| `Surface` | `AMFSurface` のラッパー | `context()`, `get_memory_type() -> MemoryType`, `set_pts(i64)`, `get_pts() -> i64`, `set_duration(i64)`, `get_plane(PlaneType) -> Result<Plane<'_>, Error>`, `get_plane_at(index) -> Result<Plane<'_>, Error>`, `convert(MemoryType) -> Result<(), Error>`, `property_storage()`, `as_ptr()`, `into_raw()` |
-| `Buffer` | `AMFBuffer` のラッパー | `context()`, `get_memory_type() -> MemoryType`, `get_native() -> *mut c_void`, `get_size() -> usize`, `set_size(usize) -> Result<(), Error>`, `unsafe as_slice() -> Result<&[u8], Error>`, `unsafe as_mut_slice() -> Result<&mut [u8], Error>`, `set_pts(i64)`, `get_pts() -> i64`, `get_duration() -> i64`, `property_storage() -> Result<PropertyStorage, Error>`, `as_ptr()`, `into_raw()` |
+| `Surface` | `AMFSurface` のラッパー | `context()`, `get_memory_type() -> MemoryType`, `set_pts(i64)`, `get_pts() -> i64`, `set_duration(i64)`, `get_plane(PlaneType) -> Result<Plane<'_>, Error>`, `get_plane_at(index) -> Result<Plane<'_>, Error>`, `convert(MemoryType) -> Result<(), Error>`, `data() -> Result<Data, Error>`, `into_data() -> Result<Data, Error>`, `property_storage()`, `as_ptr()`, `into_raw()` |
+| `Buffer` | `AMFBuffer` のラッパー | `context()`, `get_memory_type() -> MemoryType`, `get_native() -> *mut c_void`, `get_size() -> usize`, `set_size(usize) -> Result<(), Error>`, `unsafe as_slice() -> Result<&[u8], Error>`, `unsafe as_mut_slice() -> Result<&mut [u8], Error>`, `set_pts(i64)`, `get_pts() -> i64`, `get_duration() -> i64`, `data() -> Result<Data, Error>`, `into_data() -> Result<Data, Error>`, `property_storage() -> Result<PropertyStorage, Error>`, `as_ptr()`, `into_raw()` |
 | `Plane<'a>` | `AMFPlane` の RAII ラッパー。取得元の `Surface` を借用する | `context()`, `get_native() -> *mut c_void`, `get_hpitch() -> i32`, `get_vpitch() -> i32`, `get_width() -> i32`, `get_height() -> i32`, `is_tiled() -> bool`, `unsafe as_slice() -> Result<&[u8], Error>`, `unsafe as_mut_slice() -> Result<&mut [u8], Error>`, `as_ptr()`, `into_raw()` |
 | `PropertyStorage` | `AMFPropertyStorage` のラッパー | `context()`, `unsafe get_property(name_w, *mut AMFVariantStruct)`, `get_property_int64(name) -> Result<i64, Error>`, `get_property_size(name) -> Result<(i32, i32), Error>`, `set_property_int64(name, value)`, `set_property_size(name, width, height)`, `set_property_rate(name, num, den)`, `unsafe set_property(name_w, AMFVariantStruct)`, `as_ptr()`, `into_raw()` |
+| `Data` | `AMFData` の RAII ハンドル | `context()`, `get_data_type() -> DataType`, `property_storage() -> Result<PropertyStorage, Error>`, `to_buffer() -> Result<Buffer, Error>`, `to_surface() -> Result<Surface, Error>`, `as_ptr()`, `into_raw()`, `unsafe from_raw(*mut AMFData, Context)`, `unsafe from_raw_acquired(*mut AMFData, Context)` |
+| `DataType` | AMF のデータ種別 | `Buffer`, `Surface`, `AudioBuffer`, `User`, `Unknown(u32)` |
 
 `Context::alloc_surface` / `alloc_buffer` は `&self` に対して呼び出す。`Context` の `Clone` は
 `AMFContext::Acquire`、`Drop` は `AMFContext::Release` を呼ぶ。最後の参照が解放されたときに
@@ -283,7 +285,7 @@ for frame in frame_rx.try_iter() {
 
 `Encoder::new` に渡すクロージャは `FnEncodeHandler::new` でラップする。クロージャの引数は `Result<EncodedFrame<T>, E>` で、エラーもワーカースレッドから通知される。ハンドラーはワーカースレッドで呼ばれるため、結果は `mpsc::channel` の `Sender` でメインスレッドへ送る。`E` の既定値は `shiguredo_amf::Error` である。`UserData` 型 (上記の `()` の位置) はフレーム単位の任意ユーザーデータで、`encode()` で渡した値が `EncodedFrame::user_data()` から取り出せる。
 
-`EncoderConfig::b_pic_pattern` に GOP 内の連続 B フレーム数を指定すると B フレームを有効にできる。AMF の仕様上の値域は H.264 が 0-3、AV1 が 0-127 で、0 は B フレームなし、`None` は AMF の既定値 (0) になる。HEVC は B フレームを扱わないため指定できない。B フレームを有効にすると、ハンドラーへの通知順は入力順 (提示順) と異なる符号化順になるが、`encode()` に渡した `UserData` は対応する入力フレームの出力に付く。B フレームに対応していない GPU で 1 以上を指定した場合は `Encoder::new` がエラーを返す。
+`EncoderConfig::b_pic_pattern` に GOP 内の連続 B フレーム数を指定すると B フレームを有効にできる。AMF の仕様上の値域は H.264 が 0-3、AV1 が 0-127 で、0 は B フレームなし、`None` は AMF の既定値 (0) になる。HEVC は B フレームを扱わないため指定できない。B フレームを有効にすると、ハンドラーへの通知順は入力順 (提示順) と異なる符号化順になるが、`encode()` に渡した `UserData` は対応する入力フレームの出力に付く。B フレームに対応していない GPU で 1 以上を指定した場合は `Encoder::new` がエラーを返す。`Encoder` は入出力の対応付けに `ShiguredoAmfFrameId` プロパティを使う。この名前はライブラリの予約名であり、利用者は入力 `Surface` に設定しないこと。`encode()` は入力 `Surface` の PTS を変更せず、出力 `Buffer` の PTS も設定しない。出力 `Buffer` の PTS は AMF が付けた値になる。
 
 `Encoder::encode` は入力 1 つにつき出力 1 つを前提とし、同じ入力に対応する出力が複数ある場合や、対応する入力がない出力が得られた場合はワーカーが `Err` として通知する。
 
@@ -336,9 +338,9 @@ for frame in frame_rx.try_iter() {
 
 デコーダーは初期化時に解像度 `0x0` で AMF コンポーネントを Init するため、ビットストリームのシーケンスヘッダーから解像度が自動検出される。出力 `Surface` は内部で `convert(MemoryType::Host)` 済みのため、`get_plane()` 経由でホストメモリから直接読み出せる。
 
-`decode()` には 1 フレーム分のビットストリームを格納した `Buffer` を渡す。複数フレームを含むバッファは未対応で、`AMF_REPEAT` が返された場合はエラーになる。B フレームを含むストリームでは出力順が入力順と異なるが、`decode()` に渡した `UserData` は対応する出力フレームに付く。`decode()` は入力 `Buffer` に設定した PTS を対応する出力 `Surface` に引き継ぐ。PTS を設定していない場合は 0 になる。B フレームを含むストリームでは出力 `Surface` の PTS も入力順には並ばない。
+`decode()` には 1 フレーム分のビットストリームを格納した `Buffer` を渡す。複数フレームを含むバッファは未対応で、`AMF_REPEAT` が返された場合はエラーになる。B フレームを含むストリームでは出力順が入力順と異なるが、`decode()` に渡した `UserData` は対応する出力フレームに付く。`decode()` は入力 `Buffer` の PTS を変更せず、出力 `Surface` の PTS も設定しない。出力 `Surface` の PTS は AMF が付けた値になる。入出力の対応付けには `ShiguredoAmfFrameId` プロパティを使う。この名前はライブラリの予約名であり、利用者は入力 `Buffer` に設定しないこと。
 
-解像度が変化するストリームでも同じデコーダーへフレームを投入し続けられる。解像度変化の処理に成功した場合、投入したフレームは新しい解像度でデコードされ、他のフレームと同様にハンドラーへ通知される。処理が完了するまで `decode()` は戻らない。解像度変化の処理に失敗した場合は `decode()` がエラーを返し、そのフレームはハンドラーへ通知されない。`decode()` / `finish()` がエラーを返した後は、`Drop` 以外の操作を保証しない。
+解像度が変化するストリームでも同じデコーダーへフレームを投入し続けられる。解像度変化の処理に成功した場合、投入したフレームは新しい解像度でデコードされ、他のフレームと同様にハンドラーへ通知される。処理が完了するまで `decode()` は戻らない。解像度変化の処理に失敗した場合は `decode()` がエラーを返し、そのフレームはハンドラーへ通知されない。`decode()` / `finish()` がエラーを返した後の操作は `Drop` 以外を保証しない。
 
 `Decoder::new` の第 1 引数には `Context` を渡す。同じ `Context` を Clone して `Encoder::new` にも渡すと、デコード結果の `Surface` をコピーせずにエンコードできる。
 
@@ -520,18 +522,21 @@ H.264 / HEVC / AV1 で AMF SDK 内部の enum 値順序が異なるが、`shigur
 
 - `AmfLibrary` はプロセスシングルトン (`LazyLock<AmfLibrary>`)。AMF ランタイムを遅延初期化し、`create_context()` で新しい `Context` を作成する。
 - `Context` は `AMFContext` の参照カウントを直接管理する Clone 可能なハンドルである。`Clone` は `AMFContext::Acquire`、`Drop` は `AMFContext::Release` を呼ぶ。最後の参照が解放されたときに AMFContext のデストラクタが `Terminate` を呼ぶ。
-- `Encoder<H>` / `Decoder<H>` は内部で `amf-encoder-worker` / `amf-decoder-worker` という名前のワーカースレッドを起動し、`mpsc::channel` でコマンドを受け取る。エンコーダーは `Submit` / `Finish`、デコーダーは `Submit` / `WaitEof` / `Stop` を使う。
-- `encode()` はメインスレッドから `SubmitInput` を呼び、`AMF_OK` と `AMF_NEED_MORE_INPUT` を入力の受理として扱い、`AMF_INPUT_FULL` / `AMF_REPEAT` では 1ms スリープしながら最大 100 回までリトライする。`decode()` も `AMF_INPUT_FULL` / `AMF_DECODER_NO_FREE_SURFACES` ではリトライするが、`AMF_REPEAT` は複数フレームを含むバッファとしてエラーにする。どちらも投入に成功した後で `UserData` をワーカーへ送る。`encode()` は対応付け用の値、`decode()` は対応付け用 PTS と元の PTS も一緒に送る。
-- デコーダーのワーカーは、`decode()` が入力ごとに割り当てた PTS をキーに `UserData` を保持し、`QueryOutput` が返す `Surface` の PTS と一致した時点で `on_decoded` を呼ぶ。`Submit` コマンドの処理が出力の取得より遅れた場合は、`UserData` が登録されるまで出力を保持する。`WaitEof` の完了時に出力が得られなかった入力や、対応する入力がない出力はエラーとして通知する。`QueryOutput` が終端エラーを返した場合は、そのエラーをハンドラーへ通知してワーカーを終了する。`Stop` を受け取るとワーカーを終了する。`finish()` が成功した後に `decode()` を呼ぶとエラーを返す。
-- 解像度の変化を検出すると、`SubmitInput` は `AMF_RESOLUTION_CHANGED` を返し、投入したバッファは AMF に受理されない。`decode()` はワーカーへ `WaitEof` を送る。ワーカーは `Drain` を呼び、`AMF_INPUT_FULL` が返る間は `QueryOutput` を回して出力を通知しながら再試行する。`Drain` を受理したら `AMF_EOF` まで回収し、出力が得られなかった入力をエラーとして通知したあと ack を返す。`decode()` は `AMF_VIDEO_DECODER_CURRENT_SIZE` から新しい解像度を取得し、`Terminate` と `Init` で AMF コンポーネントを作り直してから、受理されなかったバッファを再投入して同じワーカーへ `Submit` を送る。ワーカーは停止せず、通常ループへ戻る。`Drain` に失敗した場合、`decode()` はエラーを返し、`finish()` はハンドラーへ通知して `Ok` を返す。`decode()` / `finish()` がエラーを返した後は、`Drop` 以外の操作を保証しない。
-- エンコーダーのワーカーは、`encode()` が入力ごとに割り当てた対応付け用の値をキーに `UserData` を保持し、`QueryOutput` が返す `Buffer` の対応付け用プロパティと一致した時点で `on_encoded` を呼ぶ。対応付け用の値は入力 Surface のカスタムプロパティとして出力 `Buffer` へ引き継ぎ、B フレームで出力順が変わっても正しいフレームを引き当てる。`Submit` コマンドの処理が出力の取得より遅れた場合は、`UserData` が登録されるまで出力を保持する。`AMF_NEED_MORE_INPUT` は入力の受理として扱う。`finish()` で出力が得られなかった入力や、対応する入力がない出力はエラーとして通知する。`QueryOutput` が終端エラーを返した場合は、そのエラーをハンドラーへ通知してワーカーを終了する。`finish()` が成功した後に `encode()` / `reconfigure()` を呼ぶとエラーを返す。2 回目の `finish()` もエラーを返す。
-- `Encoder` の `finish()` は `Drain` を呼んだあと `Finish` コマンドをワーカーに送り、ワーカーの終了を `join` まで待つ。`Decoder` の `finish()` は入力が受理済みなら `WaitEof` で Drain と `AMF_EOF` までの回収をさせてから `Stop` を送り、受理済みの入力がなければ `Stop` だけを送って `join` まで待つ。`SubmitInput` がハードエラーになって入力を受理していない場合も `Stop` だけを送る。`Drop` 実装は `cmd_tx` を落としてワーカーを停止させ、ワーカーが保持する通知前の入出力を破棄し、コンポーネントが初期化済みなら `Component::terminate()` を呼んでから AMF オブジェクトを解放する。`Context` は保持している `Context` の Clone がなくなった時点で破棄される。
+- `Encoder<H>` / `Decoder<H>` は内部で共通のワーカーモジュールを使い、`amf-encoder-worker` / `amf-decoder-worker` という名前のワーカースレッドを起動する。コマンドは `mpsc::channel` で受け取り、`RegisterUserData` / `WaitEof` / `Stop` を使う。出力の変換、ハンドラーへの通知、終了条件だけをクロージャで差し替える。
+- `encode()` / `decode()` はメインスレッドから `SubmitInput` を呼ぶ。共通のリトライ対象は `AMF_INPUT_FULL` と `AMF_DECODER_NO_FREE_SURFACES` で、1ms 間隔で最大 100 回リトライし、それ以外のステータスはそのまま返す。エンコーダーは `AMF_OK` / `AMF_NEED_MORE_INPUT` を受理し、`AMF_REPEAT` は想定外としてエラーにする。デコーダーは `AMF_OK` / `AMF_NEED_MORE_INPUT` / `AMF_RESOLUTION_CHANGED` を受理し、`AMF_REPEAT` は複数フレームを含むバッファとしてエラーにする。`AMF_DECODER_NO_FREE_SURFACES` はデコーダー専用だが、一時的なリソース枯渇を表すため共通のリトライ対象に含める。どちらも受理された後で、入力フレームに割り当てた `ShiguredoAmfFrameId` と `UserData` をワーカーへ送る。
+- ワーカーは frame ID から `UserData` を引く表を保持し、`QueryOutput` が返す出力から frame ID を読み取って対応する `UserData` を通知する。対応する `UserData` がまだ届いていない出力は保持する。ワーカーはコマンドを 1 つ処理した後と、コマンド待ちのタイムアウト時に `QueryOutput` を回収する。入力のリトライ中も出力を回収できるよう、保留中の入出力がある間は 1ms 間隔で `QueryOutput` を呼ぶ。
+- `QueryOutput` の出力は `amf::Data` で包む。`Data` は `AMFData` の RAII ラッパーで、`to_buffer` / `to_surface` で参照カウントを増やした `Buffer` / `Surface` を構築できる。
+- `WaitEof` を受け取ると、ワーカーは `Drain` を呼ぶ。`AMF_INPUT_FULL` の間は出力を回収しながら再試行し、受理後は `AMF_EOF` まで出力を回収する。エンコーダーとデコーダーで終了条件は同じで、`AMF_EOF` まで待つ。完了時は出力が得られなかった入力と、対応する入力がない出力をエラーとして通知する。`Drain` に失敗した場合はエラーを呼び出し側へ返し、ワーカーはコマンド待ちに戻る。`QueryOutput` が終端エラーを返した場合は、そのエラーをハンドラーへ通知してワーカーを終了する。
+- `Encoder::finish()` / `Decoder::finish()` は共通の処理で、入力が受理済みなら `WaitEof` で Drain と出力回収をさせてから `Stop` を送り、受理済みの入力がなければ `Stop` だけを送って join まで待つ。`SubmitInput` がハードエラーになって入力を受理していない場合も `Stop` だけを送る。2 回目の `finish()` はエラーを返す。`finish()` がエラーを返した後の操作は `Drop` 以外を保証しない。出力の回収中に発生した終端エラーはハンドラーへ通知される。
+- 解像度の変化を検出すると、`SubmitInput` は `AMF_RESOLUTION_CHANGED` を返し、投入したバッファは AMF に受理されない。`decode()` はワーカーへ `WaitEof` を送り、旧解像度の出力をすべて通知させてから `Terminate` と `Init` で AMF コンポーネントを作り直す。受理されなかったバッファを再投入して同じワーカーへ `RegisterUserData` を送り、ワーカーは通常ループへ戻る。
+- `Drop` は `Stop` コマンドを送り、キューにあるコマンドを処理してからワーカーを join する。drop の処理中に、`encode()` / `decode()` が成功したフレームの出力が通知されることがある。drop は、すべてのフレームの出力が通知されることを保証しない。コンポーネントが初期化済みなら `Component::terminate()` を呼んでから AMF オブジェクトを解放する。ハンドラーの panic は `tracing::error!` で記録する。
+- `Context` は保持している `Context` の Clone がなくなった時点で破棄される。
 
 ## 公開モジュール
 
 | モジュール | 説明 |
 |-----------|------|
-| `amf` | AMF オブジェクトの RAII ラッパー (`Context`, `Component`, `Surface`, `Buffer`, `Plane`, `PropertyStorage`) |
+| `amf` | AMF オブジェクトの RAII ラッパー (`Context`, `Component`, `Surface`, `Buffer`, `Data`, `Plane`, `PropertyStorage`) |
 | `ffi` | `#[doc(hidden)]`。`sys` モジュールの再公開。semver 保証対象外 |
 
 ## docs.rs 向けビルド

@@ -105,10 +105,10 @@ fn main() {
         .allowlist_function("amf_.*")
         // 列挙型を Rust enum として生成する
         .rustified_enum("AMF_RESULT")
-        // AMF が将来追加した値も保持できるよう、caps で受け取る列挙型は newtype にする
+        // AMF が将来追加した値も保持できるよう、AMF が返す列挙型は newtype にする
         .newtype_enum("AMF_SURFACE_FORMAT")
         .newtype_enum("AMF_MEMORY_TYPE")
-        .rustified_enum("AMF_DATA_TYPE")
+        .newtype_enum("AMF_DATA_TYPE")
         .rustified_enum("AMF_PLANE_TYPE")
         .newtype_enum("AMF_VARIANT_TYPE")
         .rustified_enum("AMF_DX_VERSION")
@@ -188,9 +188,15 @@ pub struct AMF_SURFACE_FORMAT(pub amf_uint);
 #[repr(transparent)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct AMF_MEMORY_TYPE(pub amf_uint);
-#[repr(C)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum AMF_DATA_TYPE { AMF_DATA_BUFFER = 0, AMF_DATA_SURFACE = 1 }
+#[repr(transparent)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct AMF_DATA_TYPE(pub amf_uint);
+impl AMF_DATA_TYPE {
+    pub const AMF_DATA_BUFFER: AMF_DATA_TYPE = AMF_DATA_TYPE(0);
+    pub const AMF_DATA_SURFACE: AMF_DATA_TYPE = AMF_DATA_TYPE(1);
+    pub const AMF_DATA_AUDIO_BUFFER: AMF_DATA_TYPE = AMF_DATA_TYPE(2);
+    pub const AMF_DATA_USER: AMF_DATA_TYPE = AMF_DATA_TYPE(1000);
+}
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AMF_PLANE_TYPE { AMF_PLANE_UNKNOWN = 0, AMF_PLANE_PACKED = 1, AMF_PLANE_Y = 2, AMF_PLANE_UV = 3, AMF_PLANE_U = 4, AMF_PLANE_V = 5 }

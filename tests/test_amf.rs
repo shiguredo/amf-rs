@@ -4,7 +4,7 @@
 
 use std::sync::{Arc, Barrier, Mutex};
 
-use shiguredo_amf::amf::{Buffer, Component, Context, Plane, PropertyStorage, Surface};
+use shiguredo_amf::amf::{Buffer, Component, Context, Data, Plane, PropertyStorage, Surface};
 use shiguredo_amf::ffi::amf_long;
 use shiguredo_amf::{
     CodecConfig, Decoder, DecoderCodec, DecoderConfig, EncodeOptions, Encoder, EncoderConfig,
@@ -120,6 +120,7 @@ fn test_amf_handles_are_send_sync() {
     // Clone + Send + Sync であることを確認する。
     assert_handle::<Plane<'static>>();
     assert_handle::<PropertyStorage>();
+    assert_handle::<Data>();
 
     // コンパイル時の表明だけでなく、公開 API から実際にハンドルを作成できることも
     // 確認する。Component は Encoder の内部で作成されるため、ここでは Context と
@@ -138,12 +139,64 @@ fn test_amf_handles_are_send_sync() {
     let property_storage = surface
         .property_storage()
         .expect("PropertyStorage の取得に失敗");
+    let data = surface.data().expect("Data の作成に失敗");
 
     // 子ハンドルを先に破棄してから Surface と Encoder を破棄する
+    drop(data);
     drop(property_storage);
     drop(plane);
     drop(surface);
     drop(encoder);
+}
+
+/// Data を保持している Surface は Encoder に投入できないことを確認する
+#[test]
+fn test_encoder_rejects_surface_shared_with_data() {
+    let context = helpers::create_context();
+    let mut encoder = Encoder::new(
+        context,
+        h264_cqp_test_encoder_config(),
+        FnEncodeHandler::<()>::new(|_| {}),
+    )
+    .expect("エンコーダーの作成に失敗");
+    let surface = encoder.alloc_surface().expect("Surface の確保に失敗");
+    let data = surface.data().expect("Data の作成に失敗");
+
+    let error = encoder
+        .encode(surface, &EncodeOptions::default(), ())
+        .expect_err("Data を保持した Surface の encode が成功した");
+    assert!(
+        matches!(error, Error::InvalidState(_)),
+        "Data を保持した Surface の encode エラーが InvalidState でない: {error}"
+    );
+
+    drop(data);
+}
+
+/// Data を保持している Buffer は Decoder に投入できないことを確認する
+#[test]
+fn test_decoder_rejects_buffer_shared_with_data() {
+    let context = helpers::create_context();
+    let mut decoder = Decoder::new(
+        context,
+        DecoderConfig {
+            codec: DecoderCodec::H264,
+        },
+        FnDecodeHandler::<()>::new(|_| {}),
+    )
+    .expect("デコーダーの作成に失敗");
+    let buffer = decoder.alloc_buffer(16).expect("Buffer の確保に失敗");
+    let data = buffer.data().expect("Data の作成に失敗");
+
+    let error = decoder
+        .decode(buffer, ())
+        .expect_err("Data を保持した Buffer の decode が成功した");
+    assert!(
+        matches!(error, Error::InvalidState(_)),
+        "Data を保持した Buffer の decode エラーが InvalidState でない: {error}"
+    );
+
+    drop(data);
 }
 
 /// 同じ `Surface` を指す Clone を複数スレッドで並行利用できることを確認する
