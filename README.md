@@ -134,14 +134,18 @@ let surface = encoder.alloc_surface()?;
 // フレームデータを surface の Y/UV プレーンにコピーする
 // ...
 let options = EncodeOptions { frame_type: frame_type::UNKNOWN };
-encoder.encode(surface, &options, ())?;
+encoder.encode(surface, options, ())?;
 
 // IDR フレームを強制してエンコード
 let surface = encoder.alloc_surface()?;
 // ...
-encoder.encode(surface, &EncodeOptions {
-    frame_type: frame_type::IDR,
-}, ())?;
+encoder.encode(
+    surface,
+    EncodeOptions {
+        frame_type: frame_type::IDR,
+    },
+    (),
+)?;
 
 // 残りのフレームをすべて取得する
 encoder.finish()?;

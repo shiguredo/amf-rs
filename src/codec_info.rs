@@ -3,8 +3,8 @@
 use std::ffi::CStr;
 
 use crate::AmfLibrary;
-use crate::Error;
 use crate::amf::{Caps, Context, IoCaps};
+use crate::error::Error;
 use crate::sys;
 use crate::types::{Av1Profile, H264Profile, HevcProfile, MemoryType, SurfaceFormat};
 

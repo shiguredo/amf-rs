@@ -142,9 +142,9 @@ fn check_runtime() -> bool {
     print!("Load runtime ... ");
     let lib = AmfLibrary::instance();
     match lib.query_version() {
-        Ok((major, minor, release, build)) => {
+        Ok(version) => {
             println!("OK");
-            println!("Runtime version: {major}.{minor}.{release}.{build}");
+            println!("Runtime version: {version}");
             true
         }
         Err(e) => {

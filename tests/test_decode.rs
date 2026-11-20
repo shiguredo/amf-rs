@@ -786,7 +786,7 @@ fn encode_h264_stream(
         encoder
             .encode(
                 surface,
-                &EncodeOptions {
+                EncodeOptions {
                     frame_type: frame_type::UNKNOWN,
                 },
                 (),

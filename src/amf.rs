@@ -131,6 +131,14 @@ pub struct PropertyStorage {
 unsafe impl Send for PropertyStorage {}
 unsafe impl Sync for PropertyStorage {}
 
+impl std::fmt::Debug for PropertyStorage {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PropertyStorage")
+            .field("ptr", &format_args!("{:p}", self.ptr))
+            .finish()
+    }
+}
+
 impl PropertyStorage {
     /// ハンドルを作成する
     ///
@@ -1725,6 +1733,14 @@ pub struct Component {
 
 unsafe impl Send for Component {}
 unsafe impl Sync for Component {}
+
+impl std::fmt::Debug for Component {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Component")
+            .field("ptr", &format_args!("{:p}", self.ptr))
+            .finish()
+    }
+}
 
 impl Component {
     /// ハンドルを作成する

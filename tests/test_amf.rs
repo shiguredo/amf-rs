@@ -163,7 +163,7 @@ fn test_encoder_rejects_surface_shared_with_data() {
     let data = surface.data().expect("Data の作成に失敗");
 
     let error = encoder
-        .encode(surface, &EncodeOptions::default(), ())
+        .encode(surface, EncodeOptions::default(), ())
         .expect_err("Data を保持した Surface の encode が成功した");
     assert!(
         matches!(error, Error::InvalidState(_)),
@@ -272,7 +272,7 @@ fn test_surface_clone_concurrent_access() {
     encoder
         .encode(
             surface,
-            &EncodeOptions {
+            EncodeOptions {
                 frame_type: frame_type::UNKNOWN,
             },
             (),
@@ -618,7 +618,7 @@ fn test_handlers_can_access_frames() {
         let surface = encoder.alloc_surface().expect("Surface の確保に失敗");
         fill_nv12_surface(&surface, WIDTH, HEIGHT);
         encoder
-            .encode(surface, &options, ())
+            .encode(surface, options, ())
             .expect("エンコードに失敗");
     }
     encoder.finish().expect("finish に失敗");
@@ -1284,7 +1284,7 @@ fn test_surface_outlives_encoder_and_context_handle() {
     )
     .expect("エンコーダーの作成に失敗");
     encoder
-        .encode(surface, &EncodeOptions::default(), ())
+        .encode(surface, EncodeOptions::default(), ())
         .expect("別の Encoder でのエンコードに失敗");
     encoder.finish().expect("finish に失敗");
 }

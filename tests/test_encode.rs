@@ -154,7 +154,7 @@ fn test_encode_after_finish_is_rejected() {
     // finish 済みの確認は Surface の検証より前に行われるため、Surface の中身は空でもよい。
     let surface = encoder.alloc_surface().expect("Surface の確保に失敗");
     let error = encoder
-        .encode(surface, &EncodeOptions::default(), ())
+        .encode(surface, EncodeOptions::default(), ())
         .expect_err("finish 後の encode が成功した");
     assert!(
         matches!(&error, Error::InvalidState(_)),
@@ -224,7 +224,7 @@ fn test_drop_encoder_without_finish_does_not_hang() {
     let surface = encoder.alloc_surface().expect("Surface の確保に失敗");
     copy_nv12_to_surface(&surface, &frame_data, 320, 240);
     encoder
-        .encode(surface, &EncodeOptions::default(), 0)
+        .encode(surface, EncodeOptions::default(), 0)
         .expect("1 つ目のフレームのエンコードに失敗");
 
     first_seen_rx
@@ -235,7 +235,7 @@ fn test_drop_encoder_without_finish_does_not_hang() {
     let surface = encoder.alloc_surface().expect("Surface の確保に失敗");
     copy_nv12_to_surface(&surface, &frame_data, 320, 240);
     encoder
-        .encode(surface, &EncodeOptions::default(), 1)
+        .encode(surface, EncodeOptions::default(), 1)
         .expect("2 つ目のフレームのエンコードに失敗");
 
     // drop はワーカーの停止まで待つため、ブロック中の通知を別スレッドから解放する。
@@ -290,7 +290,7 @@ fn test_finish_returns_error_when_handler_panics() {
     let surface = encoder.alloc_surface().expect("Surface の確保に失敗");
     copy_nv12_to_surface(&surface, &frame_data, 320, 240);
     // ハンドラーの panic は encode 中にも起こり得るため、encode の成否は問わない。
-    let _ = encoder.encode(surface, &EncodeOptions::default(), ());
+    let _ = encoder.encode(surface, EncodeOptions::default(), ());
 
     let error = encoder
         .finish()
@@ -557,7 +557,7 @@ fn test_encoder_p010_10bit_encoding() {
                 .unwrap_or_else(|e| panic!("{name}: Surface の確保に失敗: {e}"));
             write_p010_surface(&surface, 320, 240, frame_index);
             encoder
-                .encode(surface, &EncodeOptions::default(), ())
+                .encode(surface, EncodeOptions::default(), ())
                 .unwrap_or_else(|e| {
                     panic!("{name}: フレーム {frame_index} のエンコードに失敗: {e}")
                 });
@@ -683,7 +683,7 @@ fn test_encoder_all_rate_control_modes() {
                 let data = generate_dummy_nv12(320, 240, frame_index);
                 copy_nv12_to_surface(&surface, &data, 320, 240);
                 encoder
-                    .encode(surface, &EncodeOptions::default(), ())
+                    .encode(surface, EncodeOptions::default(), ())
                     .unwrap_or_else(|error| {
                         panic!(
                             "{codec_name} {mode:?}: フレーム {frame_index} のエンコードに失敗: {error}"

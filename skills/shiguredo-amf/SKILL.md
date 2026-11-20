@@ -44,11 +44,12 @@ AMD GPU 向けハードウェアアクセラレーションによるビデオエ
 
 | 型/関数 | 説明 | 主要 API |
 |--------|------|---------|
-| `AmfLibrary` | AMF ランタイムライブラリのプロセスシングルトン | `instance()`, `query_version() -> Result<(u16, u16, u16, u16), Error>`, `create_context() -> Result<Context, Error>` |
-| `Encoder<H: EncodeHandler>` | AMF ハードウェアエンコーダー | `new(Context, EncoderConfig, H)`, `context()`, `alloc_surface()`, `encode(Surface, &EncodeOptions, H::UserData)`, `reconfigure(ReconfigureParams)`, `finish()` |
+| `AmfLibrary` | AMF ランタイムライブラリのプロセスシングルトン | `instance()`, `query_version() -> Result<AmfVersion, Error>`, `create_context() -> Result<Context, Error>` |
+| `Encoder<H: EncodeHandler>` | AMF ハードウェアエンコーダー | `new(Context, EncoderConfig, H)`, `context()`, `alloc_surface()`, `encode(Surface, EncodeOptions, H::UserData)`, `reconfigure(ReconfigureParams)`, `finish()` |
 | `Decoder<H: DecodeHandler>` | AMF ハードウェアデコーダー | `new(Context, DecoderConfig, H)`, `context()`, `alloc_buffer(size)`, `decode(Buffer, H::UserData)`, `finish()` |
 | `supported_codecs() -> Result<Vec<CodecInfo>, Error>` | このバックエンドで利用可能なコーデック情報の一覧を返す (AMF ランタイムを初期化できない場合はエラー) | - |
 | `BUILD_VERSION` | ビルド時の AMF バージョン文字列 (`&'static str`) | - |
+| `AmfVersion` | AMF ランタイムのバージョン | フィールド: `major`, `minor`, `release`, `build` (全て `u16`)。`Display` は `major.minor.release.build` 形式 |
 
 `Encoder` / `Decoder` は内部でワーカースレッドを起動し、`encode()` / `decode()` で投入したフレームの結果は `EncodeHandler::on_encoded` / `DecodeHandler::on_decoded` に非同期で通知される。`finish()` は残りのフレームをハンドラーが受け取り終わるまで待機する。`finish()` が成功した後に `encode()` / `reconfigure()` / `decode()` を呼ぶとエラーになる。2 回目の `finish()` もエラーになる。`finish()` を呼ばずに drop すると、drop の処理中に、すでに `encode()` / `decode()` が成功したフレームの出力が通知されることがある。drop は、すべてのフレームの出力が通知されることを保証しない。
 
@@ -69,7 +70,7 @@ AMD GPU 向けハードウェアアクセラレーションによるビデオエ
 | `H264Profile` | H.264 プロファイル | `Baseline`, `Main`, `High`, `ConstrainedBaseline`, `ConstrainedHigh` |
 | `HevcProfile` | HEVC プロファイル | `Main`, `Main10` |
 | `Av1Profile` | AV1 プロファイル | `Main` |
-| `FrameFormat` | エンコーダー入力フレームフォーマット | `Nv12`, `Yv12`, `I420`, `Bgra`, `Argb`, `Rgba`, `Yuy2`, `Uyvy`, `P010`, `P012`, `P016`, `Y210`, `Ayuv`, `Y410`, `Y416`, `frame_size(width, height) -> Option<usize>` |
+| `FrameFormat` | エンコーダー入力フレームフォーマット | `Nv12`, `Yv12`, `I420`, `Bgra`, `Argb`, `Rgba`, `Yuy2`, `Uyvy`, `P010`, `P012`, `P016`, `Y210`, `Ayuv`, `Y410`, `Y416` |
 | `RateControlMode` | レート制御モード | `Cqp`, `Cbr`, `Vbr`, `LatencyConstrainedVbr`, `QualityVbr`, `HighQualityVbr`, `HighQualityCbr` |
 | `EncodeOptions` | フレーム単位のエンコードオプション | `frame_type: u16` (デフォルト 0 = 自動。`frame_type` モジュール参照) |
 | `ReconfigureParams` | 動的プロパティ再設定パラメータ | `framerate_num`, `framerate_den`, `target_kbps`, `max_kbps`, `qpi`, `qpp`, `qpb`, `gop_pic_size` (全て `Option`、`None` の項目は変更しない) |
@@ -272,7 +273,7 @@ let mut encoder = Encoder::new(
 let surface = encoder.alloc_surface()?;
 // ここで surface の Y/UV プレーンに NV12 フレームを書き込む...
 let options = EncodeOptions { frame_type: frame_type::UNKNOWN };
-encoder.encode(surface, &options, ())?;
+encoder.encode(surface, options, ())?;
 
 // 残りのフレームをすべて取得する (Drain → ワーカー完了待ち)
 encoder.finish()?;
@@ -373,9 +374,13 @@ use shiguredo_amf::{EncodeOptions, frame_type};
 
 let surface = encoder.alloc_surface()?;
 // ...
-encoder.encode(surface, &EncodeOptions {
-    frame_type: frame_type::IDR,
-}, ())?;
+encoder.encode(
+    surface,
+    EncodeOptions {
+        frame_type: frame_type::IDR,
+    },
+    (),
+)?;
 ```
 
 IDR 強制時は内部でコーデック別に AMF の `FORCE_PICTURE_TYPE` / `FORCE_FRAME_TYPE` プロパティを設定し、H.264 では `INSERT_SPS` / `INSERT_PPS`、HEVC では `INSERT_HEADER`、AV1 では `FORCE_INSERT_SEQUENCE_HEADER` を同時に有効化する (キーフレームに SPS/PPS 相当のヘッダーが付与される)。
@@ -413,8 +418,8 @@ for info in &codecs {
 use shiguredo_amf::AmfLibrary;
 
 let lib = AmfLibrary::instance();
-let (major, minor, release, build) = lib.query_version()?;
-println!("AMF runtime: {major}.{minor}.{release}.{build}");
+let version = lib.query_version()?;
+println!("AMF runtime: {version}");
 ```
 
 `AmfLibrary::instance()` は `LazyLock` によるプロセスシングルトンを返す。`libamfrt64.so.1` の `dlopen` とファクトリの取得は、初めて `query_version()` / `create_context()` / `create_component()` を呼び出したときに行われる。
@@ -479,8 +484,6 @@ HEVC の 10bit 入力には `HevcProfile::Main10` が必要である。`HevcProf
 | `Ayuv` | Packed YUV 4:4:4 8bit | GPU と AMF の実装に依存する |
 | `Y410` | Packed YUV 4:4:4 10bit (32bit ワード、下位から U (10bit) / Y (10bit) / V (10bit) / A (2bit)) | GPU と AMF の実装に依存する |
 | `Y416` | Packed YUV 4:4:4 16bit (16bit ワード、全ビット) | AMF が 8bit / 10bit 以外を扱えないため、初期化に失敗する |
-
-`FrameFormat::frame_size(width, height) -> Option<usize>` で各フォーマットのフレームバイト数を計算できる (オーバーフロー時は `None`)。
 
 AMD Radeon 780M Graphics (Phoenix1)、Ubuntu 26.04.1、AMF ランタイム 1.5.3.0 で確認した結果は次のとおり。
 

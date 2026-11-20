@@ -47,33 +47,6 @@ impl FrameFormat {
             FrameFormat::P010 | FrameFormat::Y210 | FrameFormat::Y410
         )
     }
-
-    /// 指定解像度でのフレームサイズ（バイト数）を計算する
-    ///
-    /// オーバーフローした場合は `None` を返す。
-    pub fn frame_size(self, width: usize, height: usize) -> Option<usize> {
-        let pixels = width.checked_mul(height)?;
-        match self {
-            // YUV 4:2:0 8bit 系は 1 ピクセルあたり 1.5 バイト
-            FrameFormat::Nv12 | FrameFormat::Yv12 | FrameFormat::I420 => {
-                pixels.checked_mul(3).map(|v| v / 2)
-            }
-            // Packed 32bit 系は 1 ピクセルあたり 4 バイト
-            FrameFormat::Bgra
-            | FrameFormat::Argb
-            | FrameFormat::Rgba
-            | FrameFormat::Ayuv
-            | FrameFormat::Y410 => pixels.checked_mul(4),
-            // Packed YUV 4:2:2 8bit 系は 1 ピクセルあたり 2 バイト
-            FrameFormat::Yuy2 | FrameFormat::Uyvy => pixels.checked_mul(2),
-            // Semi-Planar YUV 4:2:0 16bit 系は 1 ピクセルあたり 3 バイト
-            FrameFormat::P010 | FrameFormat::P012 | FrameFormat::P016 => pixels.checked_mul(3),
-            // Packed YUV 4:2:2 10bit 系は 1 ピクセルあたり 4 バイト
-            FrameFormat::Y210 => pixels.checked_mul(4),
-            // Packed YUV 4:4:4 16bit 系は 1 ピクセルあたり 8 バイト
-            FrameFormat::Y416 => pixels.checked_mul(8),
-        }
-    }
 }
 
 /// レート制御モード
@@ -1107,7 +1080,7 @@ impl<H: EncodeHandler> Encoder<H> {
     pub fn encode(
         &mut self,
         surface: Surface,
-        options: &EncodeOptions,
+        options: EncodeOptions,
         user_data: H::UserData,
     ) -> Result<(), Error> {
         if !self.worker.is_running() {
