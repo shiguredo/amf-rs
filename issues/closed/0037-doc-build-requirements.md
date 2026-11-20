@@ -1,7 +1,7 @@
 # `examples/amf-check` の `rust-version` と README のビルド要件を整備する
 
 - Created: 2026-11-10
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-11-20
 - Branch: feature/fix-build-requirements
 - Polished: {YYYY-MM-DD}
 - Reporter: @melpon
@@ -32,3 +32,9 @@
 - README と `SKILL.md` のビルド要件に libclang が記載されている。
 - CI / devcontainer の導入方法と README の記載が一致している。
 - `cargo metadata` で example の `rust-version` が確認できる。
+
+## 解決方法
+
+`examples/amf-check/Cargo.toml` に `rust-version = "1.95"` を追加し、ワークスペースの MSRV と揃えた。README と `skills/shiguredo-amf/SKILL.md` の動作要件に、bindgen が利用する libclang と Ubuntu の `libclang-dev` パッケージを追記した。
+
+リモートの AMD 実機で `cargo metadata` を実行し、`amf-check` と `shiguredo_amf` の `rust_version` が `1.95` であること、`cargo build --workspace` が成功することを確認した。CI と `.devcontainer/Dockerfile` の libclang の導入方法は README の記載と一致している。ドキュメントのみの変更のため `CHANGES.md` は更新していない。
