@@ -170,6 +170,10 @@ pub enum DataType {
     AudioBuffer,
     /// ユーザーデータ
     User,
+    /// 本クレートが名前付きで扱わない AMF のデータ種別
+    ///
+    /// AMF の `AMF_DATA_TYPE` の値そのものを保持する。
+    Unknown(u32),
 }
 
 impl DataType {
@@ -180,6 +184,7 @@ impl DataType {
             sys::AMF_DATA_TYPE::AMF_DATA_SURFACE => Self::Surface,
             sys::AMF_DATA_TYPE::AMF_DATA_AUDIO_BUFFER => Self::AudioBuffer,
             sys::AMF_DATA_TYPE::AMF_DATA_USER => Self::User,
+            other => Self::Unknown(other.0),
         }
     }
 }
@@ -267,6 +272,10 @@ mod tests {
         assert_eq!(
             DataType::from_amf(sys::AMF_DATA_TYPE::AMF_DATA_USER),
             DataType::User
+        );
+        assert_eq!(
+            DataType::from_amf(sys::AMF_DATA_TYPE(1001)),
+            DataType::Unknown(1001)
         );
     }
 }

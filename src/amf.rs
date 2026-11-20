@@ -466,7 +466,7 @@ impl Surface {
                 self.ptr as *mut sys::AMFData,
                 true,
                 Arc::clone(&self.state),
-                Some(Arc::clone(&self.planes)),
+                Arc::clone(&self.planes),
                 self.context.clone(),
             )
         }
@@ -485,13 +485,7 @@ impl Surface {
         let context = self.context.clone();
         let ptr = self.into_raw();
         unsafe {
-            Data::from_raw_with_acquire(
-                ptr as *mut sys::AMFData,
-                false,
-                state,
-                Some(planes),
-                context,
-            )
+            Data::from_raw_with_acquire(ptr as *mut sys::AMFData, false, state, planes, context)
         }
     }
 
@@ -726,7 +720,7 @@ impl Buffer {
                 self.ptr as *mut sys::AMFData,
                 true,
                 Arc::clone(&self.state),
-                None,
+                Arc::new(AtomicUsize::new(0)),
                 self.context.clone(),
             )
         }
@@ -744,7 +738,13 @@ impl Buffer {
         let context = self.context.clone();
         let ptr = self.into_raw();
         unsafe {
-            Data::from_raw_with_acquire(ptr as *mut sys::AMFData, false, state, None, context)
+            Data::from_raw_with_acquire(
+                ptr as *mut sys::AMFData,
+                false,
+                state,
+                Arc::new(AtomicUsize::new(0)),
+                context,
+            )
         }
     }
 
@@ -1236,9 +1236,7 @@ pub struct Data {
     f: DataFuncs,
     state: Arc<AmfObjectState>,
     /// このデータが保持する Plane 数カウンタ
-    ///
-    /// Plane を持たないデータでは `None` になる。
-    planes: Option<Arc<AtomicUsize>>,
+    planes: Arc<AtomicUsize>,
     context: Context,
 }
 
@@ -1271,7 +1269,15 @@ impl Data {
     /// `ptr` は `context` から取得した有効な `AMFData` を指すこと。`ptr` を指す
     /// 他のハンドルが存在しないこと。
     pub unsafe fn from_raw(ptr: *mut sys::AMFData, context: Context) -> Result<Self, Error> {
-        unsafe { Self::from_raw_with_acquire(ptr, false, AmfObjectState::new(), None, context) }
+        unsafe {
+            Self::from_raw_with_acquire(
+                ptr,
+                false,
+                AmfObjectState::new(),
+                Arc::new(AtomicUsize::new(0)),
+                context,
+            )
+        }
     }
 
     /// 生ポインタから Acquire 付きで `Data` を作成する
@@ -1284,7 +1290,15 @@ impl Data {
         ptr: *mut sys::AMFData,
         context: Context,
     ) -> Result<Self, Error> {
-        unsafe { Self::from_raw_with_acquire(ptr, true, AmfObjectState::new(), None, context) }
+        unsafe {
+            Self::from_raw_with_acquire(
+                ptr,
+                true,
+                AmfObjectState::new(),
+                Arc::new(AtomicUsize::new(0)),
+                context,
+            )
+        }
     }
 
     /// 生ポインタから `Data` を作成する
@@ -1292,7 +1306,7 @@ impl Data {
         ptr: *mut sys::AMFData,
         acquire: bool,
         state: Arc<AmfObjectState>,
-        planes: Option<Arc<AtomicUsize>>,
+        planes: Arc<AtomicUsize>,
         context: Context,
     ) -> Result<Self, Error> {
         let vtbl = unsafe { &*(*ptr).pVtbl };
@@ -1391,10 +1405,7 @@ impl Data {
             .into());
         }
 
-        let planes = self
-            .planes
-            .clone()
-            .unwrap_or_else(|| Arc::new(AtomicUsize::new(0)));
+        let planes = Arc::clone(&self.planes);
         unsafe {
             Surface::from_raw_with_acquire(
                 self.ptr as *mut sys::AMFSurface,
@@ -2427,12 +2438,7 @@ mod tests {
             "Data が Surface の状態を共有していない"
         );
         assert!(
-            Arc::ptr_eq(
-                &surface.planes,
-                data.planes
-                    .as_ref()
-                    .expect("Surface 由来の Data に Plane カウンタがない")
-            ),
+            Arc::ptr_eq(&surface.planes, &data.planes),
             "Data が Surface の Plane カウンタを共有していない"
         );
         assert!(
@@ -2490,12 +2496,7 @@ mod tests {
             "into_data で作った Data が Clone と状態を共有していない"
         );
         assert!(
-            Arc::ptr_eq(
-                &clone.planes,
-                data.planes
-                    .as_ref()
-                    .expect("Surface 由来の Data に Plane カウンタがない")
-            ),
+            Arc::ptr_eq(&clone.planes, &data.planes),
             "into_data で作った Data が Clone と Plane カウンタを共有していない"
         );
         assert!(
@@ -2561,6 +2562,28 @@ mod tests {
             !clone.is_shared(),
             "Data を drop した後の Clone が共有扱いになっている"
         );
+    }
+
+    /// Data::from_raw から作った複数の Surface が Plane カウンタを共有することを確認する
+    #[test]
+    fn test_data_from_raw_to_surface_shares_planes() {
+        let context = create_context();
+        let surface = create_surface(&context);
+        let ptr = surface.into_raw() as *mut sys::AMFData;
+        let data = unsafe { Data::from_raw(ptr, context.clone()) }.expect("Data の作成に失敗");
+
+        let first = data.to_surface().expect("1 つ目の Surface の作成に失敗");
+        let second = data.to_surface().expect("2 つ目の Surface の作成に失敗");
+
+        let plane = first
+            .get_plane(PlaneType::Y)
+            .expect("Y プレーンの取得に失敗");
+        assert!(
+            second.convert(MemoryType::Host).is_err(),
+            "Plane が生存しているのに別の Surface から convert が成功した"
+        );
+
+        drop(plane);
     }
 
     /// Surface 由来の Data を Buffer に変換すると InvalidState になることを確認する

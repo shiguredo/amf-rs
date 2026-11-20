@@ -143,7 +143,7 @@ AMD GPU 向けハードウェアアクセラレーションによるビデオエ
 | `Plane<'a>` | `AMFPlane` の RAII ラッパー。取得元の `Surface` を借用する | `context()`, `get_native() -> *mut c_void`, `get_hpitch() -> i32`, `get_vpitch() -> i32`, `get_width() -> i32`, `get_height() -> i32`, `is_tiled() -> bool`, `unsafe as_slice() -> Result<&[u8], Error>`, `unsafe as_mut_slice() -> Result<&mut [u8], Error>`, `as_ptr()`, `into_raw()` |
 | `PropertyStorage` | `AMFPropertyStorage` のラッパー | `context()`, `unsafe get_property(name_w, *mut AMFVariantStruct)`, `get_property_int64(name) -> Result<i64, Error>`, `get_property_size(name) -> Result<(i32, i32), Error>`, `set_property_int64(name, value)`, `set_property_size(name, width, height)`, `set_property_rate(name, num, den)`, `unsafe set_property(name_w, AMFVariantStruct)`, `as_ptr()`, `into_raw()` |
 | `Data` | `AMFData` の RAII ハンドル | `context()`, `get_data_type() -> DataType`, `property_storage() -> Result<PropertyStorage, Error>`, `to_buffer() -> Result<Buffer, Error>`, `to_surface() -> Result<Surface, Error>`, `as_ptr()`, `into_raw()`, `unsafe from_raw(*mut AMFData, Context)`, `unsafe from_raw_acquired(*mut AMFData, Context)` |
-| `DataType` | AMF のデータ種別 | `Buffer`, `Surface`, `AudioBuffer`, `User` |
+| `DataType` | AMF のデータ種別 | `Buffer`, `Surface`, `AudioBuffer`, `User`, `Unknown(u32)` |
 
 `Context::alloc_surface` / `alloc_buffer` は `&self` に対して呼び出す。`Context` の `Clone` は
 `AMFContext::Acquire`、`Drop` は `AMFContext::Release` を呼ぶ。最後の参照が解放されたときに

@@ -289,7 +289,8 @@ impl<H: DecodeHandler> Decoder<H> {
     ) -> Result<(), Error> {
         // 旧解像度の出力をすべて通知させ、ワーカーをコマンド待ちに戻す。
         // Drain と AMF_EOF 待ちはワーカーが行う。
-        self.wait_eof_worker()?;
+        self.worker.wait_eof()?;
+        self.drain_required = false;
 
         // AMF_RESOLUTION_CHANGED は Drain / Terminate / Init を要求する
         // (AMF SDK v1.5.2 の include/core/Result.h)。AMF_VIDEO_DECODER_CURRENT_SIZE は
@@ -330,15 +331,6 @@ impl<H: DecodeHandler> Decoder<H> {
 
         // 再投入したフレームをワーカーへ登録し、通常ループを再開させる。
         self.worker.register_user_data(frame_id, user_data)?;
-        Ok(())
-    }
-
-    /// ワーカーに Drain と `AMF_EOF` までの出力回収をさせる
-    ///
-    /// ワーカーは入力キューが空くまで Drain を再試行し、`AMF_EOF` まで回収する。
-    fn wait_eof_worker(&mut self) -> Result<(), Error> {
-        self.worker.wait_eof()?;
-        self.drain_required = false;
         Ok(())
     }
 
