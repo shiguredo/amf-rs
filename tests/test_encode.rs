@@ -715,3 +715,72 @@ fn test_encoder_all_rate_control_modes() {
         }
     }
 }
+
+/// 出力の回収を待たずに大量のフレームを投入し、すべてのフレームが出力されることを確認する
+///
+/// `SubmitInput` のリトライ中にワーカーが出力を回収できないと、リトライ上限に
+/// 達して `encode` がエラーになる。フレームを待たずに連続投入しても各 `encode` が
+/// 成功し、投入したすべてのフレームの出力が得られることを確認する。
+#[test]
+fn test_encoder_continuous_submit_outputs_all_frames() {
+    /// 連続投入するフレーム数
+    const NUM_FRAMES: usize = 200;
+
+    let config = h264_cbr_test_encoder_config();
+    let width = config.width as usize;
+    let height = config.height as usize;
+
+    let (tx, rx) = mpsc::channel();
+    let mut encoder = Encoder::new(
+        create_context(),
+        config,
+        FnEncodeHandler::<usize>::new(move |result| {
+            tx.send(result).expect("エンコード結果の送信に失敗");
+        }),
+    )
+    .expect("エンコーダーの作成に失敗");
+
+    // 入力側の処理を軽くして投入の間隔を短くする。Surface の確保をループの
+    // 外に出し、フレームの内容は毎回同じものを使う。
+    let frame = generate_dummy_nv12(width, height, 0);
+    let mut surfaces = Vec::new();
+    for frame_index in 0..NUM_FRAMES {
+        let surface = encoder.alloc_surface().unwrap_or_else(|error| {
+            panic!("フレーム {frame_index} の Surface の確保に失敗: {error}")
+        });
+        surfaces.push(surface);
+    }
+    for (frame_index, surface) in surfaces.into_iter().enumerate() {
+        copy_nv12_to_surface(&surface, &frame, width, height);
+        encoder
+            .encode(surface, EncodeOptions::default(), frame_index)
+            .unwrap_or_else(|error| panic!("フレーム {frame_index} のエンコードに失敗: {error}"));
+    }
+    encoder.finish().expect("finish に失敗");
+    drop(encoder);
+
+    let frames: Vec<_> = rx.try_iter().collect();
+    assert_eq!(
+        frames.len(),
+        NUM_FRAMES,
+        "エンコードされたフレーム数が一致しない"
+    );
+
+    let mut user_data = Vec::new();
+    for (frame_index, result) in frames.into_iter().enumerate() {
+        let frame = result.unwrap_or_else(|error| {
+            panic!("フレーム {frame_index} のエンコード結果がエラーになった: {error}")
+        });
+        assert!(
+            frame.buffer().get_size() > 0,
+            "フレーム {frame_index} のビットストリームが空"
+        );
+        user_data.push(*frame.user_data());
+    }
+    user_data.sort_unstable();
+    assert_eq!(
+        user_data,
+        (0..NUM_FRAMES).collect::<Vec<_>>(),
+        "出力に重複または欠落した user_data がある"
+    );
+}
