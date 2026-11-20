@@ -74,6 +74,7 @@ mod dl;
 mod encode;
 mod error;
 mod query_output;
+mod stats;
 mod sys;
 mod types;
 mod worker;
@@ -102,10 +103,12 @@ pub use encode::{
 pub use error::{
     AmfError, EnvironmentError, Error, InternalError, InvalidArgumentError, InvalidStateError,
 };
+pub use stats::{Counter, Gauge};
 pub use types::{
     Av1Profile, DataType, FrameFormat, H264Profile, HevcProfile, MemoryType, PlaneType,
     SurfaceFormat,
 };
+pub use worker::{DecoderStats, EncoderStats};
 
 /// ビルド時の AMF バージョン文字列
 pub const BUILD_VERSION: &str = sys::BUILD_METADATA_VERSION;

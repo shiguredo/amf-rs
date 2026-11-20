@@ -2,7 +2,7 @@
 //!
 //! このファイルのテストは実 GPU と AMF ランタイムを必要とする。
 
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, mpsc};
 use std::time::{Duration, Instant};
 
 use shiguredo_amf::amf::{Context, Surface};
@@ -1011,5 +1011,176 @@ fn test_decoder_continuous_submit_outputs_all_frames() {
         user_data,
         (0..NUM_FRAMES).collect::<Vec<_>>(),
         "出力に重複または欠落した user_data がある"
+    );
+}
+
+/// 統計値が投入数と出力数に一致し、finish 後に in-flight が 0 になることを確認する
+#[test]
+fn test_decoder_stats_counts() {
+    /// 投入するアクセスユニット数
+    const NUM_FRAMES: usize = 10;
+
+    let width = 320;
+    let height = 240;
+    let access_units = encode_h264_stream(&create_context(), width, height, NUM_FRAMES);
+    assert_eq!(
+        access_units.len(),
+        NUM_FRAMES,
+        "テスト用ストリームのアクセスユニット数が一致しない"
+    );
+
+    let (tx, rx) = mpsc::channel();
+    let mut decoder = Decoder::new(
+        create_context(),
+        DecoderConfig {
+            codec: DecoderCodec::H264,
+        },
+        FnDecodeHandler::<usize>::new(move |result| {
+            tx.send(result).expect("デコード結果の送信に失敗");
+        }),
+    )
+    .expect("デコーダーの作成に失敗");
+
+    // 作成直後はどの統計値も 0 である。
+    assert_eq!(
+        decoder.stats().total_decode_count.get(),
+        0,
+        "作成直後の total_decode_count が 0 ではない"
+    );
+    assert_eq!(
+        decoder.stats().total_output_frame_count.get(),
+        0,
+        "作成直後の total_output_frame_count が 0 ではない"
+    );
+    assert_eq!(
+        decoder.stats().total_error_count.get(),
+        0,
+        "作成直後の total_error_count が 0 ではない"
+    );
+    assert_eq!(
+        decoder.stats().in_flight_frames.get(),
+        0,
+        "作成直後の in_flight_frames が 0 ではない"
+    );
+
+    for (index, access_unit) in access_units.iter().enumerate() {
+        let mut buffer = decoder
+            .alloc_buffer(access_unit.len())
+            .unwrap_or_else(|error| {
+                panic!("アクセスユニット {index} の Buffer の確保に失敗: {error}")
+            });
+        let buffer_data = unsafe { buffer.as_mut_slice() }.expect("Buffer のスライス取得に失敗");
+        buffer_data[..access_unit.len()].copy_from_slice(access_unit);
+        decoder
+            .decode(buffer, index)
+            .unwrap_or_else(|error| panic!("アクセスユニット {index} の投入に失敗: {error}"));
+    }
+
+    // decode が成功した時点で、投入したフレームが計上される。
+    assert_eq!(
+        decoder.stats().total_decode_count.get(),
+        NUM_FRAMES as u64,
+        "投入後の total_decode_count が投入数と一致しない"
+    );
+
+    decoder.finish().expect("finish に失敗");
+
+    // finish の完了時点で、受理したすべてのフレームの結果が通知されている。
+    assert_eq!(
+        decoder.stats().in_flight_frames.get(),
+        0,
+        "finish 後の in_flight_frames が 0 ではない"
+    );
+    assert_eq!(
+        decoder.stats().total_decode_count.get(),
+        NUM_FRAMES as u64,
+        "finish 後の total_decode_count が投入数と一致しない"
+    );
+    assert_eq!(
+        decoder.stats().total_output_frame_count.get(),
+        NUM_FRAMES as u64,
+        "finish 後の total_output_frame_count が投入数と一致しない"
+    );
+    assert_eq!(
+        decoder.stats().total_error_count.get(),
+        0,
+        "finish 後の total_error_count が 0 ではない"
+    );
+
+    let results: Vec<_> = rx.try_iter().collect();
+    assert_eq!(
+        results.len(),
+        NUM_FRAMES,
+        "デコードされたフレーム数が一致しない"
+    );
+    for (index, result) in results.into_iter().enumerate() {
+        result
+            .unwrap_or_else(|error| panic!("出力 {index} のデコード結果がエラーになった: {error}"));
+    }
+}
+
+/// 出力が得られなかった入力のエラーが total_error_count に計上されることを確認する
+#[test]
+fn test_decoder_stats_counts_errors() {
+    let access_units = split_access_units(H264_BFRAME_STREAM, is_h264_vcl);
+    let parameter_sets = without_vcl_nals(&access_units[0], is_h264_vcl);
+    assert!(
+        !parameter_sets.is_empty(),
+        "先頭のアクセスユニットから SPS/PPS を取得できない"
+    );
+
+    let (tx, rx) = mpsc::channel();
+    let mut decoder = Decoder::new(
+        create_context(),
+        DecoderConfig {
+            codec: DecoderCodec::H264,
+        },
+        FnDecodeHandler::<usize>::new(move |result| {
+            tx.send(result).expect("デコード結果の送信に失敗");
+        }),
+    )
+    .expect("デコーダーの作成に失敗");
+
+    let mut buffer = decoder
+        .alloc_buffer(parameter_sets.len())
+        .expect("Buffer の確保に失敗");
+    unsafe { buffer.as_mut_slice() }
+        .expect("Buffer のスライス取得に失敗")
+        .copy_from_slice(&parameter_sets);
+    decoder.decode(buffer, 0).expect("SPS/PPS だけの投入に失敗");
+
+    decoder.finish().expect("finish に失敗");
+
+    // 出力のない入力は、finish の処理中にエラーとして通知される。
+    assert_eq!(
+        decoder.stats().in_flight_frames.get(),
+        0,
+        "finish 後の in_flight_frames が 0 ではない"
+    );
+    assert_eq!(
+        decoder.stats().total_decode_count.get(),
+        1,
+        "total_decode_count が投入数と一致しない"
+    );
+    assert_eq!(
+        decoder.stats().total_output_frame_count.get(),
+        0,
+        "出力のない入力が total_output_frame_count に計上された"
+    );
+    assert_eq!(
+        decoder.stats().total_error_count.get(),
+        1,
+        "エラー通知が total_error_count に計上されていない"
+    );
+
+    let results: Vec<_> = rx.try_iter().collect();
+    assert_eq!(results.len(), 1, "未対応入力のエラーが 1 件ではない");
+    assert!(
+        results
+            .into_iter()
+            .next()
+            .expect("結果が存在しない")
+            .is_err(),
+        "出力のない入力が成功として通知された"
     );
 }

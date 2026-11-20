@@ -3,12 +3,14 @@
 //! AMD GPU を使ったハードウェアビデオエンコードを提供する。
 //! H.264/AVC、H.265/HEVC、AV1 コーデックに対応する。
 
+use std::sync::Arc;
+
 use crate::AmfLibrary;
 use crate::amf::{Buffer, Component, Context, PropertyStorage, Surface};
 use crate::error::{AmfError, Error, InternalError, InvalidArgumentError, InvalidStateError};
 use crate::sys::{self, AMF_RESULT, amf_int32, amf_int64};
 use crate::types::{Av1Profile, FrameFormat, H264Profile, HevcProfile, MemoryType, SurfaceFormat};
-use crate::worker::{Worker, WorkerConfig};
+use crate::worker::{EncoderStats, Worker, WorkerConfig, WorkerStats};
 
 // ---------------------------------------------------------------------------
 // 公開型
@@ -482,6 +484,10 @@ pub struct Encoder<H: EncodeHandler> {
     codec_config: CodecConfig,
     /// ワーカースレッドの制御
     worker: Worker<H::UserData>,
+    /// 統計値
+    ///
+    /// ワーカースレッドと共有し、エンコード処理の進行に伴って更新する。
+    stats: Arc<EncoderStats>,
     /// AMF が入力を受け付けており、終了時に Drain が必要か
     drain_required: bool,
 }
@@ -597,28 +603,43 @@ impl<H: EncodeHandler> Encoder<H> {
 
         let codec_config = config.codec;
 
+        // 統計値はワーカースレッドと共有する。
+        let stats = Arc::new(EncoderStats::default());
+
         // ワーカースレッドを起動する
         let worker_codec_config = codec_config.clone();
+        let deliver_stats = Arc::clone(&stats);
+        let worker_stats = WorkerStats::Encoder(Arc::clone(&stats));
         let worker = Worker::spawn(
             component.clone(),
             WorkerConfig {
                 role: "encoder",
                 deliver: Box::new(move |result| {
-                    handler.on_encoded(
-                        result
-                            .and_then(|(data, user_data)| {
-                                let buffer = data.to_buffer()?;
-                                let (buffer, picture_type) =
-                                    validate_encoded_output(buffer, &worker_codec_config)?;
-                                Ok(EncodedFrame {
-                                    buffer,
-                                    picture_type,
-                                    user_data,
-                                })
+                    let result: Result<EncodedFrame<H::UserData>, H::Error> = result
+                        .and_then(|(data, user_data)| {
+                            let buffer = data.to_buffer()?;
+                            let (buffer, picture_type) =
+                                validate_encoded_output(buffer, &worker_codec_config)?;
+                            Ok(EncodedFrame {
+                                buffer,
+                                picture_type,
+                                user_data,
                             })
-                            .map_err(Into::into),
-                    );
+                        })
+                        .map_err(Into::into);
+                    match &result {
+                        Ok(frame) => {
+                            deliver_stats.total_output_frame_count.inc();
+                            // バッファのサイズはバイト単位なので、ビット数に換算する。
+                            deliver_stats
+                                .total_output_bit_count
+                                .add(frame.buffer().get_size() as u64 * 8);
+                        }
+                        Err(_) => deliver_stats.total_error_count.inc(),
+                    }
+                    handler.on_encoded(result);
                 }),
+                stats: worker_stats,
             },
         )?;
 
@@ -630,6 +651,7 @@ impl<H: EncodeHandler> Encoder<H> {
             height: config.height as i32,
             codec_config,
             worker,
+            stats,
             drain_required: false,
         })
     }
@@ -718,6 +740,7 @@ impl<H: EncodeHandler> Encoder<H> {
             }
         }
 
+        self.stats.total_reconfigure_count.inc();
         Ok(())
     }
 
@@ -1045,6 +1068,14 @@ impl<H: EncodeHandler> Encoder<H> {
         self.context.clone()
     }
 
+    /// エンコーダーの統計値を取得する
+    ///
+    /// 値はエンコード処理の進行に伴って更新される。各フィールドの意味は
+    /// [`EncoderStats`] を参照すること。
+    pub fn stats(&self) -> &EncoderStats {
+        &self.stats
+    }
+
     /// エンコード用の Surface を確保する
     ///
     /// 確保された Surface は呼び出し元がフレームデータを書き込んでから
@@ -1124,8 +1155,16 @@ impl<H: EncodeHandler> Encoder<H> {
         // AMF が入力を受け付けたため、終了時には Drain が必要になる。
         self.drain_required = true;
 
-        // ワーカースレッドに user_data の登録コマンドを送信する
-        self.worker.register_user_data(frame_id, user_data)?;
+        // ワーカースレッドに user_data の登録コマンドを送信する。
+        // ワーカーは登録を処理した直後に対応する出力を通知し得るため、登録より
+        // 先に in-flight を計上する。登録に失敗した場合はこのフレームの出力が
+        // 通知されないため、計上を取り消す。
+        self.stats.in_flight_frames.inc();
+        if let Err(error) = self.worker.register_user_data(frame_id, user_data) {
+            self.stats.in_flight_frames.dec();
+            return Err(error);
+        }
+        self.stats.total_encode_count.inc();
 
         Ok(())
     }

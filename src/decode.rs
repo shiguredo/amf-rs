@@ -3,12 +3,14 @@
 //! AMD GPU を使ったハードウェアビデオデコードを提供する。
 //! H.264/AVC、H.265/HEVC、AV1 コーデックに対応する。
 
+use std::sync::Arc;
+
 use crate::AmfLibrary;
 use crate::amf::{Buffer, Component, Context, Data, Surface};
 use crate::error::{AmfError, Error, InvalidArgumentError, InvalidStateError};
 use crate::sys::{self, AMF_RESULT};
 use crate::types::{FrameFormat, MemoryType, SurfaceFormat};
-use crate::worker::{Worker, WorkerConfig};
+use crate::worker::{DecoderStats, Worker, WorkerConfig, WorkerStats};
 
 // ---------------------------------------------------------------------------
 // 公開型
@@ -122,6 +124,10 @@ pub struct Decoder<H: DecodeHandler> {
     context: Context,
     /// ワーカースレッドの制御
     worker: Worker<H::UserData>,
+    /// 統計値
+    ///
+    /// ワーカースレッドと共有し、デコード処理の進行に伴って更新する。
+    stats: Arc<DecoderStats>,
     /// AMF が入力を処理していて Drain が必要か
     ///
     /// `SubmitInput` が入力を受理した後、または複数フレームの一部を処理した後に
@@ -158,21 +164,30 @@ impl<H: DecodeHandler> Decoder<H> {
         let result = component.init(SurfaceFormat::from(FrameFormat::Nv12), 0, 0);
         AmfError::check(result, "AMFComponent::Init")?;
 
+        // 統計値はワーカースレッドと共有する。
+        let stats = Arc::new(DecoderStats::default());
+
+        let deliver_stats = Arc::clone(&stats);
+        let worker_stats = WorkerStats::Decoder(Arc::clone(&stats));
         let worker = Worker::spawn(
             component.clone(),
             WorkerConfig {
                 role: "decoder",
                 deliver: Box::new(move |result| {
-                    handler.on_decoded(
-                        result
-                            .and_then(|(data, user_data)| {
-                                let surface = data.to_surface()?;
-                                surface.convert(MemoryType::Host)?;
-                                Ok(DecodedFrame { surface, user_data })
-                            })
-                            .map_err(Into::into),
-                    );
+                    let result: Result<DecodedFrame<H::UserData>, H::Error> = result
+                        .and_then(|(data, user_data)| {
+                            let surface = data.to_surface()?;
+                            surface.convert(MemoryType::Host)?;
+                            Ok(DecodedFrame { surface, user_data })
+                        })
+                        .map_err(Into::into);
+                    match &result {
+                        Ok(_) => deliver_stats.total_output_frame_count.inc(),
+                        Err(_) => deliver_stats.total_error_count.inc(),
+                    }
+                    handler.on_decoded(result);
                 }),
+                stats: worker_stats,
             },
         )?;
 
@@ -180,6 +195,7 @@ impl<H: DecodeHandler> Decoder<H> {
             component,
             context,
             worker,
+            stats,
             drain_required: false,
             initialized: true,
         })
@@ -188,6 +204,14 @@ impl<H: DecodeHandler> Decoder<H> {
     /// このデコーダーが使用する `Context` を返す
     pub fn context(&self) -> Context {
         self.context.clone()
+    }
+
+    /// デコーダーの統計値を取得する
+    ///
+    /// 値はデコード処理の進行に伴って更新される。各フィールドの意味は
+    /// [`DecoderStats`] を参照すること。
+    pub fn stats(&self) -> &DecoderStats {
+        &self.stats
     }
 
     /// デコード用のバッファを確保する
@@ -248,8 +272,7 @@ impl<H: DecodeHandler> Decoder<H> {
             AMF_RESULT::AMF_OK | AMF_RESULT::AMF_NEED_MORE_INPUT => {
                 // AMF が入力を処理したため、終了時には Drain が必要になる。
                 self.drain_required = true;
-                // frame ID に対応するユーザーデータをワーカーに登録する
-                self.worker.register_user_data(frame_id, user_data)?;
+                self.register_accepted_input(frame_id, user_data)?;
                 Ok(())
             }
             AMF_RESULT::AMF_RESOLUTION_CHANGED => {
@@ -330,7 +353,29 @@ impl<H: DecodeHandler> Decoder<H> {
         }
 
         // 再投入したフレームをワーカーへ登録し、通常ループを再開させる。
-        self.worker.register_user_data(frame_id, user_data)?;
+        self.register_accepted_input(frame_id, user_data)?;
+        Ok(())
+    }
+
+    /// 受理したフレームをワーカーへ登録し、統計値を更新する
+    ///
+    /// # Errors
+    ///
+    /// ワーカーが停止している場合にエラーを返す。この場合、統計値は更新しない。
+    fn register_accepted_input(
+        &mut self,
+        frame_id: i64,
+        user_data: H::UserData,
+    ) -> Result<(), Error> {
+        // ワーカーは登録を処理した直後に対応する出力を通知し得るため、登録より
+        // 先に in-flight を計上する。登録に失敗した場合はこのフレームの出力が
+        // 通知されないため、計上を取り消す。
+        self.stats.in_flight_frames.inc();
+        if let Err(error) = self.worker.register_user_data(frame_id, user_data) {
+            self.stats.in_flight_frames.dec();
+            return Err(error);
+        }
+        self.stats.total_decode_count.inc();
         Ok(())
     }
 

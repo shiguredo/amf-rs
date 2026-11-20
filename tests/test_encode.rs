@@ -784,3 +784,137 @@ fn test_encoder_continuous_submit_outputs_all_frames() {
         "出力に重複または欠落した user_data がある"
     );
 }
+
+/// 統計値が投入数、出力数、出力ビット数、再設定回数と一致することを確認する
+#[test]
+fn test_encoder_stats_counts() {
+    /// 投入するフレーム数
+    const NUM_FRAMES: usize = 10;
+
+    let config = h264_cbr_test_encoder_config();
+    let width = config.width as usize;
+    let height = config.height as usize;
+
+    let (tx, rx) = mpsc::channel();
+    let mut encoder = Encoder::new(
+        create_context(),
+        config,
+        FnEncodeHandler::<usize>::new(move |result| {
+            tx.send(result).expect("エンコード結果の送信に失敗");
+        }),
+    )
+    .expect("エンコーダーの作成に失敗");
+
+    // 作成直後はどの統計値も 0 である。
+    assert_eq!(
+        encoder.stats().total_encode_count.get(),
+        0,
+        "作成直後の total_encode_count が 0 ではない"
+    );
+    assert_eq!(
+        encoder.stats().total_output_frame_count.get(),
+        0,
+        "作成直後の total_output_frame_count が 0 ではない"
+    );
+    assert_eq!(
+        encoder.stats().total_error_count.get(),
+        0,
+        "作成直後の total_error_count が 0 ではない"
+    );
+    assert_eq!(
+        encoder.stats().total_output_bit_count.get(),
+        0,
+        "作成直後の total_output_bit_count が 0 ではない"
+    );
+    assert_eq!(
+        encoder.stats().total_reconfigure_count.get(),
+        0,
+        "作成直後の total_reconfigure_count が 0 ではない"
+    );
+    assert_eq!(
+        encoder.stats().in_flight_frames.get(),
+        0,
+        "作成直後の in_flight_frames が 0 ではない"
+    );
+
+    // 動的プロパティの再設定に成功した回数が計上されることを確認する。
+    encoder
+        .reconfigure(ReconfigureParams {
+            target_kbps: Some(800),
+            ..ReconfigureParams::default()
+        })
+        .expect("reconfigure に失敗");
+    assert_eq!(
+        encoder.stats().total_reconfigure_count.get(),
+        1,
+        "reconfigure 成功後の total_reconfigure_count が 1 ではない"
+    );
+
+    let frame = generate_dummy_nv12(width, height, 0);
+    for frame_index in 0..NUM_FRAMES {
+        let surface = encoder.alloc_surface().unwrap_or_else(|error| {
+            panic!("フレーム {frame_index} の Surface の確保に失敗: {error}")
+        });
+        copy_nv12_to_surface(&surface, &frame, width, height);
+        encoder
+            .encode(surface, EncodeOptions::default(), frame_index)
+            .unwrap_or_else(|error| panic!("フレーム {frame_index} のエンコードに失敗: {error}"));
+    }
+
+    // encode が成功した時点で、投入したフレームが計上される。
+    assert_eq!(
+        encoder.stats().total_encode_count.get(),
+        NUM_FRAMES as u64,
+        "投入後の total_encode_count が投入数と一致しない"
+    );
+
+    encoder.finish().expect("finish に失敗");
+
+    // finish の完了時点で、受理したすべてのフレームの結果が通知されている。
+    assert_eq!(
+        encoder.stats().in_flight_frames.get(),
+        0,
+        "finish 後の in_flight_frames が 0 ではない"
+    );
+    assert_eq!(
+        encoder.stats().total_encode_count.get(),
+        NUM_FRAMES as u64,
+        "finish 後の total_encode_count が投入数と一致しない"
+    );
+    assert_eq!(
+        encoder.stats().total_output_frame_count.get(),
+        NUM_FRAMES as u64,
+        "finish 後の total_output_frame_count が投入数と一致しない"
+    );
+    assert_eq!(
+        encoder.stats().total_error_count.get(),
+        0,
+        "finish 後の total_error_count が 0 ではない"
+    );
+    assert_eq!(
+        encoder.stats().total_reconfigure_count.get(),
+        1,
+        "finish 後の total_reconfigure_count が 1 ではない"
+    );
+
+    let frames: Vec<_> = rx.try_iter().collect();
+    assert_eq!(
+        frames.len(),
+        NUM_FRAMES,
+        "エンコードされたフレーム数が一致しない"
+    );
+    let mut total_bytes = 0;
+    for (frame_index, result) in frames.iter().enumerate() {
+        let frame = result.as_ref().unwrap_or_else(|error| {
+            panic!("フレーム {frame_index} のエンコード結果がエラーになった: {error}")
+        });
+        total_bytes += frame.buffer().get_size() as u64;
+    }
+
+    // total_output_bit_count は出力バッファのバイト数をビット数に換算した値になる。
+    assert_eq!(
+        encoder.stats().total_output_bit_count.get(),
+        total_bytes * 8,
+        "total_output_bit_count が出力バッファのビット数と一致しない"
+    );
+}
