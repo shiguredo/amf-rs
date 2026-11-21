@@ -6,8 +6,8 @@ use shiguredo_amf::ffi::AMF_RESULT;
 use shiguredo_amf::{
     AmfError, Av1EncoderConfig, Av1Profile, CodecConfig, EncodeHandler, EncodeOptions,
     EncodedFrame, Encoder, EncoderConfig, Error, FnEncodeHandler, FrameFormat, H264EncoderConfig,
-    H264Profile, HevcEncoderConfig, HevcProfile, PlaneType, RateControlMode, ReconfigureParams,
-    VideoCodecType, supported_codecs,
+    H264Profile, HevcEncoderConfig, HevcProfile, PictureType, PlaneType, RateControlMode,
+    ReconfigureParams, VideoCodecType, supported_codecs,
 };
 
 pub mod helpers;
@@ -160,6 +160,16 @@ fn test_encode_after_finish_is_rejected() {
         matches!(&error, Error::InvalidState(_)),
         "Encoder::encode の状態エラーであるべき: {error}"
     );
+    assert_eq!(
+        encoder.stats().total_encode_count.get(),
+        0,
+        "finish 後の encode 拒否で total_encode_count が増えた"
+    );
+    assert_eq!(
+        encoder.stats().in_flight_frames.get(),
+        0,
+        "finish 後の encode 拒否で in_flight_frames が 0 ではない"
+    );
 }
 
 /// finish 後に reconfigure を呼ぶと、AMF を呼ばずにエラーになることを確認する
@@ -181,6 +191,69 @@ fn test_reconfigure_after_finish_is_rejected() {
     assert!(
         matches!(&error, Error::InvalidState(_)),
         "Encoder::reconfigure の状態エラーであるべき: {error}"
+    );
+    assert_eq!(
+        encoder.stats().total_reconfigure_count.get(),
+        0,
+        "finish 後の reconfigure 拒否で total_reconfigure_count が増えた"
+    );
+}
+
+/// 受理済みで結果がまだ通知されていないフレーム数が in_flight_frames に反映されることを確認する
+#[test]
+fn test_encoder_stats_in_flight_frames() {
+    let (first_seen_tx, first_seen_rx) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::channel();
+
+    let mut encoder = Encoder::new(
+        create_context(),
+        h264_cbr_test_encoder_config(),
+        BlockingDropEncodeHandler {
+            first_seen_tx,
+            release_rx,
+            notified: Arc::new(Mutex::new(Vec::new())),
+            blocked: false,
+        },
+    )
+    .expect("エンコーダーの作成に失敗");
+
+    let frame_data = generate_dummy_nv12(320, 240, 0);
+    let surface = encoder.alloc_surface().expect("Surface の確保に失敗");
+    copy_nv12_to_surface(&surface, &frame_data, 320, 240);
+    encoder
+        .encode(surface, EncodeOptions::default(), 0)
+        .expect("1 つ目のフレームのエンコードに失敗");
+
+    first_seen_rx
+        .recv_timeout(Duration::from_secs(5))
+        .expect("最初の通知が届かなかった");
+
+    // 1 フレーム目はハンドラー呼び出しの前に in-flight から外れている。
+    assert_eq!(
+        encoder.stats().in_flight_frames.get(),
+        0,
+        "最初の通知後の in_flight_frames が 0 ではない"
+    );
+
+    let surface = encoder.alloc_surface().expect("Surface の確保に失敗");
+    copy_nv12_to_surface(&surface, &frame_data, 320, 240);
+    encoder
+        .encode(surface, EncodeOptions::default(), 1)
+        .expect("2 つ目のフレームのエンコードに失敗");
+
+    // ワーカーは最初の通知の処理中なので、2 フレーム目はまだ通知されていない。
+    assert_eq!(
+        encoder.stats().in_flight_frames.get(),
+        1,
+        "2 つ目のフレーム投入後の in_flight_frames が 1 ではない"
+    );
+
+    release_tx.send(()).expect("解放の送信に失敗");
+    encoder.finish().expect("finish に失敗");
+    assert_eq!(
+        encoder.stats().in_flight_frames.get(),
+        0,
+        "finish 後の in_flight_frames が 0 ではない"
     );
 }
 
@@ -515,6 +588,43 @@ fn test_reconfigure_rejects_incomplete_framerate() {
         error.to_string().contains("must be set together"),
         "エラーメッセージが想定と異なる: {error}"
     );
+    assert_eq!(
+        encoder.stats().total_reconfigure_count.get(),
+        0,
+        "reconfigure の失敗で total_reconfigure_count が増えた"
+    );
+    encoder.finish().expect("finish に失敗");
+}
+
+/// Encoder::reconfigure が更新対象のない no-op を成功として扱い、
+/// total_reconfigure_count には計上しないことを確認する
+#[test]
+fn test_reconfigure_noop_is_not_counted() {
+    let mut encoder =
+        create_encoder(h264_cbr_test_encoder_config()).expect("エンコーダーの作成に失敗");
+
+    encoder
+        .reconfigure(ReconfigureParams::default())
+        .expect("no-op reconfigure に失敗");
+    assert_eq!(
+        encoder.stats().total_reconfigure_count.get(),
+        0,
+        "no-op reconfigure が total_reconfigure_count に計上された"
+    );
+
+    // 更新対象がある reconfigure は従来どおり計上する。
+    encoder
+        .reconfigure(ReconfigureParams {
+            target_kbps: Some(2000),
+            ..ReconfigureParams::default()
+        })
+        .expect("target_kbps の reconfigure に失敗");
+    assert_eq!(
+        encoder.stats().total_reconfigure_count.get(),
+        1,
+        "更新対象がある reconfigure が total_reconfigure_count に計上されていない"
+    );
+
     encoder.finish().expect("finish に失敗");
 }
 
@@ -740,71 +850,6 @@ fn test_encoder_continuous_submit_outputs_all_frames() {
     )
     .expect("エンコーダーの作成に失敗");
 
-    // 入力側の処理を軽くして投入の間隔を短くする。Surface の確保をループの
-    // 外に出し、フレームの内容は毎回同じものを使う。
-    let frame = generate_dummy_nv12(width, height, 0);
-    let mut surfaces = Vec::new();
-    for frame_index in 0..NUM_FRAMES {
-        let surface = encoder.alloc_surface().unwrap_or_else(|error| {
-            panic!("フレーム {frame_index} の Surface の確保に失敗: {error}")
-        });
-        surfaces.push(surface);
-    }
-    for (frame_index, surface) in surfaces.into_iter().enumerate() {
-        copy_nv12_to_surface(&surface, &frame, width, height);
-        encoder
-            .encode(surface, EncodeOptions::default(), frame_index)
-            .unwrap_or_else(|error| panic!("フレーム {frame_index} のエンコードに失敗: {error}"));
-    }
-    encoder.finish().expect("finish に失敗");
-    drop(encoder);
-
-    let frames: Vec<_> = rx.try_iter().collect();
-    assert_eq!(
-        frames.len(),
-        NUM_FRAMES,
-        "エンコードされたフレーム数が一致しない"
-    );
-
-    let mut user_data = Vec::new();
-    for (frame_index, result) in frames.into_iter().enumerate() {
-        let frame = result.unwrap_or_else(|error| {
-            panic!("フレーム {frame_index} のエンコード結果がエラーになった: {error}")
-        });
-        assert!(
-            frame.buffer().get_size() > 0,
-            "フレーム {frame_index} のビットストリームが空"
-        );
-        user_data.push(*frame.user_data());
-    }
-    user_data.sort_unstable();
-    assert_eq!(
-        user_data,
-        (0..NUM_FRAMES).collect::<Vec<_>>(),
-        "出力に重複または欠落した user_data がある"
-    );
-}
-
-/// 統計値が投入数、出力数、出力ビット数、再設定回数と一致することを確認する
-#[test]
-fn test_encoder_stats_counts() {
-    /// 投入するフレーム数
-    const NUM_FRAMES: usize = 10;
-
-    let config = h264_cbr_test_encoder_config();
-    let width = config.width as usize;
-    let height = config.height as usize;
-
-    let (tx, rx) = mpsc::channel();
-    let mut encoder = Encoder::new(
-        create_context(),
-        config,
-        FnEncodeHandler::<usize>::new(move |result| {
-            tx.send(result).expect("エンコード結果の送信に失敗");
-        }),
-    )
-    .expect("エンコーダーの作成に失敗");
-
     // 作成直後はどの統計値も 0 である。
     assert_eq!(
         encoder.stats().total_encode_count.get(),
@@ -837,21 +882,146 @@ fn test_encoder_stats_counts() {
         "作成直後の in_flight_frames が 0 ではない"
     );
 
-    // 動的プロパティの再設定に成功した回数が計上されることを確認する。
+    // 再設定を 2 回成功させ、通算回数が 2 になることを確認する。
     encoder
         .reconfigure(ReconfigureParams {
             target_kbps: Some(800),
             ..ReconfigureParams::default()
         })
-        .expect("reconfigure に失敗");
+        .expect("1 回目の reconfigure に失敗");
+
+    // 入力側の処理を軽くして投入の間隔を短くする。Surface の確保をループの
+    // 外に出し、フレームの内容は毎回同じものを使う。
+    let frame = generate_dummy_nv12(width, height, 0);
+    let mut surfaces = Vec::new();
+    for frame_index in 0..NUM_FRAMES {
+        let surface = encoder.alloc_surface().unwrap_or_else(|error| {
+            panic!("フレーム {frame_index} の Surface の確保に失敗: {error}")
+        });
+        surfaces.push(surface);
+    }
+    for (frame_index, surface) in surfaces.into_iter().enumerate() {
+        copy_nv12_to_surface(&surface, &frame, width, height);
+        encoder
+            .encode(surface, EncodeOptions::default(), frame_index)
+            .unwrap_or_else(|error| panic!("フレーム {frame_index} のエンコードに失敗: {error}"));
+    }
+    encoder
+        .reconfigure(ReconfigureParams {
+            target_kbps: Some(900),
+            ..ReconfigureParams::default()
+        })
+        .expect("2 回目の reconfigure に失敗");
+    encoder.finish().expect("finish に失敗");
+
+    let frames: Vec<_> = rx.try_iter().collect();
     assert_eq!(
-        encoder.stats().total_reconfigure_count.get(),
-        1,
-        "reconfigure 成功後の total_reconfigure_count が 1 ではない"
+        frames.len(),
+        NUM_FRAMES,
+        "エンコードされたフレーム数が一致しない"
     );
+    let total_bytes: u64 = frames
+        .iter()
+        .map(|result| {
+            result
+                .as_ref()
+                .expect("エンコード結果がエラーになった")
+                .buffer()
+                .get_size() as u64
+        })
+        .sum();
+    {
+        let stats = encoder.stats();
+        assert_eq!(
+            stats.total_encode_count.get(),
+            NUM_FRAMES as u64,
+            "total_encode_count が投入数と一致しない"
+        );
+        assert_eq!(
+            stats.total_output_frame_count.get(),
+            NUM_FRAMES as u64,
+            "total_output_frame_count が投入数と一致しない"
+        );
+        assert_eq!(
+            stats.total_error_count.get(),
+            0,
+            "total_error_count が 0 ではない"
+        );
+        assert_eq!(
+            stats.total_output_bit_count.get(),
+            total_bytes * 8,
+            "total_output_bit_count が出力バッファのビット数と一致しない"
+        );
+        assert_eq!(
+            stats.total_reconfigure_count.get(),
+            2,
+            "total_reconfigure_count が 2 ではない"
+        );
+        assert_eq!(
+            stats.in_flight_frames.get(),
+            0,
+            "finish 後の in_flight_frames が 0 ではない"
+        );
+    }
+    drop(encoder);
+
+    let mut user_data = Vec::new();
+    for (frame_index, result) in frames.into_iter().enumerate() {
+        let frame = result.unwrap_or_else(|error| {
+            panic!("フレーム {frame_index} のエンコード結果がエラーになった: {error}")
+        });
+        assert!(
+            frame.buffer().get_size() > 0,
+            "フレーム {frame_index} のビットストリームが空"
+        );
+        user_data.push(*frame.user_data());
+    }
+    user_data.sort_unstable();
+    assert_eq!(
+        user_data,
+        (0..NUM_FRAMES).collect::<Vec<_>>(),
+        "出力に重複または欠落した user_data がある"
+    );
+}
+
+/// H.264 の B フレームを有効にした場合も、AMF_NEED_MORE_INPUT を含む入力が
+/// 受理数として計上され、finish 後に統計値が一致することを確認する
+///
+/// B フレームに対応していない GPU ではテストをスキップする。
+#[test]
+fn test_encoder_stats_with_b_frames() {
+    let supports_b_frames = supported_codecs()
+        .expect("コーデック対応状況の取得に失敗")
+        .into_iter()
+        .find(|info| info.codec == VideoCodecType::H264)
+        .and_then(|info| info.encoding)
+        .and_then(|encoding| encoding.supports_frame_reordering)
+        .unwrap_or(false);
+    if !supports_b_frames {
+        eprintln!("H.264 の B フレームに対応していないためテストをスキップする");
+        return;
+    }
+
+    let mut config = h264_cbr_test_encoder_config();
+    config.gop_pic_size = Some(30);
+    // 1 GOP に 2 枚の B フレームを含める
+    config.b_pic_pattern = Some(2);
+    let width = config.width as usize;
+    let height = config.height as usize;
+    let num_frames = 20;
+
+    let (tx, rx) = mpsc::channel();
+    let mut encoder = Encoder::new(
+        create_context(),
+        config,
+        FnEncodeHandler::<usize>::new(move |result| {
+            tx.send(result).expect("エンコード結果の送信に失敗");
+        }),
+    )
+    .expect("エンコーダーの作成に失敗");
 
     let frame = generate_dummy_nv12(width, height, 0);
-    for frame_index in 0..NUM_FRAMES {
+    for frame_index in 0..num_frames {
         let surface = encoder.alloc_surface().unwrap_or_else(|error| {
             panic!("フレーム {frame_index} の Surface の確保に失敗: {error}")
         });
@@ -860,61 +1030,59 @@ fn test_encoder_stats_counts() {
             .encode(surface, EncodeOptions::default(), frame_index)
             .unwrap_or_else(|error| panic!("フレーム {frame_index} のエンコードに失敗: {error}"));
     }
-
-    // encode が成功した時点で、投入したフレームが計上される。
-    assert_eq!(
-        encoder.stats().total_encode_count.get(),
-        NUM_FRAMES as u64,
-        "投入後の total_encode_count が投入数と一致しない"
-    );
-
     encoder.finish().expect("finish に失敗");
-
-    // finish の完了時点で、受理したすべてのフレームの結果が通知されている。
-    assert_eq!(
-        encoder.stats().in_flight_frames.get(),
-        0,
-        "finish 後の in_flight_frames が 0 ではない"
-    );
-    assert_eq!(
-        encoder.stats().total_encode_count.get(),
-        NUM_FRAMES as u64,
-        "finish 後の total_encode_count が投入数と一致しない"
-    );
-    assert_eq!(
-        encoder.stats().total_output_frame_count.get(),
-        NUM_FRAMES as u64,
-        "finish 後の total_output_frame_count が投入数と一致しない"
-    );
-    assert_eq!(
-        encoder.stats().total_error_count.get(),
-        0,
-        "finish 後の total_error_count が 0 ではない"
-    );
-    assert_eq!(
-        encoder.stats().total_reconfigure_count.get(),
-        1,
-        "finish 後の total_reconfigure_count が 1 ではない"
-    );
 
     let frames: Vec<_> = rx.try_iter().collect();
     assert_eq!(
         frames.len(),
-        NUM_FRAMES,
+        num_frames,
         "エンコードされたフレーム数が一致しない"
     );
-    let mut total_bytes = 0;
-    for (frame_index, result) in frames.iter().enumerate() {
-        let frame = result.as_ref().unwrap_or_else(|error| {
-            panic!("フレーム {frame_index} のエンコード結果がエラーになった: {error}")
-        });
-        total_bytes += frame.buffer().get_size() as u64;
-    }
+    assert!(
+        frames.iter().any(|result| {
+            result
+                .as_ref()
+                .expect("エンコード結果がエラーになった")
+                .picture_type()
+                == PictureType::B
+        }),
+        "B フレームが 1 枚も出力されていない"
+    );
 
-    // total_output_bit_count は出力バッファのバイト数をビット数に換算した値になる。
+    let total_bytes: u64 = frames
+        .iter()
+        .map(|result| {
+            result
+                .as_ref()
+                .expect("エンコード結果がエラーになった")
+                .buffer()
+                .get_size() as u64
+        })
+        .sum();
+    let stats = encoder.stats();
     assert_eq!(
-        encoder.stats().total_output_bit_count.get(),
+        stats.total_encode_count.get(),
+        num_frames as u64,
+        "B フレーム有効時の total_encode_count が投入数と一致しない"
+    );
+    assert_eq!(
+        stats.total_output_frame_count.get(),
+        num_frames as u64,
+        "B フレーム有効時の total_output_frame_count が投入数と一致しない"
+    );
+    assert_eq!(
+        stats.total_error_count.get(),
+        0,
+        "B フレーム有効時の total_error_count が 0 ではない"
+    );
+    assert_eq!(
+        stats.total_output_bit_count.get(),
         total_bytes * 8,
-        "total_output_bit_count が出力バッファのビット数と一致しない"
+        "B フレーム有効時の total_output_bit_count が出力バッファのビット数と一致しない"
+    );
+    assert_eq!(
+        stats.in_flight_frames.get(),
+        0,
+        "B フレーム有効時の finish 後の in_flight_frames が 0 ではない"
     );
 }

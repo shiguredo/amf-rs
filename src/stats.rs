@@ -87,3 +87,95 @@ impl Clone for Gauge {
         Self(AtomicU64::new(self.get()))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    // `Counter` / `Gauge` の増減は crate 内専用 API のため `tests/` からは
+    // 到達できない。増減とコピーの検証はこの単体テストで行う。
+
+    use super::*;
+
+    #[test]
+    fn counter_new_is_zero() {
+        // 生成直後のカウンターは 0 である
+        let counter = Counter::new();
+        assert_eq!(counter.get(), 0);
+    }
+
+    #[test]
+    fn counter_inc_increments_by_one() {
+        // inc() を呼ぶたびに 1 ずつ増える
+        let counter = Counter::new();
+        counter.inc();
+        counter.inc();
+        counter.inc();
+        assert_eq!(counter.get(), 3);
+    }
+
+    #[test]
+    fn counter_add_increments_by_value() {
+        // add() は指定した値だけ増やす
+        let counter = Counter::new();
+        counter.add(100);
+        counter.add(23);
+        assert_eq!(counter.get(), 123);
+    }
+
+    #[test]
+    fn counter_clone_is_independent_snapshot() {
+        // clone() は現在値のコピーであり、以後の変更は互いに影響しない
+        let counter = Counter::new();
+        counter.inc();
+
+        let snapshot = counter.clone();
+
+        counter.inc();
+        assert_eq!(counter.get(), 2);
+        assert_eq!(snapshot.get(), 1);
+    }
+
+    #[test]
+    fn gauge_new_is_zero() {
+        // 生成直後のゲージは 0 である
+        let gauge = Gauge::new();
+        assert_eq!(gauge.get(), 0);
+    }
+
+    #[test]
+    fn gauge_inc_and_dec_update_value() {
+        // inc() / dec() で現在値を増減できる
+        let gauge = Gauge::new();
+        gauge.inc();
+        gauge.inc();
+        gauge.inc();
+        assert_eq!(gauge.get(), 3);
+        gauge.dec();
+        assert_eq!(gauge.get(), 2);
+        gauge.dec();
+        gauge.dec();
+        assert_eq!(gauge.get(), 0);
+    }
+
+    #[test]
+    fn gauge_dec_saturates_at_zero() {
+        // 0 から dec() しても u64 の最大値に回り込まない
+        let gauge = Gauge::new();
+        gauge.dec();
+        assert_eq!(gauge.get(), 0);
+    }
+
+    #[test]
+    fn gauge_clone_is_independent_snapshot() {
+        // clone() は現在値のコピーであり、以後の変更は互いに影響しない
+        let gauge = Gauge::new();
+        gauge.inc();
+        gauge.inc();
+
+        let snapshot = gauge.clone();
+
+        gauge.inc();
+        gauge.inc();
+        assert_eq!(gauge.get(), 4);
+        assert_eq!(snapshot.get(), 2);
+    }
+}

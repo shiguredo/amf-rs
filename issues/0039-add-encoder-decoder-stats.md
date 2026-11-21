@@ -29,7 +29,7 @@
 - `in_flight_frames` は上記の受理時点で増やし、ハンドラーに結果 (`Ok` / `Err` のどちらも) を渡した時点で減らす。
 - `total_output_frame_count` は `Ok` を渡した時点、`total_error_count` は `Err` を渡した時点で加算する。
 - `total_output_bit_count` は `EncodedFrame::buffer()` のサイズを加算する。
-- `total_reconfigure_count` は `Encoder::reconfigure` が成功した時点で加算する。
+- `total_reconfigure_count` は更新対象がある `Encoder::reconfigure` が成功した時点で加算する。更新対象がない no-op は計上しない。
 - AMF の `STATISTICS_FEEDBACK` は使わず、PSNR / QP などの画質統計を返さないことを doc に書く。
 - カウンタの更新位置を `encode()` / `decode()` / ワーカー / `drain_output` のどこかに一本化し、二重加算を防ぐ。
 - 実機テストを追加する。N フレーム投入後の各カウンタ、`finish()` 後の `in_flight_frames` が 0、エラー通知時の `total_error_count`、`reconfigure` 成功回数を検証する。

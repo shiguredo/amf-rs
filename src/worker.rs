@@ -130,6 +130,8 @@ pub struct EncoderStats {
     pub total_output_bit_count: Counter,
 
     /// 再設定に成功した通算回数
+    ///
+    /// 更新対象がない no-op は計上しない。
     pub total_reconfigure_count: Counter,
 
     /// AMF に受理させたが、まだ結果を通知していないフレーム数の現在値
@@ -180,10 +182,10 @@ pub(crate) enum WorkerStats {
 }
 
 impl WorkerStats {
-    /// 入力フレームを消費したことを統計値に反映する
+    /// pending から入力フレームを取り出したときに in-flight を減らす
     ///
     /// 入力に対応する結果をハンドラーへ渡す直前に呼ぶ。
-    pub(crate) fn on_input_consumed(&self) {
+    fn dec_in_flight_frames(&self) {
         match self {
             Self::Encoder(stats) => stats.in_flight_frames.dec(),
             Self::Decoder(stats) => stats.in_flight_frames.dec(),
@@ -680,7 +682,7 @@ fn deliver_buffered<U: Send + 'static>(
                     output_buffer.push_front(Ok((data, frame_id)));
                     return;
                 };
-                config.stats.on_input_consumed();
+                config.stats.dec_in_flight_frames();
                 config.deliver(Ok((data, user_data)));
             }
             Err(error) => config.deliver(Err(error)),
@@ -701,7 +703,7 @@ fn flush_buffered_outputs<U: Send + 'static>(
         match result {
             Ok((data, frame_id)) => match pending.remove(&frame_id) {
                 Some(user_data) => {
-                    config.stats.on_input_consumed();
+                    config.stats.dec_in_flight_frames();
                     config.deliver(Ok((data, user_data)));
                 }
                 None => config.deliver(Err(InternalError::new(format!(
@@ -725,7 +727,7 @@ fn report_unmatched_inputs<U: Send + 'static>(
     let mut frame_ids: Vec<_> = pending.drain().map(|(frame_id, _)| frame_id).collect();
     frame_ids.sort_unstable();
     for frame_id in frame_ids {
-        config.stats.on_input_consumed();
+        config.stats.dec_in_flight_frames();
         config.deliver(Err(InternalError::new(format!(
             "the {} did not produce output for the submitted input (frame ID {frame_id})",
             config.role

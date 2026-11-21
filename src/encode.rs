@@ -333,6 +333,20 @@ pub struct ReconfigureParams {
     pub gop_pic_size: Option<u16>,
 }
 
+impl ReconfigureParams {
+    /// 更新対象のフィールドが 1 つも指定されていないか
+    fn is_noop(&self) -> bool {
+        self.framerate_num.is_none()
+            && self.framerate_den.is_none()
+            && self.target_kbps.is_none()
+            && self.max_kbps.is_none()
+            && self.qpi.is_none()
+            && self.qpp.is_none()
+            && self.qpb.is_none()
+            && self.gop_pic_size.is_none()
+    }
+}
+
 /// エンコード済みフレーム
 #[derive(Debug)]
 pub struct EncodedFrame<T> {
@@ -603,7 +617,6 @@ impl<H: EncodeHandler> Encoder<H> {
 
         let codec_config = config.codec;
 
-        // 統計値はワーカースレッドと共有する。
         let stats = Arc::new(EncoderStats::default());
 
         // ワーカースレッドを起動する
@@ -709,6 +722,11 @@ impl<H: EncodeHandler> Encoder<H> {
     pub fn reconfigure(&mut self, params: ReconfigureParams) -> Result<(), Error> {
         if !self.worker.is_running() {
             return Err(InvalidStateError::new("encoder is already finished").into());
+        }
+
+        // 更新対象が 1 つもない場合は何もしない。
+        if params.is_noop() {
+            return Ok(());
         }
 
         // HEVC には B フレーム用の QP プロパティがない。また AMF の HEVC では
@@ -1155,7 +1173,17 @@ impl<H: EncodeHandler> Encoder<H> {
         // AMF が入力を受け付けたため、終了時には Drain が必要になる。
         self.drain_required = true;
 
-        // ワーカースレッドに user_data の登録コマンドを送信する。
+        self.register_accepted_input(frame_id, user_data)?;
+
+        Ok(())
+    }
+
+    /// 受理したフレームをワーカーへ登録し、統計値を更新する
+    ///
+    /// # Errors
+    ///
+    /// ワーカーが停止している場合にエラーを返す。この場合、統計値は更新しない。
+    fn register_accepted_input(&self, frame_id: i64, user_data: H::UserData) -> Result<(), Error> {
         // ワーカーは登録を処理した直後に対応する出力を通知し得るため、登録より
         // 先に in-flight を計上する。登録に失敗した場合はこのフレームの出力が
         // 通知されないため、計上を取り消す。
@@ -1165,7 +1193,6 @@ impl<H: EncodeHandler> Encoder<H> {
             return Err(error);
         }
         self.stats.total_encode_count.inc();
-
         Ok(())
     }
 

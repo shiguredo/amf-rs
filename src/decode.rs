@@ -164,7 +164,6 @@ impl<H: DecodeHandler> Decoder<H> {
         let result = component.init(SurfaceFormat::from(FrameFormat::Nv12), 0, 0);
         AmfError::check(result, "AMFComponent::Init")?;
 
-        // 統計値はワーカースレッドと共有する。
         let stats = Arc::new(DecoderStats::default());
 
         let deliver_stats = Arc::clone(&stats);
@@ -362,11 +361,7 @@ impl<H: DecodeHandler> Decoder<H> {
     /// # Errors
     ///
     /// ワーカーが停止している場合にエラーを返す。この場合、統計値は更新しない。
-    fn register_accepted_input(
-        &mut self,
-        frame_id: i64,
-        user_data: H::UserData,
-    ) -> Result<(), Error> {
+    fn register_accepted_input(&self, frame_id: i64, user_data: H::UserData) -> Result<(), Error> {
         // ワーカーは登録を処理した直後に対応する出力を通知し得るため、登録より
         // 先に in-flight を計上する。登録に失敗した場合はこのフレームの出力が
         // 通知されないため、計上を取り消す。
