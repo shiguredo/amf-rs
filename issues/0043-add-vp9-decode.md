@@ -1,7 +1,7 @@
 # VP9 デコードに対応する
 
 - Created: 2026-11-10
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-11-22
 - Branch: feature/add-vp9-decode
 - Polished: {YYYY-MM-DD}
 - Reporter: @melpon
@@ -36,3 +36,16 @@ WebRTC や Sora で使われる VP9 のビットストリームを amf-rs でデ
 - 実機で VP9 のデコードを検証するテストが追加され、`cargo test --workspace` が通る。
 - README と `SKILL.md` の対応コーデック表が実装と一致する。
 - `CHANGES.md` の `## develop` に `[ADD]` を追記する。
+
+## 解決方法
+
+- `DecoderCodec::Vp9` と `VideoCodecType::Vp9` を追加し、`AMFVideoDecoderHW_VP9` で VP9 をデコードできるようにした。
+- `supported_codecs` に VP9 を追加し、VP9 の `encoding` は `None` を返すようにした。
+- VP9 の通常ストリーム、不可視フレーム、`show_existing_frame`、superframe のテストを追加した。
+  - 不可視フレームと superframe は AMF が frame ID を付けないため、現状はエラーとして通知される。
+  - `show_existing_frame` は AMF が出力しないため、現状はエラーとして通知される。
+- 実機で確認済みの範囲を README / SKILL / `DecoderCodec::Vp9` の doc に明記した。
+  - Profile 0 (8bit 4:2:0) は確認済み。
+  - 10bit (Profile 2) と 4:2:2 / 4:4:4 は NV12 固定のため未検証。
+  - superframe は 1 フレームずつ分割して投入する必要がある。
+- `CHANGES.md`、README、SKILL、`examples/amf-check` を更新した。
