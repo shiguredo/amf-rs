@@ -1,7 +1,7 @@
 # エンコーダー / デコーダーの統計値 API を追加する
 
 - Created: 2026-11-10
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-11-21
 - Branch: feature/add-encoder-decoder-stats
 - Polished: {YYYY-MM-DD}
 - Reporter: @melpon
@@ -42,3 +42,15 @@
 - AMF の `STATISTICS_FEEDBACK` を使わない理由と返さない統計の範囲が doc に書かれている。
 - 実機テストが追加され、`cargo test --workspace` が通る。
 - `CHANGES.md` の `## develop` に `[ADD]` を追記する。
+
+## 解決方法
+
+- `src/stats.rs` に `Counter` / `Gauge` を追加した。vpl-rs と同じ `AtomicU64` ベースの実装とし、統計値の共有は `Encoder` / `Decoder` 側の `Arc` で行う
+- `EncoderStats` / `DecoderStats` を追加し、`Encoder::stats()` / `Decoder::stats()` から取得できるようにした
+- エンコード / デコードの送信件数、出力件数、エラー件数、出力ビット数、in-flight、`Encoder` の reconfigure 回数を記録するようにした
+- `in_flight_frames` は入力の受理時に増やし、ワーカーが対応する pending を消費した時点で減らすようにした
+- `total_reconfigure_count` は更新対象がある `Encoder::reconfigure` が成功した場合だけ加算し、no-op は計上しないようにした
+- AMF の `STATISTICS_FEEDBACK` は使わず、PSNR / QP などの画質統計は返さないことを doc に書いた
+- 実機テストを追加し、統計値、B フレーム有効時の入出力、解像度変化、出力なし入力のエラー、finish 後の状態を確認した
+- `CHANGES.md` の `## develop` に `[ADD]` を追記した
+- `cargo fmt --all -- --check` / `cargo clippy --workspace --all-targets -- -D warnings` / `cargo test --workspace` が成功した
