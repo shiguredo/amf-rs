@@ -1,15 +1,12 @@
-# デコード出力フォーマットの選択と表示サイズの取得に対応する
+# デコード出力フォーマットの選択と実効フォーマットの取得に対応する
 
 - Created: 2026-11-10
-- Completed: {YYYY-MM-DD}
-- Branch: feature/add-decoder-output-format
-- Polished: {YYYY-MM-DD}
 - Refreshed: 2026-11-20
 - Reporter: @melpon
 
 ## 目的
 
-`Decoder` は常に NV12 で初期化するため、HEVC Main10 や AV1 10bit のデコード結果を 10bit のまま取得できない。また `DecodedFrame` に幅・高さ・ピクセルフォーマットの accessor がなく、幅・高さは `surface()` の `Plane` から取得できるが、実効ピクセルフォーマットを取得する安全な API はない。vpl-rs は `DecodedFrame::frame_format()` / `width()` / `height()` を返し、nvcodec-rs は `DecoderConfig::surface_format` と `DecodedFrame::width()` / `height()` を、video-toolbox-rs は `DecoderConfig::pixel_format` と各フレーム型の `width()` / `height()` を持つ。amf-rs にも同等の機能が必要である。
+`Decoder` は常に NV12 で初期化するため、HEVC Main10 や AV1 10bit のデコード結果を 10bit のまま取得できない。また `DecodedFrame` に実効ピクセルフォーマットの accessor がない。幅・高さは `surface()` の `Plane` から取得できるが、実効ピクセルフォーマットを取得する安全な API はない。vpl-rs は `DecodedFrame::frame_format()` / `width()` / `height()` を返し、nvcodec-rs は `DecoderConfig::surface_format` を、video-toolbox-rs は `DecoderConfig::pixel_format` を持つ。amf-rs にも出力フォーマットを指定する機能と、実効フォーマットを取得する API が必要である。
 
 ## 現状
 
@@ -30,24 +27,24 @@
 ## 設計方針
 
 - `DecoderConfig` に `output_format` を追加する。既定は NV12 (`FrameFormat::Nv12` 相当) とし、既存の利用者の実行時挙動を変えない。`DecoderConfig::new(codec)` を追加して `output_format` を NV12 で初期化し、利用者は公開フィールドを書き換えて指定する。公開フィールドの追加は構造体リテラルを壊すため、README / SKILL.md / tests / examples の構築箇所を移行する。`CHANGES.md` には `[CHANGE]` として記録する。
-- 出力形式の型は、`SurfaceFormat` (`Known(FrameFormat)` / `Unknown(u32)`)、`FrameFormat`、デコード専用 enum のどれにするかを決める。`FrameFormat` を使う場合は `I420` が `AMF_SURFACE_YUV420P` に対応する。`FrameFormat` の doc は現在「エンコーダーの入力フレームフォーマット」なので、共用する場合は doc を更新する。デコード専用 enum にする場合は `Nv12` / `P010` / `P012` / `P016` / `I420` に限定し、`FrameFormat` を再利用する場合はエンコード専用の形式も指定できることを許容して `Init` の結果で判定する。
+- 出力形式の型は `SurfaceFormat` (`Known(FrameFormat)` / `Unknown(u32)`) を採用する。`FrameFormat` の `I420` は `AMF_SURFACE_YUV420P` に対応する。`FrameFormat` の doc は「エンコーダーの入力フレームフォーマット」から、エンコーダー入力とデコーダー出力の共用に更新する。`Init` の結果で利用可否を判定する。
 - `Decoder::new` と `reinitialize_after_resolution_change` の両方で、設定した `output_format` を `component.init` に渡す。`Decoder` は再初期化のために `output_format` を保持する。
-- `DecodedFrame` に `width()` / `height()` / `format()` を追加する。`width()` / `height()` は出力 Surface の Y プレーンからフレームごとに取得し、`DecodedFrame` の構築時に確定する。`Plane::get_width` / `get_height` を取得できない場合だけ、`Decoder` が保持する `AMF_VIDEO_DECODER_CURRENT_SIZE` をフォールバックにする。ワーカーの deliver は `Component` を持たないため、deliver 中に CURRENT_SIZE を読む設計は避ける。解像度変化時は 0026 の実装どおり `Drain` と `AMF_EOF` 待ちの後に `CURRENT_SIZE` を読んでから `Terminate` / `Init` するため、フォールバック値もその時点で更新する。
-- フォーマットは要求値ではなく実効値を使う。`AMFSurface::GetFormat` を `Surface::get_format()` として公開し、deliver で Surface から読む方法を第一候補にする。`AMF_VIDEO_DECODER_OUTPUT_FORMAT` を deliver で読む場合は `Component` の Clone を deliver クロージャに捕捉する必要があるため、Init 後や解像度変化後の確認に使う。実機では `Surface::get_format()` と `AMF_VIDEO_DECODER_OUTPUT_FORMAT` が一致した。未知の形式を返せるよう、戻り値は `SurfaceFormat` にすることを検討する。
-- `Init` が AMF のエラーを返した場合は `Error::Amf(AmfError)` とし、`AmfError::status()` / `operation()` から状態と操作を取得できるようにする。要求したフォーマットをエラーから判別できるようにする方法は別に決める。
+- `DecodedFrame` に `format()` を追加する。フォーマットは出力 Surface の `get_format()` から取得し、`DecodedFrame` の構築時に確定する。幅・高さは `Surface` の Y プレーンから取得できるため、`DecodedFrame` には追加しない。
+- フォーマットは要求値ではなく実効値を使う。`AMFSurface::GetFormat` を `Surface::get_format()` として公開し、deliver で Surface から読む方法を第一候補にする。`AMF_VIDEO_DECODER_OUTPUT_FORMAT` を deliver で読む場合は `Component` の Clone を deliver クロージャに捕捉する必要があるため、Init 後や解像度変化後の確認に使う。実機では `Surface::get_format()` と `AMF_VIDEO_DECODER_OUTPUT_FORMAT` が一致した。未知の形式を返せるよう、戻り値は `SurfaceFormat` にする。
+- `Init` が AMF のエラーを返した場合は `Error::Amf(AmfError)` とし、`AmfError::status()` / `operation()` から状態と操作を取得できるようにする。要求したフォーマットをエラーから判別する専用 API は設けない。呼び出し元が `DecoderConfig` を保持しているため、追加の API は不要と判断した。
 - `output_format` の事前検証は追加せず、`Init` の結果で判定する。0027 で設定値の事前検証をしない方針が決まっていることと揃える。`supported_codecs()` の capability も事前検証には使わない。
-- 出力 Surface のピッチとプレーンサイズは、既存の `Plane::get_hpitch` / `get_vpitch` と 0023 で追加された `Plane::as_slice` に整合させる。`Surface::convert(MemoryType::Host)` はハンドラー通知前に実行済みで、`Plane` が生存している間は `convert` がエラーになるため、accessor は `Plane` ハンドルを保持しない。
-- `Plane` は crop の offset (`GetOffsetX` / `GetOffsetY`) を公開していない。`width()` / `height()` / `format()` には offset は不要なため、本 issue のスコープ外とする。crop offset が必要な場合は別 issue にする。
-- 実機テストを追加する。H.264 1080p で `width()` / `height()` が 1920x1080 になり、NV12 の `Plane::get_vpitch` が 1088 であること (crop 後の高さ 1080 とプレーンのピッチを区別する)、P010 / P012 / P016 / I420 でも要求した形式の Surface が返ること、HEVC Main10 と AV1 10bit で P010 出力が得られること、HEVC Main10 に NV12 を要求した場合に AMF が変換した NV12 が返ることを検証する。解像度変化をまたいでも `format()` が設定値のままであることと、変化前後の各フレームで `width()` / `height()` が正しいことも検証する。10bit と複数解像度のテストストリームは現在の `Encoder` で生成できる。
+- 出力 Surface のプレーンは、既存の `Plane::get_width` / `get_height` / `get_hpitch` / `get_vpitch` と 0023 で追加された `Plane::as_slice` で読み取れる。`Surface::convert(MemoryType::Host)` はハンドラー通知前に実行済みで、`Plane` が生存している間は `convert` がエラーになる。
+- `Plane` は crop の offset (`GetOffsetX` / `GetOffsetY`) を公開していない。`format()` には offset は不要なため、本 issue のスコープ外とする。crop offset が必要な場合は別 issue にする。
+- 実機テストを追加する。H.264 1080p で Y プレーンの `get_width()` / `get_height()` が 1920x1080 になり、NV12 の `get_vpitch` が 1088 であること (crop 後の高さ 1080 とプレーンのピッチを区別する)、P010 / P012 / P016 / I420 でも要求した形式の Surface が返ること、HEVC Main10 と AV1 10bit で P010 出力が得られること、HEVC Main10 に NV12 を要求した場合に AMF が変換した NV12 が返ることを検証する。解像度変化をまたいでも `format()` が設定値のままであることと、変化前後の各フレームで Y プレーンの幅・高さが正しいことも検証する。10bit と複数解像度のテストストリームは現在の `Encoder` で生成できる。
 - `src/decode.rs` の `DecoderConfig::codec` の doc から「出力フォーマットは NV12 に固定される」を削除し、`output_format` の説明に置き換える。`Decoder::new` の `# Errors` には、`CODEBASE.md` のエラー契約に従って、バックエンドが指定した出力形式に対応していない場合を含める。
-- README と `skills/shiguredo-amf/SKILL.md` の「デコード出力は NV12」を更新する。README の特徴・デコード出力フォーマット表、SKILL.md の特徴・API 表に加え、両方のデコード例を新しい accessor に置き換える。
+- README と `skills/shiguredo-amf/SKILL.md` の「デコード出力は NV12」を更新する。README の特徴・デコード出力フォーマット表、SKILL.md の特徴・API 表に加え、両方のデコード例を新しい API (`DecoderConfig::output_format` と `DecodedFrame::format()`) に置き換え、表示サイズは Y プレーンから取得する例にする。
 
 ## 完了条件
 
 - `DecoderConfig::output_format` でデコード出力フォーマットを選択できる。
 - 解像度変化後も設定した出力フォーマットが維持される。
-- `DecodedFrame::width()` / `height()` / `format()` が幅・高さと実効フォーマットを返す。
-- 解像度変化をまたいでも、各フレームの `width()` / `height()` が正しい。
+- `DecodedFrame::format()` が実効フォーマットを返す。
+- 解像度変化をまたいでも、各フレームの Y プレーンの幅・高さが正しい。
 - 既定の NV12 で既存の実行時挙動が変わらない。
 - README / SKILL.md / tests / examples の `DecoderConfig` 構築箇所が新しい API に追随する。
 - P010 / P012 / P016 / I420 で要求した形式の Surface が返ることを実機テストで確認する。
@@ -55,3 +52,36 @@
 - README と `SKILL.md` のデコード出力の記述とコード例が実装と一致する。
 - `cargo test --workspace` が通る。
 - `CHANGES.md` の `## develop` に `[CHANGE]` と `[ADD]` を追記する。
+
+## 実装状況
+
+- 実装はブランチ `feature/add-decoder-output-format` のコミット `066355e` に保全している。マージはしていない。
+- `DecoderConfig::output_format`、`DecoderConfig::new`、`Surface::get_format()`、`DecodedFrame::format()` を追加し、解像度変化後の再初期化でも `output_format` を使うようにした。
+- 表示サイズは `DecodedFrame` の `width()` / `height()` ではなく、`surface()` の Y プレーンの `get_width()` / `get_height()` から取得する方針に変更した。`AMF_VIDEO_DECODER_CURRENT_SIZE` のフォールバックは不要と判断して削除した。
+- README、`skills/shiguredo-amf/SKILL.md`、`CHANGES.md`、examples、テストを更新した。
+- ローカルの `cargo fmt` / `cargo clippy` / `cargo build` / `cargo test --workspace --no-run` は成功している。
+- レビューで未対応の項目がある。`FrameFormat` の型 doc と SKILL の型表が「エンコーダー入力」のまま、README / SKILL のデコード例に `output_format` の指定例がない、テストの GPU 能力依存、develop とのマージ衝突である。実装を再開する際に対応する。
+
+## 調査内容
+
+- 実機 (AMD Radeon 780M / AMF ランタイム 1.5.3.0 / amf-amdgpu-pro 26.20.618-1) で、非 NV12 出力のデコードを繰り返すと GPUVM page fault と device reset が発生することを確認した。
+- 1080p H.264 の 10 フレームを I420 出力で一気にデコードし、フレームを保持せず破棄し、`convert(MemoryType::Host)` も無効化した条件で、20 回中 6 回 page fault が発生した。NV12 出力の同じ条件では 20 回中 0 回だった。
+- 出力を 1 フレームずつ待ってから次を投入すると、I420 出力の同じ条件で 20 回中 0 回だった。
+- P010 出力では 20 回中 1 回、I420 出力では 320x240 の 60 フレームでも 20 回中 2 回 page fault が発生した。解像度には依存しない。
+- エンコーダーを排除した静的フィクスチャ (320x320、50 フレーム) の I420 デコードでも 20 回中 3 回発生した。フレームの保持、Host 変換、エンコーダーは原因ではない。
+- 1080p の 5 形式を 10 フレームずつデコードするテストでは、I420 の変換開始直後に 10 回中 2 回 SIGSEGV した。P010 / P012 / P016 は完了した。
+- kernel log では `amf-decoder-wor` スレッドで page fault、`ring timeout`、`device wedged` が記録された。AMF のログには `Blt420Compute::SplitUV`、`AMFVideoConverterImpl::Process`、`m_pConverter->QueryOutput`、`vkQueueSubmit err=-4` が出ることがあった。
+- テストプロセスは page fault が発生しても exit 0 で成功することがある。終了コードだけでは GPU の健全性を判定できない。
+- 再起動は実施していない。`umr` は未インストール、`devcoredump` は root 権限が必要で読めなかった。AMF の内部バッファの寿命まで特定できていない。
+
+## 問題点
+
+1. AMF の非 NV12 出力用 VideoConverter が、複数の変換を in-flight にすると GPUVM fault を起こす。AMF ランタイム側の欠陥と推測される。
+2. AMF SDK v1.5.2 の `AMF_Video_Decode_API.md` はデコーダーの `Init` のフォーマットを全コーデックで NV12 に限定している。P010 / P012 / P016 / I420 の出力は公式仕様外の実装依存動作である。
+3. AMF が変換失敗をリカバリしてフレームを返す場合があり、GPU の device reset がテスト結果に現れない。
+4. 参照 GPU と AMF 1.5.3.0 で観測した結果であり、他の GPU / AMF バージョンでの挙動は不明である。
+5. 原因の正確な箇所 (AMF のバッファ管理か、RADV / ドライバーか) は未特定である。
+
+## pending にした理由
+
+非 NV12 出力の同時変換が AMF ランタイムで GPUVM fault と device reset を起こし、利用者に安全に提供できないため。amf-rs 側のコード修正だけでは解決できず、AMF 側の修正、または in-flight の変換数を制限する設計と十分な検証が必要である。AMF の修正または安全な回避策が確認できるまで pending とする。再開時は、カーネルログを監視しながら、NV12 / I420 / P010 / P012 / P016 の変換テストを並列・直列の両方で再実行する。
