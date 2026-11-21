@@ -91,6 +91,7 @@ fn codec_name(codec: VideoCodecType) -> &'static str {
         VideoCodecType::H264 => "H.264",
         VideoCodecType::Hevc => "H.265",
         VideoCodecType::Av1 => "AV1",
+        VideoCodecType::Vp9 => "VP9",
     }
 }
 
@@ -201,11 +202,15 @@ fn print_codec_support(codecs: &Result<Vec<CodecInfo>>) {
     }
 }
 
-fn encoder_config(codec: VideoCodecType, width: u32, height: u32) -> EncoderConfig {
+/// コーデックのエンコーダー設定を返す
+///
+/// VP9 は AMF のエンコーダーを持たないため `None` を返す。
+fn encoder_config(codec: VideoCodecType, width: u32, height: u32) -> Option<EncoderConfig> {
     let codec_config = match codec {
         VideoCodecType::H264 => CodecConfig::H264(H264EncoderConfig { profile: None }),
         VideoCodecType::Hevc => CodecConfig::Hevc(HevcEncoderConfig { profile: None }),
         VideoCodecType::Av1 => CodecConfig::Av1(Av1EncoderConfig { profile: None }),
+        VideoCodecType::Vp9 => return None,
     };
     let mut config = EncoderConfig::new(
         codec_config,
@@ -217,13 +222,19 @@ fn encoder_config(codec: VideoCodecType, width: u32, height: u32) -> EncoderConf
         RateControlMode::Cbr,
     );
     config.target_kbps = Some(1_000);
-    config
+    Some(config)
 }
 
-fn check_encoder_init(context: &Context, codec: VideoCodecType, width: u32, height: u32) -> bool {
-    let name = codec_name(codec);
+fn check_encoder_init(context: &Context, info: &CodecInfo, width: u32, height: u32) -> bool {
+    let name = codec_name(info.codec);
     print!("[encoder] {name} init ({width}x{height}) ... ");
-    let config = encoder_config(codec, width, height);
+    if info.encoding.is_none() {
+        println!("SKIP (not supported)");
+        return true;
+    }
+    // encoding が Some のコーデックは VP9 ではないため、encoder_config は Some を返す。
+    let config = encoder_config(info.codec, width, height)
+        .expect("encoder config must exist for a codec with encoding capability");
     match Encoder::new(context.clone(), config, FnEncodeHandler::<()>::new(|_| {})) {
         Ok(_encoder) => {
             println!("OK");
@@ -243,6 +254,7 @@ fn check_decoder_init(context: &Context, codec: VideoCodecType) -> bool {
         VideoCodecType::H264 => DecoderCodec::H264,
         VideoCodecType::Hevc => DecoderCodec::Hevc,
         VideoCodecType::Av1 => DecoderCodec::Av1,
+        VideoCodecType::Vp9 => DecoderCodec::Vp9,
     };
     let config = DecoderConfig {
         codec: decoder_codec,
@@ -281,15 +293,8 @@ fn check_component_init(codecs: &Result<Vec<CodecInfo>>, width: u32, height: u32
         }
     };
     for info in codecs {
-        if info.encoding.is_some() {
-            if !check_encoder_init(&context, info.codec, width, height) {
-                ok = false;
-            }
-        } else {
-            println!(
-                "[encoder] {} init ... SKIP (not supported)",
-                codec_name(info.codec)
-            );
+        if !check_encoder_init(&context, info, width, height) {
+            ok = false;
         }
 
         if info.decoding.is_some() {
