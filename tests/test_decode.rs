@@ -448,6 +448,16 @@ fn test_decode_after_finish_is_rejected() {
         error.to_string().contains("already finished"),
         "finish 後の decode のエラーメッセージが想定と異なる: {error}"
     );
+    assert_eq!(
+        decoder.stats().total_decode_count.get(),
+        0,
+        "finish 後の decode 拒否で total_decode_count が増えた"
+    );
+    assert_eq!(
+        decoder.stats().in_flight_frames.get(),
+        0,
+        "finish 後の decode 拒否で in_flight_frames が 0 ではない"
+    );
 }
 
 /// finish を呼ばずに Decoder を drop すると、出力が生成されていない場合は
@@ -604,7 +614,8 @@ fn test_decode_maps_user_data_with_duplicate_zero_pts() {
     );
 }
 
-/// SPS/PPS だけを投入した場合、finish で未対応入力のエラーが通知されることを確認する
+/// SPS/PPS だけを 2 件投入した場合、finish で未対応入力のエラーが 2 件通知され、
+/// 統計値にも 2 件として計上されることを確認する
 #[test]
 fn test_decode_reports_input_without_output() {
     let access_units = split_access_units(H264_BFRAME_STREAM, is_h264_vcl);
@@ -630,39 +641,75 @@ fn test_decode_reports_input_without_output() {
     )
     .expect("デコーダーの作成に失敗");
 
-    let mut buffer = decoder
-        .alloc_buffer(parameter_sets.len())
-        .expect("Buffer の確保に失敗");
-    unsafe { buffer.as_mut_slice() }
-        .expect("Buffer のスライス取得に失敗")
-        .copy_from_slice(&parameter_sets);
-    decoder.decode(buffer, 0).expect("SPS/PPS だけの投入に失敗");
+    // 出力が得られない入力を 2 件投入する。
+    for index in 0..2 {
+        let mut buffer = decoder
+            .alloc_buffer(parameter_sets.len())
+            .expect("Buffer の確保に失敗");
+        unsafe { buffer.as_mut_slice() }
+            .expect("Buffer のスライス取得に失敗")
+            .copy_from_slice(&parameter_sets);
+        decoder
+            .decode(buffer, index)
+            .expect("SPS/PPS だけの投入に失敗");
+    }
+
+    // 受理した 2 件はまだ結果が通知されていない。
+    assert_eq!(
+        decoder.stats().total_decode_count.get(),
+        2,
+        "total_decode_count が投入数と一致しない"
+    );
+    assert_eq!(
+        decoder.stats().in_flight_frames.get(),
+        2,
+        "decode 直後の in_flight_frames が投入数と一致しない"
+    );
 
     decoder.finish().expect("finish に失敗");
+
+    assert_eq!(
+        decoder.stats().total_decode_count.get(),
+        2,
+        "finish 後の total_decode_count が投入数と一致しない"
+    );
+    assert_eq!(
+        decoder.stats().total_output_frame_count.get(),
+        0,
+        "出力のない入力が total_output_frame_count に計上された"
+    );
+    assert_eq!(
+        decoder.stats().total_error_count.get(),
+        2,
+        "エラー通知が total_error_count に計上されていない"
+    );
+    assert_eq!(
+        decoder.stats().in_flight_frames.get(),
+        0,
+        "finish 後の in_flight_frames が 0 ではない"
+    );
     drop(decoder);
 
     let results = Arc::try_unwrap(results)
         .expect("結果一覧の Arc の参照が残っている")
         .into_inner()
         .expect("結果一覧のロックに失敗");
-    assert_eq!(results.len(), 1, "未対応入力のエラーが 1 件ではない");
-    let error = results
-        .into_iter()
-        .next()
-        .expect("結果が存在しない")
-        .expect_err("出力のない入力が成功として通知された");
-    assert!(
-        matches!(&error, Error::Internal(_)),
-        "未対応入力のエラーが Internal ではない: {error}"
-    );
-    assert!(
-        error.to_string().contains("frame ID"),
-        "未対応入力のエラーメッセージに frame ID がない: {error}"
-    );
-    assert!(
-        !error.to_string().contains("PTS"),
-        "未対応入力のエラーメッセージに PTS が使われている: {error}"
-    );
+    assert_eq!(results.len(), 2, "未対応入力のエラーが 2 件ではない");
+    for result in results {
+        let error = result.expect_err("出力のない入力が成功として通知された");
+        assert!(
+            matches!(&error, Error::Internal(_)),
+            "未対応入力のエラーが Internal ではない: {error}"
+        );
+        assert!(
+            error.to_string().contains("frame ID"),
+            "未対応入力のエラーメッセージに frame ID がない: {error}"
+        );
+        assert!(
+            !error.to_string().contains("PTS"),
+            "未対応入力のエラーメッセージに PTS が使われている: {error}"
+        );
+    }
 }
 
 /// finish を 2 回呼ぶと 2 回目がエラーになることを確認する
@@ -886,6 +933,28 @@ fn test_decode_continues_after_resolution_change() {
     }
 
     decoder.finish().expect("finish に失敗");
+
+    let stats = decoder.stats();
+    assert_eq!(
+        stats.total_decode_count.get(),
+        total_frames as u64,
+        "解像度変化を挟んだ total_decode_count が投入数と一致しない"
+    );
+    assert_eq!(
+        stats.total_output_frame_count.get(),
+        total_frames as u64,
+        "解像度変化を挟んだ total_output_frame_count が投入数と一致しない"
+    );
+    assert_eq!(
+        stats.total_error_count.get(),
+        0,
+        "解像度変化を挟んだ total_error_count が 0 ではない"
+    );
+    assert_eq!(
+        stats.in_flight_frames.get(),
+        0,
+        "解像度変化を挟んだ finish 後の in_flight_frames が 0 ではない"
+    );
     drop(decoder);
 
     let results = Arc::try_unwrap(results)
@@ -980,6 +1049,28 @@ fn test_decoder_continuous_submit_outputs_all_frames() {
     )
     .expect("デコーダーの作成に失敗");
 
+    // 作成直後はどの統計値も 0 である。
+    assert_eq!(
+        decoder.stats().total_decode_count.get(),
+        0,
+        "作成直後の total_decode_count が 0 ではない"
+    );
+    assert_eq!(
+        decoder.stats().total_output_frame_count.get(),
+        0,
+        "作成直後の total_output_frame_count が 0 ではない"
+    );
+    assert_eq!(
+        decoder.stats().total_error_count.get(),
+        0,
+        "作成直後の total_error_count が 0 ではない"
+    );
+    assert_eq!(
+        decoder.stats().in_flight_frames.get(),
+        0,
+        "作成直後の in_flight_frames が 0 ではない"
+    );
+
     // 出力を待たずに連続投入する。
     for (index, access_unit) in access_units.iter().enumerate() {
         let mut buffer = decoder
@@ -1000,6 +1091,28 @@ fn test_decoder_continuous_submit_outputs_all_frames() {
             .unwrap_or_else(|error| panic!("アクセスユニット {index} の投入に失敗: {error}"));
     }
     decoder.finish().expect("finish に失敗");
+
+    let stats = decoder.stats();
+    assert_eq!(
+        stats.total_decode_count.get(),
+        NUM_FRAMES as u64,
+        "total_decode_count が投入数と一致しない"
+    );
+    assert_eq!(
+        stats.total_output_frame_count.get(),
+        NUM_FRAMES as u64,
+        "total_output_frame_count が投入数と一致しない"
+    );
+    assert_eq!(
+        stats.total_error_count.get(),
+        0,
+        "total_error_count が 0 ではない"
+    );
+    assert_eq!(
+        stats.in_flight_frames.get(),
+        0,
+        "finish 後の in_flight_frames が 0 ではない"
+    );
     drop(decoder);
 
     let mut user_data = Arc::try_unwrap(received)

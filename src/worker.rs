@@ -1,17 +1,19 @@
 //! エンコーダーとデコーダーで共通のワーカースレッド
 //!
 //! `AMFComponent::SubmitInput` のリトライ、`QueryOutput` のポーリング、
-//! frame ID による入出力の対応付け、ハンドラーへの通知、終了処理を提供する。
+//! frame ID による入出力の対応付け、ハンドラーへの通知、統計値の保持、
+//! 終了処理を提供する。
 
 use std::collections::{HashMap, VecDeque};
 use std::ptr;
-use std::sync::mpsc;
+use std::sync::{Arc, mpsc};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
 use crate::amf::{Component, Data};
 use crate::error::{AmfError, EnvironmentError, Error, InternalError, InvalidStateError};
 use crate::query_output::{DrainStatus, QueryOutputKind, classify_query_output};
+use crate::stats::{Counter, Gauge};
 use crate::sys::{AMF_RESULT, AMFData};
 
 /// 入出力の対応付けに使う frame ID を保持するプロパティ名
@@ -101,9 +103,99 @@ fn submit_input_with_retry(component: &Component, data: *mut AMFData) -> Result<
 /// 出力をハンドラーへ通知する関数
 type DeliverFn<U> = Box<dyn FnMut(Result<(Data, U), Error>) + Send>;
 
+/// エンコーダーの統計値
+///
+/// 値はエンコード処理の進行に伴って更新される。
+///
+/// PSNR や QP などの画質統計は含まない。
+///
+/// `Clone` は各フィールドの現在値を個別にコピーするスナップショットを返すため、
+/// フィールド間の一貫性は保証されない。
+#[derive(Debug, Clone, Default)]
+pub struct EncoderStats {
+    /// AMF に入力を受理させた通算回数
+    ///
+    /// 入力の検証など、AMF に投入する前に拒否した呼び出しは計上しない。
+    pub total_encode_count: Counter,
+
+    /// ハンドラーへ `Ok` として通知した通算回数
+    pub total_output_frame_count: Counter,
+
+    /// ハンドラーへ `Err` を通知した通算回数
+    ///
+    /// 終了処理中に通知したエラーも含む。
+    pub total_error_count: Counter,
+
+    /// ハンドラーへ通知した出力ビットストリームの総ビット数
+    pub total_output_bit_count: Counter,
+
+    /// 再設定に成功した通算回数
+    ///
+    /// 更新対象がない no-op は計上しない。
+    pub total_reconfigure_count: Counter,
+
+    /// AMF に受理させたが、まだ結果を通知していないフレーム数の現在値
+    ///
+    /// フレームを受理した時点で増え、対応する結果をハンドラーへ渡す直前に減る。
+    /// 終了処理が完了した時点で 0 になる。終了処理がエラーを返した場合の値は
+    /// 保証しない。
+    pub in_flight_frames: Gauge,
+}
+
+/// デコーダーの統計値
+///
+/// 値はデコード処理の進行に伴って更新される。
+///
+/// PSNR や QP などの画質統計は含まない。
+///
+/// `Clone` は各フィールドの現在値を個別にコピーするスナップショットを返すため、
+/// フィールド間の一貫性は保証されない。
+#[derive(Debug, Clone, Default)]
+pub struct DecoderStats {
+    /// AMF に入力を受理させた通算回数
+    ///
+    /// Buffer の検証など、AMF に投入する前に拒否した呼び出しは計上しない。
+    pub total_decode_count: Counter,
+
+    /// ハンドラーへ `Ok` として通知した通算回数
+    pub total_output_frame_count: Counter,
+
+    /// ハンドラーへ `Err` を通知した通算回数
+    ///
+    /// 終了処理中に通知したエラーも含む。
+    pub total_error_count: Counter,
+
+    /// AMF に受理させたが、まだ結果を通知していないフレーム数の現在値
+    ///
+    /// フレームを受理した時点で増え、対応する結果をハンドラーへ渡す直前に減る。
+    /// 終了処理が完了した時点で 0 になる。終了処理がエラーを返した場合の値は
+    /// 保証しない。
+    pub in_flight_frames: Gauge,
+}
+
+/// ワーカースレッドから統計値を更新するためのハンドル
+pub(crate) enum WorkerStats {
+    /// エンコーダーの統計値
+    Encoder(Arc<EncoderStats>),
+    /// デコーダーの統計値
+    Decoder(Arc<DecoderStats>),
+}
+
+impl WorkerStats {
+    /// pending から入力フレームを取り出したときに in-flight を減らす
+    ///
+    /// 入力に対応する結果をハンドラーへ渡す直前に呼ぶ。
+    fn dec_in_flight_frames(&self) {
+        match self {
+            Self::Encoder(stats) => stats.in_flight_frames.dec(),
+            Self::Decoder(stats) => stats.in_flight_frames.dec(),
+        }
+    }
+}
+
 /// ワーカースレッドの差分
 ///
-/// エンコーダーとデコーダーは、ハンドラーへの通知だけをクロージャで差し替えて
+/// エンコーダーとデコーダーは、ハンドラーへの通知と統計値だけを差し替えて
 /// 同じループを使う。
 pub(crate) struct WorkerConfig<U> {
     /// エラーメッセージとスレッド名に使うワーカーの役割
@@ -114,6 +206,8 @@ pub(crate) struct WorkerConfig<U> {
     /// 出力の frame ID はこの関数を呼ぶ前に読み取り済みであるため、`Data` は
     /// 自由に変換してよい。
     pub deliver: DeliverFn<U>,
+    /// ワーカースレッドから更新する統計値
+    pub stats: WorkerStats,
 }
 
 impl<U> WorkerConfig<U> {
@@ -588,6 +682,7 @@ fn deliver_buffered<U: Send + 'static>(
                     output_buffer.push_front(Ok((data, frame_id)));
                     return;
                 };
+                config.stats.dec_in_flight_frames();
                 config.deliver(Ok((data, user_data)));
             }
             Err(error) => config.deliver(Err(error)),
@@ -607,7 +702,10 @@ fn flush_buffered_outputs<U: Send + 'static>(
     while let Some(result) = output_buffer.pop_front() {
         match result {
             Ok((data, frame_id)) => match pending.remove(&frame_id) {
-                Some(user_data) => config.deliver(Ok((data, user_data))),
+                Some(user_data) => {
+                    config.stats.dec_in_flight_frames();
+                    config.deliver(Ok((data, user_data)));
+                }
                 None => config.deliver(Err(InternalError::new(format!(
                     "the {} produced output that matches no submitted input (frame ID {frame_id})",
                     config.role
@@ -629,6 +727,7 @@ fn report_unmatched_inputs<U: Send + 'static>(
     let mut frame_ids: Vec<_> = pending.drain().map(|(frame_id, _)| frame_id).collect();
     frame_ids.sort_unstable();
     for frame_id in frame_ids {
+        config.stats.dec_in_flight_frames();
         config.deliver(Err(InternalError::new(format!(
             "the {} did not produce output for the submitted input (frame ID {frame_id})",
             config.role
