@@ -1,6 +1,6 @@
 # テスト用ビットストリーム
 
-`tests/test_decode.rs` で使用する、B フレームを含む Annex B 形式のビットストリームです。
+`tests/test_decode.rs` で使用するビットストリームです。
 
 ## `red-bframe-320x320-h264.h264`
 
@@ -49,3 +49,34 @@ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 ```
+
+## `vp9-colorbar-320x256.ivf`
+
+VP9 Profile 0、320x256、10 フレームの IVF 形式のビットストリームです。
+SMPTE カラーバーを shiguredo_libvpx 2026.2.0-canary.1 の VP9 エンコーダーで
+エンコードしたものです。設定は I420 入力、CBR、1 Mbps、30 fps、
+`cpu_used = 8`、`deadline = Realtime`、`lag_in_frames = None`、`threads = 1` です。
+内容は合成映像であり、外部データのライセンスは含みません。
+
+デコード後の `Surface` の coded size が表示サイズと一致するよう、幅と高さは
+VP9 のスーパーブロックの単位である 64 の倍数にしています。
+
+## `vp9-invisible-320x256.ivf`
+
+VP9 Profile 0、320x256、3 フレームの IVF 形式のビットストリームです。
+2 フレーム目は不可視フレーム (`show_frame = 0`) です。libvpx の `vpxenc` で
+2 パス、`--lag-in-frames=16 --auto-alt-ref=1` を指定して生成しました。
+AMF が不可視フレームを出力したときの frame ID の扱いを確認するために使います。
+
+## `vp9-show-existing-320x256.ivf`
+
+VP9 Profile 0、320x256、2 フレームの IVF 形式のビットストリームです。
+1 フレーム目はキーフレーム、2 フレーム目は `show_existing_frame` です。
+libvpx のデコーダーで 2 フレームをデコードできることを確認しています。
+AMF の `show_existing_frame` の扱いを確認するために使います。
+
+## `vp9-superframe-320x256.ivf`
+
+VP9 Profile 0、320x256、1 フレームの IVF 形式のビットストリームです。
+キーフレームと後続のインターフレームを 1 つの superframe に格納しています。
+AMF に superframe を 1 つの Buffer で投入したときの挙動を確認するために使います。

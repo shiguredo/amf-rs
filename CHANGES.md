@@ -115,6 +115,10 @@
   - @melpon
 - [ADD] `amf::PropertyStorage::get_property_size` を追加する
   - @melpon
+- [ADD] VP9 のデコードに対応する
+  - `DecoderCodec::Vp9` を追加する
+  - `VideoCodecType::Vp9` を追加し、`supported_codecs` に含める
+  - @melpon
 - [FIX] `Decoder::decode` の `user_data` が B フレームを含むストリームで誤ったフレームに付く問題を修正する
   - 入力 `Buffer` に一意な frame ID を設定し、出力 `Surface` の frame ID で `user_data` を引き当てる
   - 入力 `Buffer` の PTS を対応付けに使わず、変更もしない

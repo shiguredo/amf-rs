@@ -1,6 +1,6 @@
 ---
 name: shiguredo-amf
-description: 時雨堂の AMD AMF (Advanced Media Framework) Rust バインディング shiguredo_amf の機能・API リファレンス。H.264 / H.265 / AV1 のハードウェアエンコード・デコード、AMF ランタイムの動的ロード、Surface / Buffer 管理、ハンドラーベースのコールバック設計、エンコード中の動的プロパティ再設定に関する質問時に使用。
+description: 時雨堂の AMD AMF (Advanced Media Framework) Rust バインディング shiguredo_amf の機能・API リファレンス。H.264 / H.265 / AV1 のハードウェアエンコード、H.264 / H.265 / AV1 / VP9 のハードウェアデコード、AMF ランタイムの動的ロード、Surface / Buffer 管理、ハンドラーベースのコールバック設計、エンコード中の動的プロパティ再設定に関する質問時に使用。
 ---
 
 # shiguredo_amf
@@ -9,7 +9,7 @@ AMD GPU 向けハードウェアアクセラレーションによるビデオエ
 
 ## 特徴
 
-- **AMD AMF (Advanced Media Framework)** ベースの H.264 / H.265 / AV1 ハードウェアエンコード・デコード
+- **AMD AMF (Advanced Media Framework)** ベースの H.264 / H.265 / AV1 ハードウェアエンコード、H.264 / H.265 / AV1 / VP9 ハードウェアデコード
 - **AMF ランタイムライブラリ** (`libamfrt64.so.1`) を `dlopen` で動的にロード (ビルド時のリンク不要)
 - **Vulkan バックエンド**で GPU 処理を実行 (Linux x86_64)
 - **エンコード入力フォーマット選択**: 8bit / 10bit (AMD Radeon 780M では NV12 / YV12 / I420 / BGRA / ARGB / RGBA / YUY2 / P010 を確認済み。P010 は HEVC と AV1 で利用できる)
@@ -82,7 +82,7 @@ AMD GPU 向けハードウェアアクセラレーションによるビデオエ
 | 型 | 説明 | 主要メソッド |
 |----|------|-------------|
 | `DecoderConfig` | デコーダー設定 | `codec: DecoderCodec` |
-| `DecoderCodec` | デコーダーのコーデック種別 | `H264`, `Hevc`, `Av1` |
+| `DecoderCodec` | デコーダーのコーデック種別 | `H264`, `Hevc`, `Av1`, `Vp9` |
 | `DecodedFrame<T>` | デコード済みフレーム | `surface() -> &Surface`, `user_data() -> &T`, `into_parts() -> (Surface, T)` |
 
 ### コーデック情報 (`codec_info`)
@@ -90,7 +90,7 @@ AMD GPU 向けハードウェアアクセラレーションによるビデオエ
 | 型/関数 | 説明 |
 |--------|------|
 | `supported_codecs() -> Result<Vec<CodecInfo>, Error>` | このバックエンドで利用可能なコーデック情報の一覧 |
-| `VideoCodecType` | コーデック種別 (`H264`, `Hevc`, `Av1`) |
+| `VideoCodecType` | コーデック種別 (`H264`, `Hevc`, `Av1`, `Vp9`) |
 | `CodecInfo` | コーデックごとの情報 (`codec`, `decoding: Option<DecodingInfo>`, `encoding: Option<EncodingInfo>`) |
 | `DecodingInfo` | `acceleration: Option<AccelerationType>`, `input: Option<IoCapabilities>`, `output: Option<IoCapabilities>`, `properties: Vec<Property>` |
 | `EncodingInfo` | `acceleration: Option<AccelerationType>`, `max_profile: Option<VideoProfile>`, `max_level: Option<i64>`, `supports_frame_reordering: Option<bool>`, `input: Option<IoCapabilities>`, `output: Option<IoCapabilities>`, `properties: Vec<Property>` |
@@ -410,7 +410,11 @@ for info in &codecs {
 }
 ```
 
-`supported_codecs()` は AMF ランタイムをロードして利用可能なコーデックを判定する。AMF ランタイムを初期化できない場合は `Err` を返し、個々のコーデックの非対応は `decoding` / `encoding` の `None` になる。
+`supported_codecs()` は AMF ランタイムをロードして利用可能なコーデックを判定する。AMF ランタイムを初期化できない場合は `Err` を返し、個々のコーデックの非対応は `decoding` / `encoding` の `None` になる。H.264 / HEVC / AV1 / VP9 の 4 件を返し、VP9 は AMF にエンコーダーがないため `encoding` が常に `None` になる。
+
+実機で確認済みの VP9 は Profile 0 (8bit 4:2:0) である。10bit (Profile 2) と 4:2:2 / 4:4:4 は、出力フォーマットが NV12 固定のため未検証である。
+
+VP9 の superframe は 1 フレームずつ分割して投入する必要がある。不可視フレーム (`show_frame=0`) や `show_existing_frame` を含むストリームは、入力と出力の対応付けができないため `DecodeHandler` にエラーが通知される。
 
 ### AMF ランタイムバージョンの取得
 

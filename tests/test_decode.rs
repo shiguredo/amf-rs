@@ -23,6 +23,18 @@ const H264_BFRAME_STREAM: &[u8] = include_bytes!("data/red-bframe-320x320-h264.h
 /// B フレームを含む HEVC の Annex B ビットストリーム
 const HEVC_BFRAME_STREAM: &[u8] = include_bytes!("data/cars-320x240.h265");
 
+/// VP9 の IVF ビットストリーム
+const VP9_IVF_STREAM: &[u8] = include_bytes!("data/vp9-colorbar-320x256.ivf");
+
+/// 不可視フレームを含む VP9 の IVF ビットストリーム
+const VP9_INVISIBLE_STREAM: &[u8] = include_bytes!("data/vp9-invisible-320x256.ivf");
+
+/// show_existing_frame を含む VP9 の IVF ビットストリーム
+const VP9_SHOW_EXISTING_STREAM: &[u8] = include_bytes!("data/vp9-show-existing-320x256.ivf");
+
+/// superframe を含む VP9 の IVF ビットストリーム
+const VP9_SUPERFRAME_STREAM: &[u8] = include_bytes!("data/vp9-superframe-320x256.ivf");
+
 /// 最初の通知で panic するハンドラー
 struct PanicDecodeHandler;
 
@@ -147,6 +159,39 @@ fn is_hevc_vcl(nal_header: u8) -> bool {
     // HEVC の NAL ユニット種別は、NAL ユニットヘッダーの 1 バイト目の
     // bit 1 から bit 6 までである。
     ((nal_header >> 1) & 0x3f) <= 31
+}
+
+/// IVF コンテナからフレームのペイロードを取り出す
+///
+/// IVF のヘッダーは 32 バイトで、各フレームは 4 バイトのペイロードサイズと
+/// 8 バイトの PTS の後にペイロードが続く。
+fn split_ivf_frames(data: &[u8]) -> Vec<Vec<u8>> {
+    assert!(data.len() >= 32, "IVF のヘッダーが短い");
+    assert_eq!(&data[0..4], b"DKIF", "IVF のシグネチャが異なる");
+    assert_eq!(&data[8..12], b"VP90", "VP9 以外の IVF である");
+
+    let mut frames = Vec::new();
+    let mut position = 32;
+    while position < data.len() {
+        assert!(
+            position + 12 <= data.len(),
+            "IVF のフレームヘッダーが途中で終わっている"
+        );
+        let size = u32::from_le_bytes(
+            data[position..position + 4]
+                .try_into()
+                .expect("IVF のペイロードサイズを読み取れない"),
+        ) as usize;
+        let payload_start = position + 12;
+        let payload_end = payload_start + size;
+        assert!(
+            payload_end <= data.len(),
+            "IVF のフレームペイロードが途中で終わっている"
+        );
+        frames.push(data[payload_start..payload_end].to_vec());
+        position = payload_end;
+    }
+    frames
 }
 
 /// 各アクセスユニットを個別の Buffer でデコードし、入力順のインデックスを
@@ -729,6 +774,207 @@ fn test_decode_hevc_bframes_maps_user_data() {
 
     let results = decode_access_units(DecoderCodec::Hevc, &access_units);
     assert_user_data_mapping(results, access_units.len());
+}
+
+/// VP9 ストリームをデコードし、全フレームが出力されることと解像度を確認する
+#[test]
+fn test_decode_vp9_outputs_all_frames() {
+    let frames = split_ivf_frames(VP9_IVF_STREAM);
+    assert_eq!(frames.len(), 10, "VP9 ストリームのフレーム数が想定と異なる");
+
+    let results = decode_access_units(DecoderCodec::Vp9, &frames);
+    assert_eq!(
+        results.len(),
+        frames.len(),
+        "デコードされたフレーム数が一致しない"
+    );
+    // VP9 の coded size は 64x64 のスーパーブロック単位に揃うため、表示サイズと
+    // プレーンサイズが一致する 320x256 のストリームで解像度を確認する。
+    for (index, result) in results.into_iter().enumerate() {
+        let frame = result
+            .unwrap_or_else(|error| panic!("VP9 のフレーム {index} のデコードに失敗: {error}"));
+        assert_eq!(
+            *frame.user_data(),
+            index,
+            "VP9 のフレーム {index} の user_data が一致しない"
+        );
+        let (width, height) = surface_size(frame.surface());
+        assert_eq!(
+            (width, height),
+            (320, 256),
+            "VP9 のフレーム {index} の解像度が一致しない"
+        );
+    }
+}
+
+/// VP9 の不可視フレームをデコードしたときの AMF の挙動を確認する
+///
+/// AMF は不可視フレームをデコードするが、その出力には入力の frame ID が付かない。
+/// そのため、不可視フレームの出力と入力の両方がエラーとして通知される。
+#[test]
+fn test_decode_vp9_invisible_frame_is_not_mapped() {
+    let frames = split_ivf_frames(VP9_INVISIBLE_STREAM);
+    assert_eq!(
+        frames.len(),
+        3,
+        "VP9 の不可視フレームを含むストリームのフレーム数が想定と異なる"
+    );
+
+    let results = decode_access_units(DecoderCodec::Vp9, &frames);
+    assert_eq!(
+        results.len(),
+        4,
+        "不可視フレームを含む VP9 の通知数が想定と異なる"
+    );
+
+    let mut decoded = Vec::new();
+    let mut missing_frame_id = 0;
+    let mut unmatched_input = 0;
+    for result in results {
+        match result {
+            Ok(frame) => {
+                let (width, height) = surface_size(frame.surface());
+                assert_eq!(
+                    (width, height),
+                    (320, 256),
+                    "不可視フレームを含む VP9 の解像度が一致しない"
+                );
+                decoded.push(*frame.user_data());
+            }
+            Err(error) => {
+                let message = error.to_string();
+                if message.contains("AMF_NOT_FOUND") {
+                    missing_frame_id += 1;
+                } else if message.contains("did not produce output for the submitted input") {
+                    unmatched_input += 1;
+                } else {
+                    panic!("不可視フレームを含む VP9 で予期しないエラー: {message}");
+                }
+            }
+        }
+    }
+    decoded.sort_unstable();
+    assert_eq!(
+        decoded,
+        vec![0, 2],
+        "不可視フレームを含む VP9 の出力 user_data が一致しない"
+    );
+    assert_eq!(
+        missing_frame_id, 1,
+        "frame ID を持たない不可視フレームの出力数が想定と異なる"
+    );
+    assert_eq!(
+        unmatched_input, 1,
+        "出力が得られなかった不可視フレームの入力数が想定と異なる"
+    );
+}
+
+/// VP9 の show_existing_frame をデコードしたときの AMF の挙動を確認する
+///
+/// AMF は show_existing_frame の出力を返さないため、入力に対応する出力がない
+/// エラーが通知される。
+#[test]
+fn test_decode_vp9_show_existing_frame_is_not_output() {
+    let frames = split_ivf_frames(VP9_SHOW_EXISTING_STREAM);
+    assert_eq!(
+        frames.len(),
+        2,
+        "show_existing_frame を含む VP9 ストリームのフレーム数が想定と異なる"
+    );
+
+    let results = decode_access_units(DecoderCodec::Vp9, &frames);
+    assert_eq!(
+        results.len(),
+        2,
+        "show_existing_frame を含む VP9 の通知数が想定と異なる"
+    );
+
+    let mut decoded = Vec::new();
+    let mut unmatched_input = 0;
+    for result in results {
+        match result {
+            Ok(frame) => {
+                let (width, height) = surface_size(frame.surface());
+                assert_eq!(
+                    (width, height),
+                    (320, 256),
+                    "show_existing_frame を含む VP9 の解像度が一致しない"
+                );
+                decoded.push(*frame.user_data());
+            }
+            Err(error) => {
+                let message = error.to_string();
+                assert!(
+                    message.contains("did not produce output for the submitted input"),
+                    "show_existing_frame を含む VP9 で予期しないエラー: {message}"
+                );
+                unmatched_input += 1;
+            }
+        }
+    }
+    assert_eq!(
+        decoded,
+        vec![0],
+        "show_existing_frame を含む VP9 の出力 user_data が一致しない"
+    );
+    assert_eq!(
+        unmatched_input, 1,
+        "show_existing_frame の入力に対応する出力がないエラー数が想定と異なる"
+    );
+}
+
+/// VP9 の superframe を 1 つの Buffer で投入したときの AMF の挙動を確認する
+///
+/// AMF は superframe 内の 2 フレーム目も出力するが、その出力には入力の frame ID が
+/// 付かない。superframe は 1 フレームずつ分割して投入する必要がある。
+#[test]
+fn test_decode_vp9_superframe_is_not_mapped() {
+    let frames = split_ivf_frames(VP9_SUPERFRAME_STREAM);
+    assert_eq!(
+        frames.len(),
+        1,
+        "superframe を含む VP9 ストリームのフレーム数が想定と異なる"
+    );
+
+    let results = decode_access_units(DecoderCodec::Vp9, &frames);
+    assert_eq!(
+        results.len(),
+        2,
+        "superframe を含む VP9 の通知数が想定と異なる"
+    );
+
+    let mut decoded = Vec::new();
+    let mut missing_frame_id = 0;
+    for result in results {
+        match result {
+            Ok(frame) => {
+                let (width, height) = surface_size(frame.surface());
+                assert_eq!(
+                    (width, height),
+                    (320, 256),
+                    "superframe を含む VP9 の解像度が一致しない"
+                );
+                decoded.push(*frame.user_data());
+            }
+            Err(error) => {
+                let message = error.to_string();
+                assert!(
+                    message.contains("AMF_NOT_FOUND"),
+                    "superframe を含む VP9 で予期しないエラー: {message}"
+                );
+                missing_frame_id += 1;
+            }
+        }
+    }
+    assert_eq!(
+        decoded,
+        vec![0],
+        "superframe を含む VP9 の出力 user_data が一致しない"
+    );
+    assert_eq!(
+        missing_frame_id, 1,
+        "frame ID を持たない superframe 内のフレーム数が想定と異なる"
+    );
 }
 
 // ---------------------------------------------------------------------------

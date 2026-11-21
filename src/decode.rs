@@ -1,7 +1,7 @@
 //! AMF ハードウェアデコーダー
 //!
 //! AMD GPU を使ったハードウェアビデオデコードを提供する。
-//! H.264/AVC、H.265/HEVC、AV1 コーデックに対応する。
+//! H.264/AVC、H.265/HEVC、AV1、VP9 コーデックに対応する。
 
 use crate::AmfLibrary;
 use crate::amf::{Buffer, Component, Context, Data, Surface};
@@ -23,6 +23,15 @@ pub enum DecoderCodec {
     Hevc,
     /// AV1
     Av1,
+    /// VP9
+    ///
+    /// 実機で確認済みなのは Profile 0 (8bit 4:2:0) である。10bit (Profile 2) は
+    /// 出力フォーマットが NV12 固定のため未検証である。
+    ///
+    /// superframe は 1 フレームずつ分割して投入する必要がある。不可視フレーム
+    /// (`show_frame=0`) や `show_existing_frame` を含むストリームは、入力と出力の
+    /// 対応付けができないため、[`DecodeHandler`] にエラーが通知される。
+    Vp9,
 }
 
 /// デコーダー設定
@@ -150,6 +159,7 @@ impl<H: DecodeHandler> Decoder<H> {
             DecoderCodec::H264 => sys::str::AMFVideoDecoderUVD_H264_AVC,
             DecoderCodec::Hevc => sys::str::AMFVideoDecoderHW_H265_HEVC,
             DecoderCodec::Av1 => sys::str::AMFVideoDecoderHW_AV1,
+            DecoderCodec::Vp9 => sys::str::AMFVideoDecoderHW_VP9,
         };
 
         let component = lib.create_component(&context, component_id)?;

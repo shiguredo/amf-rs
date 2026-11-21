@@ -25,7 +25,7 @@ AMF ランタイムライブラリ (libamfrt64.so.1) は AMD GPU ドライバー
 ## 特徴
 
 - AMF によるハードウェアエンコード (H.264 / H.265 / AV1)
-- AMF によるハードウェアデコード (H.264 / H.265 / AV1)
+- AMF によるハードウェアデコード (H.264 / H.265 / AV1 / VP9)
 - AMF ランタイムライブラリの実行時動的ロード (ビルド時のリンク不要)
 - Vulkan バックエンドによる GPU 処理
 - エンコード入力フォーマット選択 (AMD Radeon 780M では NV12 / YV12 / I420 / BGRA / ARGB / RGBA / YUY2 / P010 を確認済み。P010 は HEVC と AV1 で利用できる)
@@ -308,6 +308,17 @@ cargo run -p amf-check -- --width 1280 --height 720
 | H.264     | `DecoderCodec::H264` |
 | H.265     | `DecoderCodec::Hevc` |
 | AV1       | `DecoderCodec::Av1` |
+| VP9       | `DecoderCodec::Vp9` |
+
+VP9 はデコードのみに対応します。AMF に VP9 エンコーダーがないため、`CodecConfig` に
+VP9 はなく、`supported_codecs` が返す VP9 の `encoding` は `None` になります。
+
+実機で確認済みの VP9 は Profile 0 (8bit 4:2:0) です。10bit (Profile 2) と
+4:2:2 / 4:4:4 は、出力フォーマットが NV12 固定のため未検証です。
+
+VP9 の superframe は 1 フレームずつ分割して投入してください。不可視フレーム
+(`show_frame=0`) や `show_existing_frame` を含むストリームは、入力と出力の対応付けが
+できないため、`DecodeHandler` にエラーが通知されます。
 
 ## サポートフォーマット
 
