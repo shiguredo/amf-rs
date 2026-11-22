@@ -1,7 +1,7 @@
 # デコーダーワーカーが出力 GPU サーフェスを Host 変換せず保持するのを修正する
 
 - Created: 2026-11-21
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-11-22
 - Branch: feature/fix-decoder-output-surface-retention
 - Polished: {YYYY-MM-DD}
 - Reporter: @melpon
@@ -42,3 +42,13 @@
 - NV12 で出力を保持する回帰テストが追加され、`AMF_DECODER_NO_FREE_SURFACES` で停止しない。
 - AMD GPU 実機で `cargo test --workspace` が通り、カーネルログに GPUVM page fault と device reset が出ない。
 - `CHANGES.md` の `## develop` に `[FIX]` が追記される。
+
+## 解決方法
+
+- ワーカーの `drain_output` で、`QueryOutput` から取得した出力が Surface の場合は `output_buffer` に積む前に Host メモリへ変換するようにした。エンコーダーの Buffer 出力は変換しない
+- `Decoder::new` の `deliver` から Host 変換を削除し、変換をワーカー側に集約した
+- 変換に失敗した出力は、取得済みの `Data` を解放したうえで `Err` としてハンドラーへ通知する
+- 出力を保持したまま 30 フレームを連続投入し、`AMF_DECODER_NO_FREE_SURFACES` で停止せず、通知された `Surface` が Host メモリであることを確認する回帰テストを追加した
+- 既定の出力サーフェスプールでは `AMF_DECODER_NO_FREE_SURFACES` を再現できなかったため、テスト用の `AMF_VIDEO_DECODER_SURFACE_POOL_SIZE` 設定は追加していない。プールサイズを小さくするとデコーダー自体が動作しなくなり、修正前後で差が出ないため
+- AMD Radeon 780M / AMF ランタイム 1.5.3.0 で `cargo test --workspace` が成功し、カーネルログに GPUVM page fault と device reset が出ないことを確認した
+- `CHANGES.md` の `## develop` に `[FIX]` を追記した
