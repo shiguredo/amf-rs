@@ -37,9 +37,10 @@ pub struct QpRange {
 
 - `min` / `max` はそれぞれ独立に指定でき、`None` の側は AMF の既定値を使う。
 - Min / Max QP はコーデック別の設定構造体に置く。共通の `EncoderConfig` フィールドにすると、HEVC の I / P や AV1 の intra / inter / inter_B に同じ値を入れることになり、フレーム種別ごとに違う範囲を指定できなくなるため。
-  - `H264EncoderConfig` に `qp_range: Option<QpRange>` を追加し、`AMF_VIDEO_ENCODER_MIN_QP` / `MAX_QP` に設定する。
-  - `HevcEncoderConfig` に `qp_range_i` / `qp_range_p: Option<QpRange>` を追加し、`AMF_VIDEO_ENCODER_HEVC_MIN_QP_I` / `MAX_QP_I` と `_P` に設定する。
-  - `Av1EncoderConfig` に `qp_range_intra` / `qp_range_inter` / `qp_range_inter_b: Option<QpRange>` を追加し、`AMF_VIDEO_ENCODER_AV1_MIN_Q_INDEX_INTRA` / `MAX_Q_INDEX_INTRA`、`_INTER`、`_INTER_B` に設定する。
+  - `H264EncoderConfig` に `qp_range: QpRange` を追加し、`AMF_VIDEO_ENCODER_MIN_QP` / `MAX_QP` に設定する。
+  - `HevcEncoderConfig` に `qp_range_i` / `qp_range_p: QpRange` を追加し、`AMF_VIDEO_ENCODER_HEVC_MIN_QP_I` / `MAX_QP_I` と `_P` に設定する。
+  - `Av1EncoderConfig` に `qp_range_intra` / `qp_range_inter` / `qp_range_inter_b: QpRange` を追加し、`AMF_VIDEO_ENCODER_AV1_MIN_Q_INDEX_INTRA` / `MAX_Q_INDEX_INTRA`、`_INTER`、`_INTER_B` に設定する。
+  - 外側は `Option` にせず `QpRange` とする。`QpRange` の `min` / `max` が `Option` なので、`Option<QpRange>` にすると `None` と `Some(QpRange::default())` が同じ意味になり冗長になるため。
 - 値の範囲は H.264 / HEVC が 0-51、AV1 が 1-255 であることを doc に書く。ローカルでは検証せず、範囲外の値はそのまま AMF に渡す。`SetProperty` / `Init` が返すエラーはそのまま返す。
 - `min` と `max` の大小関係もローカルでは検証しない。AMF の判定に委ねる。
 - `qpi` / `qpp` / `qpb` は CQP の固定 QP、`qp_range` はレート制御時の QP の範囲という違いを doc に書く。
