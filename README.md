@@ -34,6 +34,7 @@ AMF ランタイムライブラリ (libamfrt64.so.1) は AMD GPU ドライバー
 - B フレーム (H.264 / AV1、GPU と AMF が対応している場合)
 - エンコード中の動的プロパティ再設定 (`reconfigure`)
 - CQP / CBR / VBR / LCVBR / QVBR / HQVBR / HQCBR レート制御モード
+- レート制御時の QP 範囲指定 (`QpRange`、コーデック別に指定可能)
 - エンコーダーの用途 (`EncoderUsage`) と品質プリセット (`QualityPreset`) の指定
 - ビルド時に GitHub から AMF ヘッダーを自動取得
 
@@ -98,6 +99,7 @@ let context = AmfLibrary::instance().create_context()?;
 let mut config = EncoderConfig::new(
     CodecConfig::H264(H264EncoderConfig {
         profile: Some(H264Profile::High),
+        ..Default::default()
     }),
     1920, // width
     1080, // height
@@ -164,6 +166,16 @@ for frame in frame_rx.try_iter() {
 エンコード結果は `FnEncodeHandler::new` で包んだクロージャに `Result<EncodedFrame<T>, E>` として通知されます。ハンドラーはワーカースレッドで呼ばれるため、結果は `mpsc::channel` の `Sender` でメインスレッドへ送ります。`E` の既定値は `shiguredo_amf::Error` です。`T` には `encode()` に渡したユーザーデータの型を指定します。
 
 `EncoderConfig::b_pic_pattern` に GOP 内の連続 B フレーム数を指定すると、B フレームを有効にできます。AMF の仕様上の値域は H.264 が 0-3、AV1 が 0-127 で、0 は B フレームなしです。HEVC は B フレームを扱わないため指定できません。B フレームを有効にすると、ハンドラーへの通知順は入力順 (提示順) と異なる符号化順になりますが、`encode()` に渡したユーザーデータは対応する入力フレームの出力に付きます。B フレームに対応していない GPU で 1 以上を指定した場合は `Encoder::new` がエラーを返します。
+
+コーデック別設定の `qp_range` 系に `QpRange` を指定すると、レート制御時の QP (AV1 は Q インデックス) の下限と上限を指定できます。
+
+- H.264: `H264EncoderConfig::qp_range` (AMF の MinQP / MaxQP はフレーム種別を分けない 1 組)
+- HEVC: `HevcEncoderConfig::qp_range_i` / `qp_range_p` (I / P フレーム別)
+- AV1: `Av1EncoderConfig::qp_range_intra` / `qp_range_inter` / `qp_range_inter_b` (intra / inter / inter_B (bi-directional inter) フレーム別)
+
+`QpRange` の `min` と `max` はそれぞれ独立して指定でき、`None` の側は AMF の既定値を使います。AMF の仕様上の値域は、H.264 と HEVC が QP の 0-51、AV1 が Q インデックスの 1-255 です。`EncoderConfig::qpi` / `qpp` / `qpb` は CQP の固定 QP、`qp_range` 系はレート制御時の QP の範囲という違いがあります。
+
+`H264EncoderConfig` / `HevcEncoderConfig` / `Av1EncoderConfig` は `Default` を実装しており、`..Default::default()` で未指定のフィールドを既定値にできます。
 
 `Encoder` は入出力の対応付けに `ShiguredoAmfFrameId` プロパティを使います。この名前はライブラリの予約名であり、利用者は入力 `Surface` に設定しないでください。`encode()` は入力 `Surface` の PTS を変更せず、出力 `Buffer` の PTS も設定しません。出力 `Buffer` の PTS は AMF が付けた値になります。
 

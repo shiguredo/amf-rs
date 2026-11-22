@@ -38,6 +38,7 @@ fn h264_cqp_test_encoder_config() -> EncoderConfig {
     let mut config = EncoderConfig::new(
         CodecConfig::H264(H264EncoderConfig {
             profile: Some(H264Profile::High),
+            ..Default::default()
         }),
         320,
         240,

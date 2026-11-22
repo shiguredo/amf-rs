@@ -7,7 +7,7 @@ use shiguredo_amf::{
     AmfError, Av1EncoderConfig, Av1Profile, CodecConfig, EncodeHandler, EncodeOptions,
     EncodedFrame, Encoder, EncoderConfig, EncoderUsage, Error, FnEncodeHandler, FrameFormat,
     H264EncoderConfig, H264Profile, HevcEncoderConfig, HevcProfile, PictureType, PlaneType,
-    QualityPreset, RateControlMode, ReconfigureParams, VideoCodecType, supported_codecs,
+    QpRange, QualityPreset, RateControlMode, ReconfigureParams, VideoCodecType, supported_codecs,
 };
 
 pub mod helpers;
@@ -44,6 +44,7 @@ fn test_reconfigure_params_default_is_empty() {
 fn hevc_main10() -> CodecConfig {
     CodecConfig::Hevc(HevcEncoderConfig {
         profile: Some(HevcProfile::Main10),
+        ..Default::default()
     })
 }
 
@@ -51,18 +52,20 @@ fn hevc_main10() -> CodecConfig {
 fn hevc_main() -> CodecConfig {
     CodecConfig::Hevc(HevcEncoderConfig {
         profile: Some(HevcProfile::Main),
+        ..Default::default()
     })
 }
 
 /// テスト用の HEVC プロファイル未指定の設定を返す
 fn hevc_default_profile() -> CodecConfig {
-    CodecConfig::Hevc(HevcEncoderConfig { profile: None })
+    CodecConfig::Hevc(HevcEncoderConfig::default())
 }
 
 /// テスト用の AV1 Main プロファイル設定を返す
 fn av1_main() -> CodecConfig {
     CodecConfig::Av1(Av1EncoderConfig {
         profile: Some(Av1Profile::Main),
+        ..Default::default()
     })
 }
 
@@ -85,6 +88,7 @@ fn all_codecs() -> [(&'static str, CodecConfig); 3] {
             "H.264",
             CodecConfig::H264(H264EncoderConfig {
                 profile: Some(H264Profile::High),
+                ..Default::default()
             }),
         ),
         ("HEVC", hevc_main()),
@@ -911,6 +915,68 @@ fn test_encoder_usage_and_quality_preset_combined() {
         config,
         &format!("{codec_name} usage + quality_preset"),
     );
+}
+
+/// 各コーデックで QP 範囲を指定したエンコーダーが数フレームのエンコードに成功することを確認する
+///
+/// HEVC は I / P、AV1 は intra / inter / inter_B に別々の範囲を指定した状態で
+/// 初期化とエンコードができることを確認する。CBR のレート制御で使う QP の
+/// 範囲を指定する。
+#[test]
+fn test_encoder_qp_range() {
+    let codecs = [
+        (
+            "H.264",
+            CodecConfig::H264(H264EncoderConfig {
+                qp_range: QpRange {
+                    min: Some(18),
+                    max: Some(38),
+                },
+                ..Default::default()
+            }),
+        ),
+        (
+            "HEVC",
+            CodecConfig::Hevc(HevcEncoderConfig {
+                qp_range_i: QpRange {
+                    min: Some(16),
+                    max: Some(36),
+                },
+                qp_range_p: QpRange {
+                    min: Some(20),
+                    max: Some(40),
+                },
+                ..Default::default()
+            }),
+        ),
+        (
+            "AV1",
+            CodecConfig::Av1(Av1EncoderConfig {
+                qp_range_intra: QpRange {
+                    min: Some(10),
+                    max: Some(200),
+                },
+                qp_range_inter: QpRange {
+                    min: Some(20),
+                    max: Some(210),
+                },
+                qp_range_inter_b: QpRange {
+                    min: Some(30),
+                    max: Some(220),
+                },
+                ..Default::default()
+            }),
+        ),
+    ];
+
+    let context = create_context();
+    for (codec_name, codec) in codecs {
+        assert_encoder_encodes(
+            &context,
+            test_encoder_config(codec, FrameFormat::Nv12),
+            codec_name,
+        );
+    }
 }
 
 /// 出力の回収を待たずに大量のフレームを投入し、すべてのフレームが出力されることを確認する

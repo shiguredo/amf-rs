@@ -87,6 +87,15 @@
   - drop の処理中に、すでに `encode()` / `decode()` が成功したフレームの出力が通知されることがある
   - drop は、すべてのフレームの出力が通知されることを保証しない
   - @melpon
+- [CHANGE] エンコーダーにコーデック別の QP 範囲の指定を追加する
+  - `QpRange` を追加する
+  - `H264EncoderConfig` に `qp_range` を追加する
+  - `HevcEncoderConfig` に `qp_range_i` / `qp_range_p` を追加する
+  - `Av1EncoderConfig` に `qp_range_intra` / `qp_range_inter` / `qp_range_inter_b` を追加する
+  - `H264EncoderConfig` / `HevcEncoderConfig` / `Av1EncoderConfig` に `Default` を実装する
+  - 公開フィールドを追加するため、構造体リテラルでの構築はコンパイルエラーになる
+  - AMF の仕様上の値域は、H.264 と HEVC が QP の 0-51、AV1 が Q インデックスの 1-255
+  - @melpon
 - [ADD] `EncoderConfig` に `usage` と `quality_preset` を追加し、エンコーダーの用途と品質プリセットを設定できるようにする
   - `EncoderUsage` は `Transcoding` / `UltraLowLatency` / `LowLatency` / `Webcam` / `HighQuality` / `LowLatencyHighQuality`
   - `QualityPreset` は `Speed` / `Balanced` / `Quality` / `HighQuality`

@@ -1,7 +1,7 @@
 # エンコーダーにコーデック別の Min / Max QP 範囲を追加する
 
 - Created: 2026-11-10
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-11-22
 - Branch: feature/add-qp-range-params
 - Polished: {YYYY-MM-DD}
 - Reporter: @melpon
@@ -37,9 +37,10 @@ pub struct QpRange {
 
 - `min` / `max` はそれぞれ独立に指定でき、`None` の側は AMF の既定値を使う。
 - Min / Max QP はコーデック別の設定構造体に置く。共通の `EncoderConfig` フィールドにすると、HEVC の I / P や AV1 の intra / inter / inter_B に同じ値を入れることになり、フレーム種別ごとに違う範囲を指定できなくなるため。
-  - `H264EncoderConfig` に `qp_range: Option<QpRange>` を追加し、`AMF_VIDEO_ENCODER_MIN_QP` / `MAX_QP` に設定する。
-  - `HevcEncoderConfig` に `qp_range_i` / `qp_range_p: Option<QpRange>` を追加し、`AMF_VIDEO_ENCODER_HEVC_MIN_QP_I` / `MAX_QP_I` と `_P` に設定する。
-  - `Av1EncoderConfig` に `qp_range_intra` / `qp_range_inter` / `qp_range_inter_b: Option<QpRange>` を追加し、`AMF_VIDEO_ENCODER_AV1_MIN_Q_INDEX_INTRA` / `MAX_Q_INDEX_INTRA`、`_INTER`、`_INTER_B` に設定する。
+  - `H264EncoderConfig` に `qp_range: QpRange` を追加し、`AMF_VIDEO_ENCODER_MIN_QP` / `MAX_QP` に設定する。
+  - `HevcEncoderConfig` に `qp_range_i` / `qp_range_p: QpRange` を追加し、`AMF_VIDEO_ENCODER_HEVC_MIN_QP_I` / `MAX_QP_I` と `_P` に設定する。
+  - `Av1EncoderConfig` に `qp_range_intra` / `qp_range_inter` / `qp_range_inter_b: QpRange` を追加し、`AMF_VIDEO_ENCODER_AV1_MIN_Q_INDEX_INTRA` / `MAX_Q_INDEX_INTRA`、`_INTER`、`_INTER_B` に設定する。
+  - 外側は `Option` にせず `QpRange` とする。`QpRange` の `min` / `max` が `Option` なので、`Option<QpRange>` にすると `None` と `Some(QpRange::default())` が同じ意味になり冗長になるため。
 - 値の範囲は H.264 / HEVC が 0-51、AV1 が 1-255 であることを doc に書く。ローカルでは検証せず、範囲外の値はそのまま AMF に渡す。`SetProperty` / `Init` が返すエラーはそのまま返す。
 - `min` と `max` の大小関係もローカルでは検証しない。AMF の判定に委ねる。
 - `qpi` / `qpp` / `qpb` は CQP の固定 QP、`qp_range` はレート制御時の QP の範囲という違いを doc に書く。
@@ -56,8 +57,21 @@ pub struct QpRange {
 - H.264 は 1 組、HEVC は I / P、AV1 は intra / inter / inter_B に、指定した値が AMF のプロパティに設定される。
 - 範囲外の値をローカルで拒否せず、AMF の判定結果をそのまま返す。
 - `qpi` / `qpp` / `qpb` と `qp_range` の違い、および値の範囲が doc に書かれている。
-- `EncoderConfig` (Init 時) だけで設定でき、`ReconfigureParams` では変更できないことが doc に書かれている。
 - 既存の `H264EncoderConfig` などの構造体リテラルを新しい API に移行し、`..Default::default()` で構築できるようにする。
 - README / SKILL.md の設定項目とコード例が実装と一致する。
 - 実機テストが追加され、`cargo test --workspace` が通る。
 - `CHANGES.md` の `## develop` に `[CHANGE]` を追記する。
+
+## 解決方法
+
+- 公開型 `QpRange` を追加した。`min` / `max` はそれぞれ `Option<u16>` で独立して指定でき、`None` の側は AMF の既定値を使う。
+- `H264EncoderConfig::qp_range`、`HevcEncoderConfig::qp_range_i` / `qp_range_p`、`Av1EncoderConfig::qp_range_intra` / `qp_range_inter` / `qp_range_inter_b` を `QpRange` 型で追加した。省略時は `QpRange::default()` となり、QP 範囲を設定しない。
+- `set_h264_properties` / `set_hevc_properties` / `set_av1_properties` で、H.264 は `AMF_VIDEO_ENCODER_MIN_QP` / `MAX_QP`、HEVC は `AMF_VIDEO_ENCODER_HEVC_MIN_QP_I` / `MAX_QP_I` と `_P`、AV1 は `AMF_VIDEO_ENCODER_AV1_MIN_Q_INDEX_INTRA` / `MAX_Q_INDEX_INTRA`、`_INTER`、`_INTER_B` に設定するようにした。USAGE の設定後に設定する。
+- `H264EncoderConfig` / `HevcEncoderConfig` / `Av1EncoderConfig` に `Default` を実装し、既存の構造体リテラルを `..Default::default()` に移行した。
+- QP の値域や `min` と `max` の大小関係はローカルで検証せず、範囲外の値は AMF に渡して返されたエラーをそのまま返す。
+- `qpi` / `qpp` / `qpb` は CQP の固定 QP、`qp_range` 系はレート制御時の QP の範囲であることを doc に書いた。
+- `ReconfigureParams` は変更対象外とし、`Encoder::new` でのみ設定できるようにした。
+- `src/encode.rs` の単体テストで `PropertyStorage::get_property_int64` を使い、各プロパティに指定値が設定されること、片側だけ指定した場合に反対側が変更されないこと、範囲外の値で `Encoder::new` がエラーになることを確認した。
+- `tests/test_encode.rs` に実機テストを追加し、H.264 / HEVC / AV1 で QP 範囲を指定した `Encoder::new` と数フレームのエンコードが成功することを確認した。
+- README / `skills/shiguredo-amf/SKILL.md` / `CHANGES.md` を更新した。
+- AMD GPU 実機で `cargo fmt --all --check`、`cargo clippy --workspace --all-targets -- -D warnings`、`cargo test --workspace` を通した。

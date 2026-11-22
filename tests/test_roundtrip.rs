@@ -577,6 +577,7 @@ fn test_roundtrip_h264_cbr() {
     let mut config = EncoderConfig::new(
         CodecConfig::H264(H264EncoderConfig {
             profile: Some(H264Profile::High),
+            ..Default::default()
         }),
         320,
         240,
@@ -597,6 +598,7 @@ fn test_roundtrip_h264_cqp() {
     let mut config = EncoderConfig::new(
         CodecConfig::H264(H264EncoderConfig {
             profile: Some(H264Profile::Main),
+            ..Default::default()
         }),
         320,
         240,
@@ -670,6 +672,7 @@ fn test_roundtrip_h264_b_pic_pattern_user_data() {
     let mut config = EncoderConfig::new(
         CodecConfig::H264(H264EncoderConfig {
             profile: Some(H264Profile::High),
+            ..Default::default()
         }),
         320,
         240,
@@ -734,6 +737,7 @@ fn test_roundtrip_h264_force_idr() {
     let mut config = EncoderConfig::new(
         CodecConfig::H264(H264EncoderConfig {
             profile: Some(H264Profile::High),
+            ..Default::default()
         }),
         320,
         240,
@@ -810,6 +814,7 @@ fn test_force_picture_type_h264_outputs_idr_and_sps_pps() {
     let mut config = EncoderConfig::new(
         CodecConfig::H264(H264EncoderConfig {
             profile: Some(H264Profile::High),
+            ..Default::default()
         }),
         320,
         240,
@@ -839,6 +844,7 @@ fn test_force_picture_type_h264_i_and_p() {
     let mut config = EncoderConfig::new(
         CodecConfig::H264(H264EncoderConfig {
             profile: Some(H264Profile::High),
+            ..Default::default()
         }),
         320,
         240,
@@ -878,6 +884,7 @@ fn test_force_picture_type_priority_and_ignored_flags() {
     let mut config = EncoderConfig::new(
         CodecConfig::H264(H264EncoderConfig {
             profile: Some(H264Profile::High),
+            ..Default::default()
         }),
         320,
         240,
@@ -935,6 +942,7 @@ fn test_roundtrip_hevc_cbr() {
     let mut config = EncoderConfig::new(
         CodecConfig::Hevc(HevcEncoderConfig {
             profile: Some(HevcProfile::Main),
+            ..Default::default()
         }),
         320,
         240,
@@ -955,6 +963,7 @@ fn test_roundtrip_hevc_cqp() {
     let mut config = EncoderConfig::new(
         CodecConfig::Hevc(HevcEncoderConfig {
             profile: Some(HevcProfile::Main),
+            ..Default::default()
         }),
         320,
         240,
@@ -976,6 +985,7 @@ fn test_force_picture_type_hevc_outputs_idr_and_vps_sps_pps() {
     let mut config = EncoderConfig::new(
         CodecConfig::Hevc(HevcEncoderConfig {
             profile: Some(HevcProfile::Main),
+            ..Default::default()
         }),
         320,
         240,
@@ -1005,6 +1015,7 @@ fn test_force_picture_type_hevc_i_and_p() {
     let mut config = EncoderConfig::new(
         CodecConfig::Hevc(HevcEncoderConfig {
             profile: Some(HevcProfile::Main),
+            ..Default::default()
         }),
         320,
         240,
@@ -1046,6 +1057,7 @@ fn test_roundtrip_av1_cbr() {
     let mut config = EncoderConfig::new(
         CodecConfig::Av1(Av1EncoderConfig {
             profile: Some(Av1Profile::Main),
+            ..Default::default()
         }),
         320,
         240,
@@ -1066,6 +1078,7 @@ fn test_roundtrip_av1_cqp() {
     let mut config = EncoderConfig::new(
         CodecConfig::Av1(Av1EncoderConfig {
             profile: Some(Av1Profile::Main),
+            ..Default::default()
         }),
         320,
         240,
@@ -1088,6 +1101,7 @@ fn test_roundtrip_av1_user_data_mapping() {
     let mut config = EncoderConfig::new(
         CodecConfig::Av1(Av1EncoderConfig {
             profile: Some(Av1Profile::Main),
+            ..Default::default()
         }),
         320,
         240,
@@ -1129,6 +1143,7 @@ fn test_av1_picture_types() {
     let mut config = EncoderConfig::new(
         CodecConfig::Av1(Av1EncoderConfig {
             profile: Some(Av1Profile::Main),
+            ..Default::default()
         }),
         320,
         240,
@@ -1169,6 +1184,7 @@ fn test_force_picture_type_av1_outputs_keyframe_and_sequence_header() {
     let mut config = EncoderConfig::new(
         CodecConfig::Av1(Av1EncoderConfig {
             profile: Some(Av1Profile::Main),
+            ..Default::default()
         }),
         320,
         240,
@@ -1198,6 +1214,7 @@ fn test_force_picture_type_av1_i() {
     let mut config = EncoderConfig::new(
         CodecConfig::Av1(Av1EncoderConfig {
             profile: Some(Av1Profile::Main),
+            ..Default::default()
         }),
         320,
         240,
@@ -1231,6 +1248,7 @@ fn test_force_picture_type_av1_ignores_p() {
     let mut config = EncoderConfig::new(
         CodecConfig::Av1(Av1EncoderConfig {
             profile: Some(Av1Profile::Main),
+            ..Default::default()
         }),
         320,
         240,
@@ -1270,6 +1288,7 @@ fn test_reconfigure_invalid_framerate_zero() {
     let config = EncoderConfig::new(
         CodecConfig::H264(H264EncoderConfig {
             profile: Some(H264Profile::High),
+            ..Default::default()
         }),
         320,
         240,
@@ -1305,6 +1324,7 @@ fn test_reconfigure_h264_runtime_change() {
     let mut config = EncoderConfig::new(
         CodecConfig::H264(H264EncoderConfig {
             profile: Some(H264Profile::High),
+            ..Default::default()
         }),
         320,
         240,
@@ -1381,6 +1401,7 @@ fn test_reconfigure_hevc_rejects_qpb_and_gop() {
     let mut config = EncoderConfig::new(
         CodecConfig::Hevc(HevcEncoderConfig {
             profile: Some(HevcProfile::Main),
+            ..Default::default()
         }),
         320,
         240,
@@ -1445,6 +1466,7 @@ fn test_reconfigure_av1_qpb_and_gop() {
     let mut config = EncoderConfig::new(
         CodecConfig::Av1(Av1EncoderConfig {
             profile: Some(Av1Profile::Main),
+            ..Default::default()
         }),
         320,
         240,
@@ -1707,6 +1729,7 @@ fn test_roundtrip_h264_i420() {
     roundtrip_format(
         CodecConfig::H264(H264EncoderConfig {
             profile: Some(H264Profile::High),
+            ..Default::default()
         }),
         DecoderCodec::H264,
         FrameFormat::I420,
@@ -1720,6 +1743,7 @@ fn test_roundtrip_h264_yv12() {
     roundtrip_format(
         CodecConfig::H264(H264EncoderConfig {
             profile: Some(H264Profile::High),
+            ..Default::default()
         }),
         DecoderCodec::H264,
         FrameFormat::Yv12,
@@ -1733,6 +1757,7 @@ fn test_roundtrip_h264_bgra() {
     roundtrip_format(
         CodecConfig::H264(H264EncoderConfig {
             profile: Some(H264Profile::High),
+            ..Default::default()
         }),
         DecoderCodec::H264,
         FrameFormat::Bgra,
@@ -1746,6 +1771,7 @@ fn test_roundtrip_h264_argb() {
     roundtrip_format(
         CodecConfig::H264(H264EncoderConfig {
             profile: Some(H264Profile::High),
+            ..Default::default()
         }),
         DecoderCodec::H264,
         FrameFormat::Argb,
@@ -1759,6 +1785,7 @@ fn test_roundtrip_h264_rgba() {
     roundtrip_format(
         CodecConfig::H264(H264EncoderConfig {
             profile: Some(H264Profile::High),
+            ..Default::default()
         }),
         DecoderCodec::H264,
         FrameFormat::Rgba,
@@ -1772,6 +1799,7 @@ fn test_roundtrip_h264_yuy2() {
     roundtrip_format(
         CodecConfig::H264(H264EncoderConfig {
             profile: Some(H264Profile::High),
+            ..Default::default()
         }),
         DecoderCodec::H264,
         FrameFormat::Yuy2,
@@ -1793,6 +1821,7 @@ fn test_roundtrip_h264_4k_high_bitrate() {
     let mut config = EncoderConfig::new(
         CodecConfig::H264(H264EncoderConfig {
             profile: Some(H264Profile::High),
+            ..Default::default()
         }),
         width,
         height,
@@ -1833,6 +1862,7 @@ fn test_roundtrip_hevc_4k_high_bitrate() {
     let mut config = EncoderConfig::new(
         CodecConfig::Hevc(HevcEncoderConfig {
             profile: Some(HevcProfile::Main),
+            ..Default::default()
         }),
         width,
         height,
@@ -1873,6 +1903,7 @@ fn test_roundtrip_av1_4k_high_bitrate() {
     let mut config = EncoderConfig::new(
         CodecConfig::Av1(Av1EncoderConfig {
             profile: Some(Av1Profile::Main),
+            ..Default::default()
         }),
         width,
         height,
@@ -1913,6 +1944,7 @@ fn test_user_data_delivered_in_submit_order() {
     let mut config = EncoderConfig::new(
         CodecConfig::H264(H264EncoderConfig {
             profile: Some(H264Profile::High),
+            ..Default::default()
         }),
         320,
         240,
