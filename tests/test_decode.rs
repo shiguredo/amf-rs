@@ -6,10 +6,12 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use shiguredo_amf::amf::{Context, Surface};
+use shiguredo_amf::ffi::AMF_RESULT;
 use shiguredo_amf::{
-    CodecConfig, DecodeHandler, DecodedFrame, Decoder, DecoderCodec, DecoderConfig, EncodeOptions,
-    Encoder, EncoderConfig, Error, FnDecodeHandler, FnEncodeHandler, FrameFormat,
-    H264EncoderConfig, MemoryType, PlaneType, RateControlMode, frame_type,
+    CodecConfig, DecodeHandler, DecodedFrame, Decoder, DecoderCodec, DecoderConfig,
+    DecoderReorderMode, EncodeOptions, Encoder, EncoderConfig, Error, FnDecodeHandler,
+    FnEncodeHandler, FrameFormat, H264EncoderConfig, MemoryType, PlaneType, RateControlMode,
+    frame_type,
 };
 
 #[expect(dead_code, reason = "test_decode では一部のヘルパーだけを使う")]
@@ -200,13 +202,22 @@ fn decode_access_units(
     codec: DecoderCodec,
     access_units: &[Vec<u8>],
 ) -> Vec<Result<DecodedFrame<usize>, Error>> {
+    decode_access_units_with_config(DecoderConfig::new(codec), access_units)
+}
+
+/// 指定した設定のデコーダーで各アクセスユニットを個別の Buffer でデコードし、
+/// 入力順のインデックスをユーザーデータとして渡した結果を返す
+fn decode_access_units_with_config(
+    config: DecoderConfig,
+    access_units: &[Vec<u8>],
+) -> Vec<Result<DecodedFrame<usize>, Error>> {
     let context = create_context();
     let results = Arc::new(Mutex::new(Vec::new()));
     let received = Arc::clone(&results);
 
     let mut decoder = Decoder::new(
         context,
-        DecoderConfig { codec },
+        config,
         FnDecodeHandler::<usize>::new(move |result| {
             received
                 .lock()
@@ -298,6 +309,44 @@ fn assert_user_data_mapping(
     user_data_order
 }
 
+/// 出力フレームが入力順に欠落・重複なく通知されたことを確認する
+///
+/// 入力順のインデックスを `user_data` として渡した結果を受け取り、出力順が
+/// 入力順と一致することを確認する。
+fn assert_user_data_in_input_order(
+    results: Vec<Result<DecodedFrame<usize>, Error>>,
+    expected_frames: usize,
+) {
+    let summaries = results
+        .iter()
+        .map(|result| match result {
+            Ok(frame) => format!(
+                "ok: user_data={}, pts={}",
+                frame.user_data(),
+                frame.surface().get_pts()
+            ),
+            Err(error) => format!("err: {error}"),
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        results.len(),
+        expected_frames,
+        "デコードされたフレーム数が一致しない: {summaries:?}"
+    );
+
+    let mut user_data_order = Vec::new();
+    for (index, result) in results.into_iter().enumerate() {
+        let frame = result.unwrap_or_else(|error| panic!("出力 {index} のデコードに失敗: {error}"));
+        let (_surface, user_data) = frame.into_parts();
+        user_data_order.push(user_data);
+    }
+    assert_eq!(
+        user_data_order,
+        (0..expected_frames).collect::<Vec<_>>(),
+        "出力順が入力順と一致しない、または出力に欠落や重複がある"
+    );
+}
+
 /// 入力を 1 つも投入せずに finish した場合、通知がなく完了することを確認する
 #[test]
 fn test_decoder_finish_without_input() {
@@ -307,9 +356,7 @@ fn test_decoder_finish_without_input() {
 
     let mut decoder = Decoder::new(
         context,
-        DecoderConfig {
-            codec: DecoderCodec::H264,
-        },
+        DecoderConfig::new(DecoderCodec::H264),
         FnDecodeHandler::<usize>::new(move |result| {
             received
                 .lock()
@@ -342,9 +389,7 @@ fn test_finish_after_failed_first_submit_does_not_hang() {
 
         let mut decoder = Decoder::new(
             context,
-            DecoderConfig {
-                codec: DecoderCodec::H264,
-            },
+            DecoderConfig::new(DecoderCodec::H264),
             FnDecodeHandler::<usize>::new(move |result| {
                 received
                     .lock()
@@ -417,9 +462,7 @@ fn test_decode_rejects_multi_frame_buffer() {
     let context = create_context();
     let mut decoder = Decoder::new(
         context,
-        DecoderConfig {
-            codec: DecoderCodec::H264,
-        },
+        DecoderConfig::new(DecoderCodec::H264),
         FnDecodeHandler::<usize>::new(move |result| {
             received
                 .lock()
@@ -471,9 +514,7 @@ fn test_decode_after_finish_is_rejected() {
     let context = create_context();
     let mut decoder = Decoder::new(
         context,
-        DecoderConfig {
-            codec: DecoderCodec::H264,
-        },
+        DecoderConfig::new(DecoderCodec::H264),
         FnDecodeHandler::<usize>::new(|_| {}),
     )
     .expect("デコーダーの作成に失敗");
@@ -522,9 +563,7 @@ fn test_drop_decoder_without_output_completes_quickly() {
     let received = Arc::clone(&results);
     let mut decoder = Decoder::new(
         create_context(),
-        DecoderConfig {
-            codec: DecoderCodec::H264,
-        },
+        DecoderConfig::new(DecoderCodec::H264),
         FnDecodeHandler::<usize>::new(move |result| {
             received
                 .lock()
@@ -566,9 +605,7 @@ fn test_finish_returns_error_when_handler_panics() {
     let access_units = split_access_units(H264_BFRAME_STREAM, is_h264_vcl);
     let mut decoder = Decoder::new(
         create_context(),
-        DecoderConfig {
-            codec: DecoderCodec::H264,
-        },
+        DecoderConfig::new(DecoderCodec::H264),
         PanicDecodeHandler,
     )
     .expect("デコーダーの作成に失敗");
@@ -609,9 +646,7 @@ fn test_decode_maps_user_data_with_duplicate_zero_pts() {
     let received = Arc::clone(&results);
     let mut decoder = Decoder::new(
         create_context(),
-        DecoderConfig {
-            codec: DecoderCodec::H264,
-        },
+        DecoderConfig::new(DecoderCodec::H264),
         FnDecodeHandler::<usize>::new(move |result| {
             received
                 .lock()
@@ -674,9 +709,7 @@ fn test_decode_reports_input_without_output() {
     let received = Arc::clone(&results);
     let mut decoder = Decoder::new(
         create_context(),
-        DecoderConfig {
-            codec: DecoderCodec::H264,
-        },
+        DecoderConfig::new(DecoderCodec::H264),
         FnDecodeHandler::<usize>::new(move |result| {
             received
                 .lock()
@@ -762,9 +795,7 @@ fn test_decode_reports_input_without_output() {
 fn test_finish_twice_is_rejected() {
     let mut decoder = Decoder::new(
         create_context(),
-        DecoderConfig {
-            codec: DecoderCodec::H264,
-        },
+        DecoderConfig::new(DecoderCodec::H264),
         FnDecodeHandler::<usize>::new(|_| {}),
     )
     .expect("デコーダーの作成に失敗");
@@ -821,6 +852,132 @@ fn test_decode_hevc_bframes_maps_user_data() {
 
     let results = decode_access_units(DecoderCodec::Hevc, &access_units);
     assert_user_data_mapping(results, access_units.len());
+}
+
+// ---------------------------------------------------------------------------
+// 遅延とサーフェスプールの設定
+// ---------------------------------------------------------------------------
+
+/// 各コーデックのデコーダーが低遅延とサーフェスプールの設定を受け付けることを
+/// 確認する
+///
+/// 入力なしでも `Decoder::new` が成功すれば、指定した設定が AMF に受け付けられた
+/// と判断できる。`dpb_size` は AMF ランタイムが許可しないため、このテストでは
+/// 指定しない。
+#[test]
+fn test_decoder_accepts_latency_options_for_all_codecs() {
+    for codec in [
+        DecoderCodec::H264,
+        DecoderCodec::Hevc,
+        DecoderCodec::Av1,
+        DecoderCodec::Vp9,
+    ] {
+        let mut config = DecoderConfig::new(codec);
+        config.low_latency = Some(true);
+        config.reorder_mode = Some(DecoderReorderMode::LowLatency);
+        config.surface_pool_size = Some(0);
+
+        let mut decoder =
+            Decoder::new(create_context(), config, FnDecodeHandler::<()>::new(|_| {}))
+                .unwrap_or_else(|error| panic!("{codec:?} のデコーダーの作成に失敗: {error}"));
+        decoder
+            .finish()
+            .unwrap_or_else(|error| panic!("{codec:?} のデコーダーの finish に失敗: {error}"));
+    }
+}
+
+/// AMF ランタイムが DPB サイズの設定を許可しない場合、`Decoder::new` が
+/// AMF のエラーを返すことを確認する
+///
+/// Linux の AMF ランタイム 1.5.3.0 では `AMF_VIDEO_DECODER_DPB_SIZE` の設定が
+/// `AMF_ACCESS_DENIED` になる。
+#[test]
+fn test_decoder_rejects_unsupported_dpb_size() {
+    for codec in [
+        DecoderCodec::H264,
+        DecoderCodec::Hevc,
+        DecoderCodec::Av1,
+        DecoderCodec::Vp9,
+    ] {
+        // 0 は AMF の仕様上の値域に含まれるが、このランタイムでは 0 も
+        // 他の値と同じく受け付けられないことを確認する。
+        for dpb_size in [0, 4, 32] {
+            let mut config = DecoderConfig::new(codec);
+            config.dpb_size = Some(dpb_size);
+
+            let error =
+                match Decoder::new(create_context(), config, FnDecodeHandler::<()>::new(|_| {})) {
+                    Ok(_) => panic!(
+                        "{codec:?} で dpb_size={dpb_size} を指定したデコーダーの作成が成功した"
+                    ),
+                    Err(error) => error,
+                };
+            assert!(
+                matches!(
+                    &error,
+                    Error::Amf(amf)
+                        if amf.status() == AMF_RESULT::AMF_ACCESS_DENIED
+                            && amf.operation().contains("DPBSize")
+                ),
+                "{codec:?} の dpb_size={dpb_size} 指定時のエラーが AMF_ACCESS_DENIED の DPBSize ではない: {error}"
+            );
+        }
+    }
+}
+
+/// 低遅延モードで B フレームを含むストリームをデコードし、出力フレームの
+/// 欠落と重複がなく、出力順が入力順になることを確認する
+#[test]
+fn test_decode_low_latency_outputs_frames_in_input_order() {
+    let access_units = split_access_units(H264_BFRAME_STREAM, is_h264_vcl);
+    assert!(
+        access_units.len() > 1,
+        "テスト用ビットストリームから複数のアクセスユニットが得られない"
+    );
+
+    let mut config = DecoderConfig::new(DecoderCodec::H264);
+    config.low_latency = Some(true);
+    config.reorder_mode = Some(DecoderReorderMode::LowLatency);
+    let results = decode_access_units_with_config(config, &access_units);
+    assert_user_data_in_input_order(results, access_units.len());
+}
+
+/// 低遅延モードで B フレームを含む HEVC ストリームをデコードし、出力フレームの
+/// 欠落と重複がなく、出力順が入力順になることを確認する
+#[test]
+fn test_decode_hevc_low_latency_outputs_frames_in_input_order() {
+    let access_units = split_access_units(HEVC_BFRAME_STREAM, is_hevc_vcl);
+    assert!(
+        access_units.len() > 1,
+        "テスト用ビットストリームから複数のアクセスユニットが得られない"
+    );
+
+    let mut config = DecoderConfig::new(DecoderCodec::Hevc);
+    config.low_latency = Some(true);
+    config.reorder_mode = Some(DecoderReorderMode::LowLatency);
+    let results = decode_access_units_with_config(config, &access_units);
+    assert_user_data_in_input_order(results, access_units.len());
+}
+
+/// サーフェスプールのサイズを指定しても、出力フレームの欠落と重複がないことを
+/// 確認する
+///
+/// `surface_pool_size` が 0 の場合は AMF が DPB サイズからプールサイズを計算する。
+/// 明示した場合も、B フレームの並べ替えに必要なサーフェス数が確保される。
+#[test]
+fn test_decode_with_surface_pool_size_outputs_all_frames() {
+    let access_units = split_access_units(H264_BFRAME_STREAM, is_h264_vcl);
+
+    for surface_pool_size in [0, 16] {
+        let mut config = DecoderConfig::new(DecoderCodec::H264);
+        config.surface_pool_size = Some(surface_pool_size);
+        let results = decode_access_units_with_config(config, &access_units);
+        let user_data_order = assert_user_data_mapping(results, access_units.len());
+        assert_eq!(
+            user_data_order, H264_PRESENTATION_ORDER,
+            "surface_pool_size={surface_pool_size} の出力順が提示順と一致しない"
+        );
+    }
 }
 
 /// VP9 ストリームをデコードし、全フレームが出力されることと解像度を確認する
@@ -1151,9 +1308,7 @@ fn test_decode_continues_after_resolution_change() {
     let received = Arc::clone(&results);
     let mut decoder = Decoder::new(
         create_context(),
-        DecoderConfig {
-            codec: DecoderCodec::H264,
-        },
+        DecoderConfig::new(DecoderCodec::H264),
         FnDecodeHandler::<usize>::new(move |result| {
             received
                 .lock()
@@ -1254,6 +1409,51 @@ fn test_decode_continues_after_resolution_change() {
     );
 }
 
+/// 解像度変化を挟んでも、低遅延とサーフェスプールの設定が再適用され、
+/// 全フレームが欠落なく出力されることを確認する
+///
+/// 解像度変化では AMF コンポーネントを Terminate して Init し直すため、
+/// 作成時に指定した設定が再適用されるかを確認する。
+#[test]
+fn test_decode_low_latency_continues_after_resolution_change() {
+    let encoding_context = create_context();
+    let mut access_units = encode_h264_stream(
+        &encoding_context,
+        320,
+        240,
+        RESOLUTION_CHANGE_INITIAL_FRAMES,
+    );
+    access_units.extend(encode_h264_stream(
+        &encoding_context,
+        256,
+        160,
+        RESOLUTION_CHANGE_SMALLER_FRAMES,
+    ));
+    access_units.extend(encode_h264_stream(
+        &encoding_context,
+        320,
+        240,
+        RESOLUTION_CHANGE_LARGER_FRAMES,
+    ));
+    drop(encoding_context);
+
+    let total_frames = RESOLUTION_CHANGE_INITIAL_FRAMES
+        + RESOLUTION_CHANGE_SMALLER_FRAMES
+        + RESOLUTION_CHANGE_LARGER_FRAMES;
+    assert_eq!(
+        access_units.len(),
+        total_frames,
+        "テスト用ストリームのフレーム数が想定と異なる"
+    );
+
+    let mut config = DecoderConfig::new(DecoderCodec::H264);
+    config.low_latency = Some(true);
+    config.reorder_mode = Some(DecoderReorderMode::LowLatency);
+    config.surface_pool_size = Some(16);
+    let results = decode_access_units_with_config(config, &access_units);
+    assert_user_data_in_input_order(results, total_frames);
+}
+
 /// 出力の回収を待たずに大量のアクセスユニットを投入し、すべてのフレームが出力されることを確認する
 ///
 /// 出力用 Surface を回収できないまま入力が続くと、`SubmitInput` が
@@ -1279,9 +1479,7 @@ fn test_decoder_continuous_submit_outputs_all_frames() {
     let collected = Arc::clone(&received);
     let mut decoder = Decoder::new(
         context,
-        DecoderConfig {
-            codec: DecoderCodec::H264,
-        },
+        DecoderConfig::new(DecoderCodec::H264),
         FnDecodeHandler::<usize>::new(move |result| {
             let frame = result.expect("デコード結果がエラーになった");
             // Surface はこのクロージャを抜けるときに解放され、デコーダーの
@@ -1398,9 +1596,7 @@ fn test_decoder_holds_outputs_without_surface_exhaustion() {
     let received = Arc::clone(&results);
     let mut decoder = Decoder::new(
         create_context(),
-        DecoderConfig {
-            codec: DecoderCodec::H264,
-        },
+        DecoderConfig::new(DecoderCodec::H264),
         FnDecodeHandler::<usize>::new(move |result| {
             received
                 .lock()

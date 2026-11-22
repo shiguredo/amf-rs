@@ -14,6 +14,7 @@ AMD GPU 向けハードウェアアクセラレーションによるビデオエ
 - **Vulkan バックエンド**で GPU 処理を実行 (Linux x86_64)
 - **エンコード入力フォーマット選択**: 8bit / 10bit (AMD Radeon 780M では NV12 / YV12 / I420 / BGRA / ARGB / RGBA / YUY2 / P010 を確認済み。P010 は HEVC と AV1 で利用できる)
 - **デコード出力**は NV12 フォーマット
+- **デコーダーの遅延とサーフェスプールの調整**: `DecoderConfig` の `low_latency` / `reorder_mode` / `surface_pool_size` / `dpb_size`
 - **フレーム単位のエンコードオプション** (IDR フレーム強制)
 - **エンコード中の動的プロパティ再設定** (`Encoder::reconfigure`)
 - **CQP / CBR / VBR / LCVBR / QVBR / HQVBR / HQCBR** レート制御モード
@@ -86,8 +87,9 @@ AMD GPU 向けハードウェアアクセラレーションによるビデオエ
 
 | 型 | 説明 | 主要メソッド |
 |----|------|-------------|
-| `DecoderConfig` | デコーダー設定 | `codec: DecoderCodec` |
+| `DecoderConfig` | デコーダー設定 | `new(DecoderCodec)`, フィールド: `codec`, `low_latency: Option<bool>`, `reorder_mode: Option<DecoderReorderMode>`, `surface_pool_size: Option<u32>`, `dpb_size: Option<u32>` |
 | `DecoderCodec` | デコーダーのコーデック種別 | `H264`, `Hevc`, `Av1`, `Vp9` |
+| `DecoderReorderMode` | DPB のリオーダーモード | `Regular`, `Compliant`, `LowLatency` |
 | `DecodedFrame<T>` | デコード済みフレーム | `surface() -> &Surface`, `user_data() -> &T`, `into_parts() -> (Surface, T)` |
 
 ### コーデック情報 (`codec_info`)
@@ -317,7 +319,7 @@ use shiguredo_amf::{
 
 let context = AmfLibrary::instance().create_context()?;
 
-let config = DecoderConfig { codec: DecoderCodec::H264 };
+let config = DecoderConfig::new(DecoderCodec::H264);
 
 // クロージャをハンドラーにラップする
 let (frame_tx, frame_rx) = mpsc::channel();
@@ -352,6 +354,26 @@ for frame in frame_rx.try_iter() {
 ```
 
 デコーダーは初期化時に解像度 `0x0` で AMF コンポーネントを Init するため、ビットストリームのシーケンスヘッダーから解像度が自動検出される。出力 `Surface` は内部で `convert(MemoryType::Host)` 済みのため、`get_plane()` 経由でホストメモリから直接読み出せる。
+
+`DecoderConfig` ではデコーダーの遅延とサーフェスプールを調整できる。
+`DecoderConfig::new(codec)` で必須項目だけを指定し、公開フィールドを書き換えて
+残りの項目を指定する。
+
+`low_latency` は AMF の `LowLatencyDecode` を設定するが、出力フレームの順序は
+`reorder_mode` で決まる。`reorder_mode` に `DecoderReorderMode::LowLatency` を
+指定すると、B フレームによる並べ替えが無効になり、出力フレームは入力順に通知される。
+
+低遅延モードでも、入出力の対応付けは `UserData` で行うため、出力フレームの PTS
+には依存しない。出力 `Surface` の PTS は AMF が付けた値になる。
+
+`surface_pool_size` はデコード用サーフェスプールのサイズで、`0` は AMF が
+DPB サイズから計算する。値が小さすぎる場合、出力サーフェスが不足して `decode()`
+がエラーになる。
+
+`dpb_size` は DPB が保持するサーフェス数の下限で、AMF の仕様上の値域は 0-32 である。
+Linux の AMF ランタイム 1.5.3.0 では `AMF_VIDEO_DECODER_DPB_SIZE` の設定が
+0 を含むすべての値で `AMF_ACCESS_DENIED` になるため、`dpb_size` を指定した `Decoder::new` はエラーを
+返す。
 
 `decode()` には 1 フレーム分のビットストリームを格納した `Buffer` を渡す。複数フレームを含むバッファは未対応で、`AMF_REPEAT` が返された場合はエラーになる。B フレームを含むストリームでは出力順が入力順と異なるが、`decode()` に渡した `UserData` は対応する出力フレームに付く。`decode()` は入力 `Buffer` の PTS を変更せず、出力 `Surface` の PTS も設定しない。出力 `Surface` の PTS は AMF が付けた値になる。入出力の対応付けには `ShiguredoAmfFrameId` プロパティを使う。この名前はライブラリの予約名であり、利用者は入力 `Buffer` に設定しないこと。
 

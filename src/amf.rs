@@ -230,6 +230,19 @@ impl PropertyStorage {
         Ok(())
     }
 
+    /// Bool プロパティを設定する
+    ///
+    /// # Errors
+    ///
+    /// AMF が値を受け付けない場合にエラーを返す。
+    pub fn set_property_bool(&self, name: &str, value: bool) -> Result<(), Error> {
+        let name_w = sys::to_wstring(name);
+        let var = sys::AMFVariantStruct::from_bool(value);
+        let result = unsafe { self.set_property(name_w.as_ptr(), var) };
+        AmfError::check(result, format!("AMFPropertyStorage::SetProperty({name:?})"))?;
+        Ok(())
+    }
+
     /// Size プロパティを設定する
     pub fn set_property_size(&self, name: &str, width: i32, height: i32) -> Result<(), Error> {
         let name_w = sys::to_wstring(name);
