@@ -56,7 +56,6 @@ pub struct QpRange {
 - H.264 は 1 組、HEVC は I / P、AV1 は intra / inter / inter_B に、指定した値が AMF のプロパティに設定される。
 - 範囲外の値をローカルで拒否せず、AMF の判定結果をそのまま返す。
 - `qpi` / `qpp` / `qpb` と `qp_range` の違い、および値の範囲が doc に書かれている。
-- `EncoderConfig` (Init 時) だけで設定でき、`ReconfigureParams` では変更できないことが doc に書かれている。
 - 既存の `H264EncoderConfig` などの構造体リテラルを新しい API に移行し、`..Default::default()` で構築できるようにする。
 - README / SKILL.md の設定項目とコード例が実装と一致する。
 - 実機テストが追加され、`cargo test --workspace` が通る。
