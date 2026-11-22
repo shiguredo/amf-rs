@@ -87,6 +87,12 @@
   - drop の処理中に、すでに `encode()` / `decode()` が成功したフレームの出力が通知されることがある
   - drop は、すべてのフレームの出力が通知されることを保証しない
   - @melpon
+- [ADD] `EncoderConfig` に `usage` と `quality_preset` を追加し、エンコーダーの用途と品質プリセットを設定できるようにする
+  - `EncoderUsage` は `Transcoding` / `UltraLowLatency` / `LowLatency` / `Webcam` / `HighQuality` / `LowLatencyHighQuality`
+  - `QualityPreset` は `Speed` / `Balanced` / `Quality` / `HighQuality`
+  - `QueryOutput` のタイムアウトを 0 に固定し、用途の既定による出力回収のブロックを防ぐ
+  - `usage` の既定は `Transcoding`、`quality_preset` が `None` のときは用途とコーデックに応じた AMF の既定値を使う
+  - @melpon
 - [ADD] `Counter` / `Gauge` / `EncoderStats` / `DecoderStats` を追加し、`Encoder::stats()` / `Decoder::stats()` で統計値を取得できるようにする
   - `EncoderStats` は送信件数、出力フレーム数、エラー件数、出力ビット数、再設定回数、in-flight フレーム数を保持する
   - `DecoderStats` は送信件数、出力フレーム数、エラー件数、in-flight フレーム数を保持する

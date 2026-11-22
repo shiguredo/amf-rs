@@ -1,13 +1,13 @@
 use std::sync::{Arc, Mutex, mpsc};
 use std::time::{Duration, Instant};
 
-use shiguredo_amf::amf::Surface;
+use shiguredo_amf::amf::{Context, Surface};
 use shiguredo_amf::ffi::AMF_RESULT;
 use shiguredo_amf::{
     AmfError, Av1EncoderConfig, Av1Profile, CodecConfig, EncodeHandler, EncodeOptions,
-    EncodedFrame, Encoder, EncoderConfig, Error, FnEncodeHandler, FrameFormat, H264EncoderConfig,
-    H264Profile, HevcEncoderConfig, HevcProfile, PictureType, PlaneType, RateControlMode,
-    ReconfigureParams, VideoCodecType, supported_codecs,
+    EncodedFrame, Encoder, EncoderConfig, EncoderUsage, Error, FnEncodeHandler, FrameFormat,
+    H264EncoderConfig, H264Profile, HevcEncoderConfig, HevcProfile, PictureType, PlaneType,
+    QualityPreset, RateControlMode, ReconfigureParams, VideoCodecType, supported_codecs,
 };
 
 pub mod helpers;
@@ -76,6 +76,80 @@ fn test_encoder_config(codec: CodecConfig, frame_format: FrameFormat) -> Encoder
 /// 指定した設定でエンコーダーを作成する
 fn create_encoder(config: EncoderConfig) -> Result<Encoder<FnEncodeHandler<()>>, Error> {
     Encoder::new(create_context(), config, FnEncodeHandler::<()>::new(|_| {}))
+}
+
+/// テスト対象のコーデック一覧を H.264 / HEVC / AV1 の順に返す
+fn all_codecs() -> [(&'static str, CodecConfig); 3] {
+    [
+        (
+            "H.264",
+            CodecConfig::H264(H264EncoderConfig {
+                profile: Some(H264Profile::High),
+            }),
+        ),
+        ("HEVC", hevc_main()),
+        ("AV1", av1_main()),
+    ]
+}
+
+/// 指定した設定で 3 フレームをエンコードし、すべての出力が得られることを確認する
+///
+/// 入力フレームは NV12 として生成するため、`config.frame_format` は
+/// `FrameFormat::Nv12` でなければならない。`label` は失敗時にどの設定で
+/// 失敗したかを示すために使う。
+fn assert_encoder_encodes(context: &Context, config: EncoderConfig, label: &str) {
+    const NUM_FRAMES: usize = 3;
+
+    assert_eq!(
+        config.frame_format,
+        FrameFormat::Nv12,
+        "{label}: assert_encoder_encodes は NV12 専用である"
+    );
+
+    let width = config.width as usize;
+    let height = config.height as usize;
+    let (tx, rx) = mpsc::channel();
+    let mut encoder = Encoder::new(
+        context.clone(),
+        config,
+        FnEncodeHandler::<()>::new(move |result| {
+            tx.send(result).expect("エンコード結果の送信に失敗");
+        }),
+    )
+    .unwrap_or_else(|error| panic!("{label}: エンコーダーの作成に失敗: {error}"));
+
+    for frame_index in 0..NUM_FRAMES {
+        let surface = encoder
+            .alloc_surface()
+            .unwrap_or_else(|error| panic!("{label}: Surface の確保に失敗: {error}"));
+        let data = generate_dummy_nv12(width, height, frame_index);
+        copy_nv12_to_surface(&surface, &data, width, height);
+        encoder
+            .encode(surface, EncodeOptions::default(), ())
+            .unwrap_or_else(|error| {
+                panic!("{label}: フレーム {frame_index} のエンコードに失敗: {error}")
+            });
+    }
+    encoder
+        .finish()
+        .unwrap_or_else(|error| panic!("{label}: finish に失敗: {error}"));
+    drop(encoder);
+
+    let frames: Vec<_> = rx.try_iter().collect();
+    assert_eq!(
+        frames.len(),
+        NUM_FRAMES,
+        "{label}: エンコードされたフレーム数が一致しない"
+    );
+    for (frame_index, result) in frames.iter().enumerate() {
+        let frame = result.as_ref().unwrap_or_else(|error| {
+            panic!("{label}: フレーム {frame_index} のエンコードに失敗: {error}")
+        });
+        assert!(
+            frame.buffer().get_size() > 0,
+            "{label}: フレーム {frame_index} のビットストリームが空"
+        );
+    }
 }
 
 /// 最初の通知でブロックするハンドラー
@@ -736,16 +810,7 @@ fn test_encoder_y210_y410_initialization() {
 #[test]
 fn test_encoder_all_rate_control_modes() {
     let context = create_context();
-    let codecs = [
-        (
-            "H.264",
-            CodecConfig::H264(H264EncoderConfig {
-                profile: Some(H264Profile::High),
-            }),
-        ),
-        ("HEVC", hevc_main()),
-        ("AV1", av1_main()),
-    ];
+    let codecs = all_codecs();
     let modes = [
         RateControlMode::Cqp,
         RateControlMode::Cbr,
@@ -773,57 +838,79 @@ fn test_encoder_all_rate_control_modes() {
                 }
             }
 
-            let (tx, rx) = mpsc::channel();
-            let mut encoder = Encoder::new(
-                context.clone(),
-                config,
-                FnEncodeHandler::<()>::new(move |result| {
-                    tx.send(result).expect("エンコード結果の送信に失敗");
-                }),
-            )
-            .unwrap_or_else(|error| {
-                panic!("{codec_name} {mode:?}: エンコーダーの作成に失敗: {error}")
-            });
-
-            let num_frames = 3;
-            for frame_index in 0..num_frames {
-                let surface = encoder.alloc_surface().unwrap_or_else(|error| {
-                    panic!("{codec_name} {mode:?}: Surface の確保に失敗: {error}")
-                });
-                let data = generate_dummy_nv12(320, 240, frame_index);
-                copy_nv12_to_surface(&surface, &data, 320, 240);
-                encoder
-                    .encode(surface, EncodeOptions::default(), ())
-                    .unwrap_or_else(|error| {
-                        panic!(
-                            "{codec_name} {mode:?}: フレーム {frame_index} のエンコードに失敗: {error}"
-                        )
-                    });
-            }
-            encoder
-                .finish()
-                .unwrap_or_else(|error| panic!("{codec_name} {mode:?}: finish に失敗: {error}"));
-            drop(encoder);
-
-            let frames: Vec<_> = rx.try_iter().collect();
-            assert_eq!(
-                frames.len(),
-                num_frames,
-                "{codec_name} {mode:?}: エンコードされたフレーム数が一致しない"
-            );
-            for (frame_index, result) in frames.iter().enumerate() {
-                let frame = result.as_ref().unwrap_or_else(|error| {
-                    panic!(
-                        "{codec_name} {mode:?}: フレーム {frame_index} のエンコードに失敗: {error}"
-                    )
-                });
-                assert!(
-                    frame.buffer().get_size() > 0,
-                    "{codec_name} {mode:?}: フレーム {frame_index} のビットストリームが空"
-                );
-            }
+            assert_encoder_encodes(&context, config, &format!("{codec_name} {mode:?}"));
         }
     }
+}
+
+/// すべての用途でエンコーダーを作成し、数フレームをエンコードできることを確認する
+///
+/// 用途の enum 値は H.264 / HEVC と AV1 で並びが異なるため、すべての用途について
+/// 実際の AMF がその値を受け付けて出力を返すことを確認する。
+#[test]
+fn test_encoder_all_usages() {
+    let context = create_context();
+    let codecs = all_codecs();
+    let usages = [
+        EncoderUsage::Transcoding,
+        EncoderUsage::UltraLowLatency,
+        EncoderUsage::LowLatency,
+        EncoderUsage::Webcam,
+        EncoderUsage::HighQuality,
+        EncoderUsage::LowLatencyHighQuality,
+    ];
+
+    for (codec_name, codec) in codecs {
+        for usage in usages {
+            let mut config = test_encoder_config(codec.clone(), FrameFormat::Nv12);
+            config.usage = usage;
+            assert_encoder_encodes(&context, config, &format!("{codec_name} {usage:?}"));
+        }
+    }
+}
+
+/// すべての品質プリセットでエンコーダーを作成し、数フレームをエンコードできることを確認する
+///
+/// 品質プリセットの enum 値は H.264 / HEVC / AV1 で並びが異なるため、すべての
+/// プリセットについて実際の AMF がその値を受け付けて出力を返すことを確認する。
+#[test]
+fn test_encoder_all_quality_presets() {
+    let context = create_context();
+    let codecs = all_codecs();
+    let presets = [
+        QualityPreset::Speed,
+        QualityPreset::Balanced,
+        QualityPreset::Quality,
+        QualityPreset::HighQuality,
+    ];
+
+    for (codec_name, codec) in codecs {
+        for preset in presets {
+            let mut config = test_encoder_config(codec.clone(), FrameFormat::Nv12);
+            config.quality_preset = Some(preset);
+            assert_encoder_encodes(&context, config, &format!("{codec_name} {preset:?}"));
+        }
+    }
+}
+
+/// 用途と品質プリセットを同時に指定できることを確認する
+///
+/// 品質プリセットの既定値は用途とコーデックによって決まる。用途と品質プリセットを
+/// 同時に指定した状態で、初期化と数フレームのエンコードが完了することを H.264 で
+/// 確認する。
+#[test]
+fn test_encoder_usage_and_quality_preset_combined() {
+    let context = create_context();
+    let codecs = all_codecs();
+    let (codec_name, codec) = &codecs[0];
+    let mut config = test_encoder_config(codec.clone(), FrameFormat::Nv12);
+    config.usage = EncoderUsage::LowLatency;
+    config.quality_preset = Some(QualityPreset::HighQuality);
+    assert_encoder_encodes(
+        &context,
+        config,
+        &format!("{codec_name} usage + quality_preset"),
+    );
 }
 
 /// 出力の回収を待たずに大量のフレームを投入し、すべてのフレームが出力されることを確認する
