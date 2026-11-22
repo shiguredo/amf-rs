@@ -88,7 +88,8 @@ use std::sync::mpsc;
 
 use shiguredo_amf::{
     AmfLibrary, CodecConfig, EncodeOptions, EncodedFrame, Encoder, EncoderConfig, FnEncodeHandler,
-    FrameFormat, H264EncoderConfig, H264Profile, RateControlMode, ReconfigureParams, frame_type,
+    FrameFormat, H264EncoderConfig, H264Profile, QpRange, RateControlMode, ReconfigureParams,
+    frame_type,
 };
 
 let context = AmfLibrary::instance().create_context()?;
@@ -160,6 +161,16 @@ for frame in frame_rx.try_iter() {
 エンコード結果は `FnEncodeHandler::new` で包んだクロージャに `Result<EncodedFrame<T>, E>` として通知されます。ハンドラーはワーカースレッドで呼ばれるため、結果は `mpsc::channel` の `Sender` でメインスレッドへ送ります。`E` の既定値は `shiguredo_amf::Error` です。`T` には `encode()` に渡したユーザーデータの型を指定します。
 
 `EncoderConfig::b_pic_pattern` に GOP 内の連続 B フレーム数を指定すると、B フレームを有効にできます。AMF の仕様上の値域は H.264 が 0-3、AV1 が 0-127 で、0 は B フレームなしです。HEVC は B フレームを扱わないため指定できません。B フレームを有効にすると、ハンドラーへの通知順は入力順 (提示順) と異なる符号化順になりますが、`encode()` に渡したユーザーデータは対応する入力フレームの出力に付きます。B フレームに対応していない GPU で 1 以上を指定した場合は `Encoder::new` がエラーを返します。
+
+コーデック別設定の `qp_range` 系に `QpRange` を指定すると、レート制御時の QP の下限と上限を指定できます。
+
+- H.264: `H264EncoderConfig::qp_range` (I / P / B フレーム共通)
+- H.265: `HevcEncoderConfig::qp_range_i` / `qp_range_p` (I / P フレーム別)
+- AV1: `Av1EncoderConfig::qp_range_intra` / `qp_range_inter` / `qp_range_inter_b` (intra / inter / inter_B フレーム別)
+
+`QpRange` の `min` と `max` はそれぞれ独立して指定でき、`None` の側は AMF の既定値を使います。値の範囲は H.264 と HEVC が 0-51、AV1 が 1-255 です。`EncoderConfig::qpi` / `qpp` / `qpb` は CQP の固定 QP、`qp_range` 系はレート制御時の QP の範囲という違いがあります。
+
+`H264EncoderConfig` / `HevcEncoderConfig` / `Av1EncoderConfig` は `Default` を実装しており、`..Default::default()` で未指定のフィールドを既定値にできます。
 
 `Encoder` は入出力の対応付けに `ShiguredoAmfFrameId` プロパティを使います。この名前はライブラリの予約名であり、利用者は入力 `Surface` に設定しないでください。`encode()` は入力 `Surface` の PTS を変更せず、出力 `Buffer` の PTS も設定しません。出力 `Buffer` の PTS は AMF が付けた値になります。
 

@@ -19,7 +19,7 @@
 //!     .expect("failed to create AMF context");
 //!
 //! let mut config = EncoderConfig::new(
-//!     CodecConfig::H264(H264EncoderConfig { profile: None }),
+//!     CodecConfig::H264(H264EncoderConfig::default()),
 //!     1920,
 //!     1080,
 //!     FrameFormat::Nv12,
@@ -97,7 +97,7 @@ pub use decode::{
 };
 pub use encode::{
     Av1EncoderConfig, CodecConfig, EncodeHandler, EncodeOptions, EncodedFrame, Encoder,
-    EncoderConfig, FnEncodeHandler, H264EncoderConfig, HevcEncoderConfig, PictureType,
+    EncoderConfig, FnEncodeHandler, H264EncoderConfig, HevcEncoderConfig, PictureType, QpRange,
     RateControlMode, ReconfigureParams, frame_type,
 };
 pub use error::{

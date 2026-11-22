@@ -203,9 +203,9 @@ fn print_codec_support(codecs: &Result<Vec<CodecInfo>>) {
 
 fn encoder_config(codec: VideoCodecType, width: u32, height: u32) -> EncoderConfig {
     let codec_config = match codec {
-        VideoCodecType::H264 => CodecConfig::H264(H264EncoderConfig { profile: None }),
-        VideoCodecType::Hevc => CodecConfig::Hevc(HevcEncoderConfig { profile: None }),
-        VideoCodecType::Av1 => CodecConfig::Av1(Av1EncoderConfig { profile: None }),
+        VideoCodecType::H264 => CodecConfig::H264(H264EncoderConfig::default()),
+        VideoCodecType::Hevc => CodecConfig::Hevc(HevcEncoderConfig::default()),
+        VideoCodecType::Av1 => CodecConfig::Av1(Av1EncoderConfig::default()),
     };
     let mut config = EncoderConfig::new(
         codec_config,

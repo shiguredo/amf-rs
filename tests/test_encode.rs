@@ -6,7 +6,7 @@ use shiguredo_amf::ffi::AMF_RESULT;
 use shiguredo_amf::{
     AmfError, Av1EncoderConfig, Av1Profile, CodecConfig, EncodeHandler, EncodeOptions,
     EncodedFrame, Encoder, EncoderConfig, Error, FnEncodeHandler, FrameFormat, H264EncoderConfig,
-    H264Profile, HevcEncoderConfig, HevcProfile, PictureType, PlaneType, RateControlMode,
+    H264Profile, HevcEncoderConfig, HevcProfile, PictureType, PlaneType, QpRange, RateControlMode,
     ReconfigureParams, VideoCodecType, supported_codecs,
 };
 
@@ -44,6 +44,7 @@ fn test_reconfigure_params_default_is_empty() {
 fn hevc_main10() -> CodecConfig {
     CodecConfig::Hevc(HevcEncoderConfig {
         profile: Some(HevcProfile::Main10),
+        ..Default::default()
     })
 }
 
@@ -51,18 +52,23 @@ fn hevc_main10() -> CodecConfig {
 fn hevc_main() -> CodecConfig {
     CodecConfig::Hevc(HevcEncoderConfig {
         profile: Some(HevcProfile::Main),
+        ..Default::default()
     })
 }
 
 /// テスト用の HEVC プロファイル未指定の設定を返す
 fn hevc_default_profile() -> CodecConfig {
-    CodecConfig::Hevc(HevcEncoderConfig { profile: None })
+    CodecConfig::Hevc(HevcEncoderConfig {
+        profile: None,
+        ..Default::default()
+    })
 }
 
 /// テスト用の AV1 Main プロファイル設定を返す
 fn av1_main() -> CodecConfig {
     CodecConfig::Av1(Av1EncoderConfig {
         profile: Some(Av1Profile::Main),
+        ..Default::default()
     })
 }
 
@@ -741,6 +747,7 @@ fn test_encoder_all_rate_control_modes() {
             "H.264",
             CodecConfig::H264(H264EncoderConfig {
                 profile: Some(H264Profile::High),
+                ..Default::default()
             }),
         ),
         ("HEVC", hevc_main()),
@@ -822,6 +829,108 @@ fn test_encoder_all_rate_control_modes() {
                     "{codec_name} {mode:?}: フレーム {frame_index} のビットストリームが空"
                 );
             }
+        }
+    }
+}
+
+/// 各コーデックで QP 範囲を指定したエンコーダーが数フレームのエンコードに成功することを確認する
+///
+/// HEVC は I / P、AV1 は intra / inter / inter_B に別々の範囲を指定した状態で
+/// 初期化とエンコードができることを確認する。CBR のレート制御で使う QP の
+/// 範囲を指定する。
+#[test]
+fn test_encoder_qp_range() {
+    let codecs = [
+        (
+            "H.264",
+            CodecConfig::H264(H264EncoderConfig {
+                profile: Some(H264Profile::High),
+                qp_range: Some(QpRange {
+                    min: Some(18),
+                    max: Some(38),
+                }),
+            }),
+        ),
+        (
+            "HEVC",
+            CodecConfig::Hevc(HevcEncoderConfig {
+                profile: Some(HevcProfile::Main),
+                qp_range_i: Some(QpRange {
+                    min: Some(16),
+                    max: Some(36),
+                }),
+                qp_range_p: Some(QpRange {
+                    min: Some(20),
+                    max: Some(40),
+                }),
+            }),
+        ),
+        (
+            "AV1",
+            CodecConfig::Av1(Av1EncoderConfig {
+                profile: Some(Av1Profile::Main),
+                qp_range_intra: Some(QpRange {
+                    min: Some(10),
+                    max: Some(200),
+                }),
+                qp_range_inter: Some(QpRange {
+                    min: Some(20),
+                    max: Some(210),
+                }),
+                qp_range_inter_b: Some(QpRange {
+                    min: Some(30),
+                    max: Some(220),
+                }),
+            }),
+        ),
+    ];
+
+    let context = create_context();
+    for (codec_name, codec) in codecs {
+        let (tx, rx) = mpsc::channel();
+        let mut encoder = Encoder::new(
+            context.clone(),
+            test_encoder_config(codec, FrameFormat::Nv12),
+            FnEncodeHandler::<()>::new(move |result| {
+                tx.send(result).expect("エンコード結果の送信に失敗");
+            }),
+        )
+        .unwrap_or_else(|error| {
+            panic!("{codec_name}: QP 範囲を指定したエンコーダーの作成に失敗: {error}")
+        });
+
+        let num_frames = 5;
+        for frame_index in 0..num_frames {
+            let surface = encoder
+                .alloc_surface()
+                .unwrap_or_else(|error| panic!("{codec_name}: Surface の確保に失敗: {error}"));
+            let data = generate_dummy_nv12(320, 240, frame_index);
+            copy_nv12_to_surface(&surface, &data, 320, 240);
+            encoder
+                .encode(surface, EncodeOptions::default(), ())
+                .unwrap_or_else(|error| {
+                    panic!("{codec_name}: フレーム {frame_index} のエンコードに失敗: {error}")
+                });
+        }
+        encoder
+            .finish()
+            .unwrap_or_else(|error| panic!("{codec_name}: finish に失敗: {error}"));
+        drop(encoder);
+
+        let frames: Vec<_> = rx.try_iter().collect();
+        assert_eq!(
+            frames.len(),
+            num_frames,
+            "{codec_name}: エンコードされたフレーム数が一致しない"
+        );
+        for (frame_index, result) in frames.iter().enumerate() {
+            let frame = result.as_ref().unwrap_or_else(|error| {
+                panic!("{codec_name}: フレーム {frame_index} のエンコードに失敗: {error}")
+            });
+            assert!(
+                frame.buffer().get_size() > 0,
+                "{codec_name}: フレーム {frame_index} のビットストリームが空"
+            );
         }
     }
 }

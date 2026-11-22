@@ -17,6 +17,7 @@ AMD GPU 向けハードウェアアクセラレーションによるビデオエ
 - **フレーム単位のエンコードオプション** (IDR フレーム強制)
 - **エンコード中の動的プロパティ再設定** (`Encoder::reconfigure`)
 - **CQP / CBR / VBR / LCVBR / QVBR / HQVBR / HQCBR** レート制御モード
+- **レート制御時の QP 範囲指定** (`QpRange`、コーデック別に指定可能)
 - **ハンドラーベースのコールバック**設計: エンコード/デコード結果はワーカースレッドから `EncodeHandler` / `DecodeHandler` に通知される
 - **AMFContext の明示的な管理**: 利用者が任意の個数の Context を作成し、`Context` を Clone して Encoder / Decoder に渡す。同じ Context ならデコード結果の Surface をそのままエンコードできる
 - ビルド時に GitHub から AMF ヘッダーを自動取得 (`bindgen` 経由)
@@ -64,16 +65,17 @@ AMD GPU 向けハードウェアアクセラレーションによるビデオエ
 |----|------|-------------|
 | `EncoderConfig` | エンコーダー設定 | `new(CodecConfig, width, height, FrameFormat, framerate_num, framerate_den, RateControlMode)`, フィールド: `target_kbps`, `max_kbps`, `qpi`, `qpp`, `qpb`, `gop_pic_size`, `b_pic_pattern` (全て `Option`) |
 | `CodecConfig` | コーデック設定 enum | `H264(H264EncoderConfig)`, `Hevc(HevcEncoderConfig)`, `Av1(Av1EncoderConfig)` |
-| `H264EncoderConfig` | H.264 エンコーダー固有設定 | `profile: Option<H264Profile>` |
-| `HevcEncoderConfig` | HEVC エンコーダー固有設定 | `profile: Option<HevcProfile>` |
-| `Av1EncoderConfig` | AV1 エンコーダー固有設定 | `profile: Option<Av1Profile>` |
+| `H264EncoderConfig` | H.264 エンコーダー固有設定 | `profile: Option<H264Profile>`, `qp_range: Option<QpRange>` |
+| `HevcEncoderConfig` | HEVC エンコーダー固有設定 | `profile: Option<HevcProfile>`, `qp_range_i: Option<QpRange>`, `qp_range_p: Option<QpRange>` |
+| `Av1EncoderConfig` | AV1 エンコーダー固有設定 | `profile: Option<Av1Profile>`, `qp_range_intra: Option<QpRange>`, `qp_range_inter: Option<QpRange>`, `qp_range_inter_b: Option<QpRange>` |
+| `QpRange` | レート制御時の QP の下限と上限 | `min: Option<u16>`, `max: Option<u16>` (それぞれ独立して指定でき、`None` は AMF の既定値) |
 | `H264Profile` | H.264 プロファイル | `Baseline`, `Main`, `High`, `ConstrainedBaseline`, `ConstrainedHigh` |
 | `HevcProfile` | HEVC プロファイル | `Main`, `Main10` |
 | `Av1Profile` | AV1 プロファイル | `Main` |
 | `FrameFormat` | エンコーダー入力フレームフォーマット | `Nv12`, `Yv12`, `I420`, `Bgra`, `Argb`, `Rgba`, `Yuy2`, `Uyvy`, `P010`, `P012`, `P016`, `Y210`, `Ayuv`, `Y410`, `Y416` |
 | `RateControlMode` | レート制御モード | `Cqp`, `Cbr`, `Vbr`, `LatencyConstrainedVbr`, `QualityVbr`, `HighQualityVbr`, `HighQualityCbr` |
 | `EncodeOptions` | フレーム単位のエンコードオプション | `frame_type: u16` (デフォルト 0 = 自動。`frame_type` モジュール参照) |
-| `ReconfigureParams` | 動的プロパティ再設定パラメータ | `framerate_num`, `framerate_den`, `target_kbps`, `max_kbps`, `qpi`, `qpp`, `qpb`, `gop_pic_size` (全て `Option`、`None` の項目は変更しない) |
+| `ReconfigureParams` | 動的プロパティ再設定パラメータ | `framerate_num`, `framerate_den`, `target_kbps`, `max_kbps`, `qpi`, `qpp`, `qpb`, `gop_pic_size` (全て `Option`、`None` の項目は変更しない。コーデック別設定の `qp_range` 系は変更できない) |
 | `EncodedFrame<T>` | エンコード済みフレーム | `buffer() -> &Buffer`, `picture_type() -> PictureType`, `user_data() -> &T`, `into_parts() -> (Buffer, T)` |
 | `PictureType` | エンコード済みフレームのピクチャタイプ | `Idr`, `I`, `P`, `B`, `Unknown` |
 
@@ -236,7 +238,7 @@ use std::sync::mpsc;
 
 use shiguredo_amf::{
     AmfLibrary, CodecConfig, EncodeOptions, EncodedFrame, Encoder, EncoderConfig, FnEncodeHandler,
-    FrameFormat, H264EncoderConfig, H264Profile, RateControlMode, frame_type,
+    FrameFormat, H264EncoderConfig, H264Profile, QpRange, RateControlMode, frame_type,
 };
 
 let context = AmfLibrary::instance().create_context()?;
@@ -244,6 +246,10 @@ let context = AmfLibrary::instance().create_context()?;
 let mut config = EncoderConfig::new(
     CodecConfig::H264(H264EncoderConfig {
         profile: Some(H264Profile::High),
+        qp_range: Some(QpRange {
+            min: Some(18),
+            max: Some(38),
+        }),
     }),
     1920, // width
     1080, // height
@@ -287,6 +293,8 @@ for frame in frame_rx.try_iter() {
 `Encoder::new` に渡すクロージャは `FnEncodeHandler::new` でラップする。クロージャの引数は `Result<EncodedFrame<T>, E>` で、エラーもワーカースレッドから通知される。ハンドラーはワーカースレッドで呼ばれるため、結果は `mpsc::channel` の `Sender` でメインスレッドへ送る。`E` の既定値は `shiguredo_amf::Error` である。`UserData` 型 (上記の `()` の位置) はフレーム単位の任意ユーザーデータで、`encode()` で渡した値が `EncodedFrame::user_data()` から取り出せる。
 
 `EncoderConfig::b_pic_pattern` に GOP 内の連続 B フレーム数を指定すると B フレームを有効にできる。AMF の仕様上の値域は H.264 が 0-3、AV1 が 0-127 で、0 は B フレームなし、`None` は AMF の既定値 (0) になる。HEVC は B フレームを扱わないため指定できない。B フレームを有効にすると、ハンドラーへの通知順は入力順 (提示順) と異なる符号化順になるが、`encode()` に渡した `UserData` は対応する入力フレームの出力に付く。B フレームに対応していない GPU で 1 以上を指定した場合は `Encoder::new` がエラーを返す。`Encoder` は入出力の対応付けに `ShiguredoAmfFrameId` プロパティを使う。この名前はライブラリの予約名であり、利用者は入力 `Surface` に設定しないこと。`encode()` は入力 `Surface` の PTS を変更せず、出力 `Buffer` の PTS も設定しない。出力 `Buffer` の PTS は AMF が付けた値になる。
+
+コーデック別設定の `qp_range` 系に `QpRange` を指定すると、レート制御時の QP の下限と上限を指定できる。H.264 は `qp_range` (I / P / B 共通)、HEVC は `qp_range_i` / `qp_range_p`、AV1 は `qp_range_intra` / `qp_range_inter` / `qp_range_inter_b` を使う。`min` と `max` はそれぞれ独立して指定でき、`None` の側は AMF の既定値になる。値の範囲は H.264 と HEVC が 0-51、AV1 が 1-255 である。`EncoderConfig::qpi` / `qpp` / `qpb` は CQP の固定 QP を指定するものであり、`qp_range` 系とは別の設定である。`H264EncoderConfig` / `HevcEncoderConfig` / `Av1EncoderConfig` は `Default` を実装しており、`..Default::default()` で未指定のフィールドを既定値にできる。
 
 `Encoder::encode` は入力 1 つにつき出力 1 つを前提とし、同じ入力に対応する出力が複数ある場合や、対応する入力がない出力が得られた場合はワーカーが `Err` として通知する。
 

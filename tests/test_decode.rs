@@ -802,7 +802,10 @@ fn encode_h264_stream(
     frame_count: usize,
 ) -> Vec<Vec<u8>> {
     let mut config = EncoderConfig::new(
-        CodecConfig::H264(H264EncoderConfig { profile: None }),
+        CodecConfig::H264(H264EncoderConfig {
+            profile: None,
+            ..Default::default()
+        }),
         width,
         height,
         FrameFormat::Nv12,
