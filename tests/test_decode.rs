@@ -7,10 +7,10 @@ use std::time::{Duration, Instant};
 
 use shiguredo_amf::amf::{Context, Surface};
 use shiguredo_amf::{
-    CodecConfig, DecodeHandler, DecodedFrame, Decoder, DecoderCodec, DecoderConfig,
-    DecoderReorderMode, EncodeOptions, Encoder, EncoderConfig, Error, FnDecodeHandler,
-    FnEncodeHandler, FrameFormat, H264EncoderConfig, HevcEncoderConfig, MemoryType, PlaneType,
-    RateControlMode, frame_type,
+    Av1EncoderConfig, Av1Profile, CodecConfig, DecodeHandler, DecodedFrame, Decoder, DecoderCodec,
+    DecoderConfig, DecoderReorderMode, EncodeOptions, Encoder, EncoderConfig, Error,
+    FnDecodeHandler, FnEncodeHandler, FrameFormat, H264EncoderConfig, HevcEncoderConfig,
+    MemoryType, PlaneType, RateControlMode, frame_type,
 };
 
 #[expect(dead_code, reason = "test_decode では一部のヘルパーだけを使う")]
@@ -258,13 +258,10 @@ fn decode_access_units_with_config(
         .expect("結果一覧のロックに失敗")
 }
 
-/// 出力フレームの `user_data` が入力フレームと正しく対応し、出力順が入力順と
-/// 異なることを確認する
+/// デコード結果の件数を確認し、出力順に `user_data` を並べて返す
 ///
-/// B フレームを含むストリームでは出力が提示順になるため、出力順は入力順と
-/// 一致しない。各出力の `user_data` が入力順のインデックスであれば、入力と出力の
-/// 対応付けが正しいと判断できる。
-fn assert_user_data_mapping(
+/// 出力の欠落や重複は検査しない。呼び出し元が出力順に応じた検査を行う。
+fn collect_user_data_order(
     results: Vec<Result<DecodedFrame<usize>, Error>>,
     expected_frames: usize,
 ) -> Vec<usize> {
@@ -291,6 +288,20 @@ fn assert_user_data_mapping(
         let (_surface, user_data) = frame.into_parts();
         user_data_order.push(user_data);
     }
+    user_data_order
+}
+
+/// 出力フレームの `user_data` が入力フレームと正しく対応し、出力順が入力順と
+/// 異なることを確認する
+///
+/// B フレームを含むストリームでは出力が提示順になるため、出力順は入力順と
+/// 一致しない。各出力の `user_data` が入力順のインデックスであれば、入力と出力の
+/// 対応付けが正しいと判断できる。
+fn assert_user_data_mapping(
+    results: Vec<Result<DecodedFrame<usize>, Error>>,
+    expected_frames: usize,
+) -> Vec<usize> {
+    let user_data_order = collect_user_data_order(results, expected_frames);
 
     let mut sorted = user_data_order.clone();
     sorted.sort_unstable();
@@ -316,29 +327,7 @@ fn assert_user_data_in_input_order(
     results: Vec<Result<DecodedFrame<usize>, Error>>,
     expected_frames: usize,
 ) {
-    let summaries = results
-        .iter()
-        .map(|result| match result {
-            Ok(frame) => format!(
-                "ok: user_data={}, pts={}",
-                frame.user_data(),
-                frame.surface().get_pts()
-            ),
-            Err(error) => format!("err: {error}"),
-        })
-        .collect::<Vec<_>>();
-    assert_eq!(
-        results.len(),
-        expected_frames,
-        "デコードされたフレーム数が一致しない: {summaries:?}"
-    );
-
-    let mut user_data_order = Vec::new();
-    for (index, result) in results.into_iter().enumerate() {
-        let frame = result.unwrap_or_else(|error| panic!("出力 {index} のデコードに失敗: {error}"));
-        let (_surface, user_data) = frame.into_parts();
-        user_data_order.push(user_data);
-    }
+    let user_data_order = collect_user_data_order(results, expected_frames);
     assert_eq!(
         user_data_order,
         (0..expected_frames).collect::<Vec<_>>(),
@@ -870,17 +859,25 @@ fn test_decoder_accepts_latency_options_for_all_codecs() {
         DecoderCodec::Av1,
         DecoderCodec::Vp9,
     ] {
-        let mut config = DecoderConfig::new(codec);
-        config.low_latency = Some(true);
-        config.reorder_mode = Some(DecoderReorderMode::LowLatency);
-        config.surface_pool_size = Some(0);
+        for reorder_mode in [
+            DecoderReorderMode::Regular,
+            DecoderReorderMode::Compliant,
+            DecoderReorderMode::LowLatency,
+        ] {
+            let mut config = DecoderConfig::new(codec);
+            config.low_latency = Some(true);
+            config.reorder_mode = Some(reorder_mode);
+            config.surface_pool_size = Some(0);
 
-        let mut decoder =
-            Decoder::new(create_context(), config, FnDecodeHandler::<()>::new(|_| {}))
-                .unwrap_or_else(|error| panic!("{codec:?} のデコーダーの作成に失敗: {error}"));
-        decoder
-            .finish()
-            .unwrap_or_else(|error| panic!("{codec:?} のデコーダーの finish に失敗: {error}"));
+            let mut decoder =
+                Decoder::new(create_context(), config, FnDecodeHandler::<()>::new(|_| {}))
+                    .unwrap_or_else(|error| {
+                        panic!("{codec:?} の {reorder_mode:?} のデコーダーの作成に失敗: {error}")
+                    });
+            decoder.finish().unwrap_or_else(|error| {
+                panic!("{codec:?} の {reorder_mode:?} のデコーダーの finish に失敗: {error}")
+            });
+        }
     }
 }
 
@@ -942,6 +939,41 @@ fn test_decode_hevc_low_latency_outputs_frames_in_input_order() {
     assert_user_data_in_input_order(results, NUM_FRAMES);
 }
 
+/// 低遅延モードで並べ替えを伴わない AV1 ストリームをデコードし、
+/// 出力フレームの欠落と重複がなく、出力順が入力順になることを確認する
+///
+/// `DecoderReorderMode::LowLatency` はフレームの並べ替えを伴わないストリームを
+/// 前提とするため、B フレームを生成しないストリームを使う。
+#[test]
+fn test_decode_av1_low_latency_outputs_frames_in_input_order() {
+    /// デコードするフレーム数
+    const NUM_FRAMES: usize = 30;
+
+    let encoding_context = create_context();
+    let access_units = encode_nv12_stream(
+        &encoding_context,
+        CodecConfig::Av1(Av1EncoderConfig {
+            profile: Some(Av1Profile::Main),
+            ..Default::default()
+        }),
+        320,
+        240,
+        NUM_FRAMES,
+    );
+    drop(encoding_context);
+    assert_eq!(
+        access_units.len(),
+        NUM_FRAMES,
+        "テスト用ストリームのフレーム数が想定と異なる"
+    );
+
+    let mut config = DecoderConfig::new(DecoderCodec::Av1);
+    config.low_latency = Some(true);
+    config.reorder_mode = Some(DecoderReorderMode::LowLatency);
+    let results = decode_access_units_with_config(config, &access_units);
+    assert_user_data_in_input_order(results, NUM_FRAMES);
+}
+
 /// サーフェスプールのサイズを指定しても、出力フレームの欠落と重複がないことを
 /// 確認する
 ///
@@ -992,6 +1024,20 @@ fn test_decode_vp9_outputs_all_frames() {
             "VP9 のフレーム {index} の解像度が一致しない"
         );
     }
+}
+
+/// 低遅延モードで VP9 ストリームをデコードし、全フレームが入力順に
+/// 出力されることを確認する
+#[test]
+fn test_decode_vp9_low_latency_outputs_all_frames() {
+    let frames = split_ivf_frames(VP9_IVF_STREAM);
+    assert_eq!(frames.len(), 10, "VP9 ストリームのフレーム数が想定と異なる");
+
+    let mut config = DecoderConfig::new(DecoderCodec::Vp9);
+    config.low_latency = Some(true);
+    config.reorder_mode = Some(DecoderReorderMode::LowLatency);
+    let results = decode_access_units_with_config(config, &frames);
+    assert_user_data_in_input_order(results, frames.len());
 }
 
 /// VP9 の不可視フレームをデコードしたときの AMF の挙動を確認する
@@ -1412,13 +1458,10 @@ fn test_decode_continues_after_resolution_change() {
     );
 }
 
-/// 解像度変化を挟んでも、低遅延とサーフェスプールの設定が再適用され、
+/// 低遅延とサーフェスプールの設定を指定した状態で、解像度変化を挟んでも
 /// 全フレームが欠落なく出力されることを確認する
-///
-/// 解像度変化では AMF コンポーネントを Terminate して Init し直すため、
-/// 作成時に指定した設定が再適用されるかを確認する。
 #[test]
-fn test_decode_low_latency_continues_after_resolution_change() {
+fn test_decode_with_latency_options_continues_after_resolution_change() {
     let encoding_context = create_context();
     let mut access_units = encode_h264_stream(
         &encoding_context,

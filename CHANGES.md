@@ -101,6 +101,8 @@
   - `DecoderReorderMode` を追加し、`Regular` / `Compliant` / `LowLatency` を指定できるようにする
   - `DecoderConfig::new` を追加し、構造体リテラルでの構築から移行する
   - 公開フィールドを追加するため、構造体リテラルでの構築はコンパイルエラーになる
+  - `low_latency` は AMF の `LowLatencyDecode` を設定する
+  - `surface_pool_size` はデコード用サーフェスプールのサイズを設定し、`0` は AMF が DPB サイズ + 5 を計算する
   - `reorder_mode` に `DecoderReorderMode::LowLatency` を指定すると、並べ替えを伴わないストリームを前提に出力の遅延を 0 にする。並べ替えを伴うストリームを投入した場合の出力順は保証しない
   - AMF の DPB サイズは Linux の AMF ランタイム 1.5.3.0 で設定が許可されないため、公開 API に含めない
   - @melpon

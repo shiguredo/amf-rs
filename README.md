@@ -256,9 +256,9 @@ B フレームを含むストリームでは出力順が入力順と異なりま
 
 | フィールド | 説明 |
 |-----------|------|
-| `low_latency` | AMF の低遅延デコードを指定する。`None` は AMF の既定値 |
+| `low_latency` | AMF の低遅延デコードを指定する。`None` は AMF の既定値を使う |
 | `reorder_mode` | DPB のリオーダーモード。`None` は AMF の既定値を使う |
-| `surface_pool_size` | デコード用サーフェスプールのサイズ。`0` は AMF が DPB サイズ + 5 を計算する |
+| `surface_pool_size` | デコード用サーフェスプールのサイズ。`0` は AMF が DPB サイズ + 5 を計算する。`None` は AMF の既定値を使う |
 
 `reorder_mode` に `DecoderReorderMode::LowLatency` を指定すると、DPB の遅延が
 0 になります。このモードはフレームの並べ替えを伴わないストリームを前提とし、
@@ -266,9 +266,6 @@ B フレームと P フレームは並べ替えを伴わない場合に限り含
 伴うストリームを投入した場合の出力順は保証されず、提示順の復元も行われません。
 `low_latency` は AMF の `LowLatencyDecode` を設定しますが、出力フレームの順序は
 `reorder_mode` で決まります。
-
-低遅延モードでも、入出力の対応付けは `user_data` で行うため、出力フレームの PTS
-には依存しません。出力 `Surface` の PTS は AMF が付けた値になります。
 
 `surface_pool_size` が小さすぎる場合、出力サーフェスが不足して `decode()` が
 エラーになります。`0` を指定すると AMF が DPB サイズ + 5 をプールサイズとして

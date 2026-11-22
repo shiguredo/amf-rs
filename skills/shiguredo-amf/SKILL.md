@@ -1,6 +1,6 @@
 ---
 name: shiguredo-amf
-description: 時雨堂の AMD AMF (Advanced Media Framework) Rust バインディング shiguredo_amf の機能・API リファレンス。H.264 / H.265 / AV1 のハードウェアエンコード、H.264 / H.265 / AV1 / VP9 のハードウェアデコード、AMF ランタイムの動的ロード、Surface / Buffer 管理、ハンドラーベースのコールバック設計、エンコード中の動的プロパティ再設定に関する質問時に使用。
+description: 時雨堂の AMD AMF (Advanced Media Framework) Rust バインディング shiguredo_amf の機能・API リファレンス。H.264 / H.265 / AV1 のハードウェアエンコード、H.264 / H.265 / AV1 / VP9 のハードウェアデコード、AMF ランタイムの動的ロード、Surface / Buffer 管理、ハンドラーベースのコールバック設計、エンコード中の動的プロパティ再設定、デコーダーの低遅延・リオーダー・サーフェスプール設定に関する質問時に使用。
 ---
 
 # shiguredo_amf
@@ -149,7 +149,7 @@ AMD GPU 向けハードウェアアクセラレーションによるビデオエ
 | `Surface` | `AMFSurface` のラッパー | `context()`, `get_memory_type() -> MemoryType`, `set_pts(i64)`, `get_pts() -> i64`, `set_duration(i64)`, `get_plane(PlaneType) -> Result<Plane<'_>, Error>`, `get_plane_at(index) -> Result<Plane<'_>, Error>`, `convert(MemoryType) -> Result<(), Error>`, `data() -> Result<Data, Error>`, `into_data() -> Result<Data, Error>`, `property_storage()`, `as_ptr()`, `into_raw()` |
 | `Buffer` | `AMFBuffer` のラッパー | `context()`, `get_memory_type() -> MemoryType`, `get_native() -> *mut c_void`, `get_size() -> usize`, `set_size(usize) -> Result<(), Error>`, `unsafe as_slice() -> Result<&[u8], Error>`, `unsafe as_mut_slice() -> Result<&mut [u8], Error>`, `set_pts(i64)`, `get_pts() -> i64`, `get_duration() -> i64`, `data() -> Result<Data, Error>`, `into_data() -> Result<Data, Error>`, `property_storage() -> Result<PropertyStorage, Error>`, `as_ptr()`, `into_raw()` |
 | `Plane<'a>` | `AMFPlane` の RAII ラッパー。取得元の `Surface` を借用する | `context()`, `get_native() -> *mut c_void`, `get_hpitch() -> i32`, `get_vpitch() -> i32`, `get_width() -> i32`, `get_height() -> i32`, `is_tiled() -> bool`, `unsafe as_slice() -> Result<&[u8], Error>`, `unsafe as_mut_slice() -> Result<&mut [u8], Error>`, `as_ptr()`, `into_raw()` |
-| `PropertyStorage` | `AMFPropertyStorage` のラッパー | `context()`, `unsafe get_property(name_w, *mut AMFVariantStruct)`, `get_property_int64(name) -> Result<i64, Error>`, `get_property_size(name) -> Result<(i32, i32), Error>`, `set_property_int64(name, value)`, `set_property_size(name, width, height)`, `set_property_rate(name, num, den)`, `unsafe set_property(name_w, AMFVariantStruct)`, `as_ptr()`, `into_raw()` |
+| `PropertyStorage` | `AMFPropertyStorage` のラッパー | `context()`, `unsafe get_property(name_w, *mut AMFVariantStruct)`, `get_property_int64(name) -> Result<i64, Error>`, `get_property_size(name) -> Result<(i32, i32), Error>`, `set_property_int64(name, value)`, `set_property_bool(name, value)`, `set_property_size(name, width, height)`, `set_property_rate(name, num, den)`, `unsafe set_property(name_w, AMFVariantStruct)`, `as_ptr()`, `into_raw()` |
 | `Data` | `AMFData` の RAII ハンドル | `context()`, `get_data_type() -> DataType`, `property_storage() -> Result<PropertyStorage, Error>`, `to_buffer() -> Result<Buffer, Error>`, `to_surface() -> Result<Surface, Error>`, `as_ptr()`, `into_raw()`, `unsafe from_raw(*mut AMFData, Context)`, `unsafe from_raw_acquired(*mut AMFData, Context)` |
 | `DataType` | AMF のデータ種別 | `Buffer`, `Surface`, `AudioBuffer`, `User`, `Unknown(u32)` |
 
@@ -365,9 +365,6 @@ for frame in frame_rx.try_iter() {
 ストリームを前提とし、B フレームと P フレームは並べ替えを伴わない場合に限り
 含められる。並べ替えを伴うストリームを投入した場合の出力順は保証されず、提示順の
 復元も行われない。
-
-低遅延モードでも、入出力の対応付けは `UserData` で行うため、出力フレームの PTS
-には依存しない。出力 `Surface` の PTS は AMF が付けた値になる。
 
 `surface_pool_size` はデコード用サーフェスプールのサイズで、`0` は AMF が
 DPB サイズ + 5 を計算する。値が小さすぎる場合、出力サーフェスが不足して
