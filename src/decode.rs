@@ -53,7 +53,7 @@ pub struct DecodedFrame<T> {
 }
 
 impl<T> DecodedFrame<T> {
-    /// デコード後の Surface (convert 済み)
+    /// デコード後の Surface
     pub fn surface(&self) -> &Surface {
         &self.surface
     }
@@ -186,7 +186,6 @@ impl<H: DecodeHandler> Decoder<H> {
                     let result: Result<DecodedFrame<H::UserData>, H::Error> = result
                         .and_then(|(data, user_data)| {
                             let surface = data.to_surface()?;
-                            surface.convert(MemoryType::Host)?;
                             Ok(DecodedFrame { surface, user_data })
                         })
                         .map_err(Into::into);

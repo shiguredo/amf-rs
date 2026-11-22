@@ -9,7 +9,7 @@ use shiguredo_amf::amf::{Context, Surface};
 use shiguredo_amf::{
     CodecConfig, DecodeHandler, DecodedFrame, Decoder, DecoderCodec, DecoderConfig, EncodeOptions,
     Encoder, EncoderConfig, Error, FnDecodeHandler, FnEncodeHandler, FrameFormat,
-    H264EncoderConfig, PlaneType, RateControlMode, frame_type,
+    H264EncoderConfig, MemoryType, PlaneType, RateControlMode, frame_type,
 };
 
 #[expect(dead_code, reason = "test_decode では一部のヘルパーだけを使う")]
@@ -1371,4 +1371,91 @@ fn test_decoder_continuous_submit_outputs_all_frames() {
         (0..NUM_FRAMES).collect::<Vec<_>>(),
         "出力に重複または欠落した user_data がある"
     );
+}
+
+/// 出力を保持したまま連続投入しても、出力サーフェスの枯渇でデコードが停止しない
+/// ことを確認する
+///
+/// ハンドラーが通知された出力をすべて保持し続ける状態で、出力の回収を待たずに
+/// 10 フレーム以上を連続投入する。デコーダーの出力サーフェスを Host メモリへ
+/// 変換せずに保持すると、出力サーフェスのプールが枯渇して `SubmitInput` が
+/// `AMF_DECODER_NO_FREE_SURFACES` を返し、デコードが停止する。
+/// 通知された Surface が Host メモリであることも確認する。
+#[test]
+fn test_decoder_holds_outputs_without_surface_exhaustion() {
+    /// 連続投入するフレーム数
+    const NUM_FRAMES: usize = 30;
+
+    let access_units = split_access_units(H264_BFRAME_STREAM, is_h264_vcl);
+    assert!(
+        access_units.len() >= NUM_FRAMES,
+        "テスト用ビットストリームのアクセスユニットが足りない"
+    );
+
+    // ハンドラーは通知された出力を保持し続け、デコーダーの出力サーフェスを
+    // 使ったままにする。
+    let results = Arc::new(Mutex::new(Vec::new()));
+    let received = Arc::clone(&results);
+    let mut decoder = Decoder::new(
+        create_context(),
+        DecoderConfig {
+            codec: DecoderCodec::H264,
+        },
+        FnDecodeHandler::<usize>::new(move |result| {
+            received
+                .lock()
+                .expect("出力一覧のロックに失敗")
+                .push(result);
+        }),
+    )
+    .expect("デコーダーの作成に失敗");
+
+    // 出力の回収を待たずに連続投入する。
+    for (index, access_unit) in access_units.iter().take(NUM_FRAMES).enumerate() {
+        let mut buffer = decoder
+            .alloc_buffer(access_unit.len())
+            .expect("Buffer の確保に失敗");
+        unsafe { buffer.as_mut_slice() }.expect("Buffer のスライス取得に失敗")[..access_unit.len()]
+            .copy_from_slice(access_unit);
+        decoder
+            .decode(buffer, index)
+            .unwrap_or_else(|error| panic!("アクセスユニット {index} の投入に失敗: {error}"));
+    }
+
+    decoder.finish().expect("finish に失敗");
+
+    let stats = decoder.stats();
+    assert_eq!(
+        stats.total_output_frame_count.get(),
+        NUM_FRAMES as u64,
+        "出力フレーム数が投入数と一致しない"
+    );
+    assert_eq!(
+        stats.total_error_count.get(),
+        0,
+        "デコード中にエラーが通知された"
+    );
+    drop(decoder);
+
+    let results = Arc::try_unwrap(results)
+        .expect("出力一覧の Arc の参照が残っている")
+        .into_inner()
+        .expect("出力一覧のロックに失敗");
+    assert_eq!(
+        results.len(),
+        NUM_FRAMES,
+        "通知されたフレーム数が投入数と一致しない"
+    );
+    for (index, result) in results.iter().enumerate() {
+        let frame = result
+            .as_ref()
+            .unwrap_or_else(|error| panic!("出力 {index} のデコードに失敗: {error}"));
+        // 出力サーフェスを GPU メモリのまま保持するとプールが枯渇するため、
+        // ハンドラーへ通知する前に Host メモリへ変換されていることを確認する。
+        assert_eq!(
+            frame.surface().get_memory_type(),
+            MemoryType::Host,
+            "出力 {index} の Surface が Host メモリではない"
+        );
+    }
 }

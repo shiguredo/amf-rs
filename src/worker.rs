@@ -15,6 +15,7 @@ use crate::error::{AmfError, EnvironmentError, Error, InternalError, InvalidStat
 use crate::query_output::{DrainStatus, QueryOutputKind, classify_query_output};
 use crate::stats::{Counter, Gauge};
 use crate::sys::{AMF_RESULT, AMFData};
+use crate::types::{DataType, MemoryType};
 
 /// 入出力の対応付けに使う frame ID を保持するプロパティ名
 ///
@@ -651,6 +652,18 @@ fn drain_output<U: Send + 'static>(
                         continue;
                     }
                 };
+
+                // 出力サーフェスは AMF の出力プールから払い出されるため、保持する
+                // 前に Host メモリへ変換して GPU サーフェスをプールへ返す。
+                // 変換できなかった出力は、ハンドラーへエラーとして通知する。
+                if data.get_data_type() == DataType::Surface
+                    && let Err(error) = data
+                        .to_surface()
+                        .and_then(|surface| surface.convert(MemoryType::Host))
+                {
+                    output_buffer.push_back(Err(error));
+                    continue;
+                }
 
                 output_buffer.push_back(Ok((data, frame_id)));
             }
