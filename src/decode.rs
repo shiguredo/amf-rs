@@ -49,8 +49,9 @@ pub enum DecoderReorderMode {
     Compliant,
     /// DPB の遅延を 0 にする
     ///
-    /// B フレームによる並べ替えを含むストリームでも、出力フレームは入力順に
-    /// 通知される。遅延を抑えたい場合はこのモードを指定する。
+    /// フレームの並べ替えを伴わないストリームを前提とする。B フレームと P フレームは、
+    /// 並べ替えを伴わない場合に限り含められる。並べ替えを伴うストリームを投入した
+    /// 場合の出力順は保証しない。このモードでは提示順の復元を行わない。
     LowLatency,
 }
 
@@ -92,12 +93,6 @@ pub struct DecoderConfig {
     ///
     /// 値が小さすぎる場合、出力サーフェスが不足して `decode` がエラーになる。
     pub surface_pool_size: Option<u32>,
-    /// DPB が保持するサーフェス数の下限
-    ///
-    /// AMF の仕様上の値域は 0-32 である。`None` は AMF の既定値を使う。
-    /// AMF ランタイムがこのプロパティを許可しない場合は、この値を指定した
-    /// [`Decoder::new`] がエラーを返す。
-    pub dpb_size: Option<u32>,
 }
 
 impl DecoderConfig {
@@ -110,7 +105,6 @@ impl DecoderConfig {
             low_latency: None,
             reorder_mode: None,
             surface_pool_size: None,
-            dpb_size: None,
         }
     }
 }
@@ -312,9 +306,6 @@ impl<H: DecodeHandler> Decoder<H> {
                 sys::str::AMF_VIDEO_DECODER_SURFACE_POOL_SIZE,
                 surface_pool_size as amf_int64,
             )?;
-        }
-        if let Some(dpb_size) = config.dpb_size {
-            prop.set_property_int64(sys::str::AMF_VIDEO_DECODER_DPB_SIZE, dpb_size as amf_int64)?;
         }
         Ok(())
     }

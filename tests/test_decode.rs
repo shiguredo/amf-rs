@@ -6,12 +6,11 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use shiguredo_amf::amf::{Context, Surface};
-use shiguredo_amf::ffi::AMF_RESULT;
 use shiguredo_amf::{
     CodecConfig, DecodeHandler, DecodedFrame, Decoder, DecoderCodec, DecoderConfig,
     DecoderReorderMode, EncodeOptions, Encoder, EncoderConfig, Error, FnDecodeHandler,
-    FnEncodeHandler, FrameFormat, H264EncoderConfig, MemoryType, PlaneType, RateControlMode,
-    frame_type,
+    FnEncodeHandler, FrameFormat, H264EncoderConfig, HevcEncoderConfig, MemoryType, PlaneType,
+    RateControlMode, frame_type,
 };
 
 #[expect(dead_code, reason = "test_decode では一部のヘルパーだけを使う")]
@@ -862,8 +861,7 @@ fn test_decode_hevc_bframes_maps_user_data() {
 /// 確認する
 ///
 /// 入力なしでも `Decoder::new` が成功すれば、指定した設定が AMF に受け付けられた
-/// と判断できる。`dpb_size` は AMF ランタイムが許可しないため、このテストでは
-/// 指定しない。
+/// と判断できる。
 #[test]
 fn test_decoder_accepts_latency_options_for_all_codecs() {
     for codec in [
@@ -886,83 +884,68 @@ fn test_decoder_accepts_latency_options_for_all_codecs() {
     }
 }
 
-/// AMF ランタイムが DPB サイズの設定を許可しない場合、`Decoder::new` が
-/// AMF のエラーを返すことを確認する
+/// 低遅延モードで並べ替えを伴わない H.264 ストリームをデコードし、
+/// 出力フレームの欠落と重複がなく、出力順が入力順になることを確認する
 ///
-/// Linux の AMF ランタイム 1.5.3.0 では `AMF_VIDEO_DECODER_DPB_SIZE` の設定が
-/// `AMF_ACCESS_DENIED` になる。
-#[test]
-fn test_decoder_rejects_unsupported_dpb_size() {
-    for codec in [
-        DecoderCodec::H264,
-        DecoderCodec::Hevc,
-        DecoderCodec::Av1,
-        DecoderCodec::Vp9,
-    ] {
-        // 0 は AMF の仕様上の値域に含まれるが、このランタイムでは 0 も
-        // 他の値と同じく受け付けられないことを確認する。
-        for dpb_size in [0, 4, 32] {
-            let mut config = DecoderConfig::new(codec);
-            config.dpb_size = Some(dpb_size);
-
-            let error =
-                match Decoder::new(create_context(), config, FnDecodeHandler::<()>::new(|_| {})) {
-                    Ok(_) => panic!(
-                        "{codec:?} で dpb_size={dpb_size} を指定したデコーダーの作成が成功した"
-                    ),
-                    Err(error) => error,
-                };
-            assert!(
-                matches!(
-                    &error,
-                    Error::Amf(amf)
-                        if amf.status() == AMF_RESULT::AMF_ACCESS_DENIED
-                            && amf.operation().contains("DPBSize")
-                ),
-                "{codec:?} の dpb_size={dpb_size} 指定時のエラーが AMF_ACCESS_DENIED の DPBSize ではない: {error}"
-            );
-        }
-    }
-}
-
-/// 低遅延モードで B フレームを含むストリームをデコードし、出力フレームの
-/// 欠落と重複がなく、出力順が入力順になることを確認する
+/// `DecoderReorderMode::LowLatency` はフレームの並べ替えを伴わないストリームを
+/// 前提とするため、B フレームを生成しないストリームを使う。
 #[test]
 fn test_decode_low_latency_outputs_frames_in_input_order() {
-    let access_units = split_access_units(H264_BFRAME_STREAM, is_h264_vcl);
-    assert!(
-        access_units.len() > 1,
-        "テスト用ビットストリームから複数のアクセスユニットが得られない"
+    /// デコードするフレーム数
+    const NUM_FRAMES: usize = 30;
+
+    let encoding_context = create_context();
+    let access_units = encode_h264_stream(&encoding_context, 320, 240, NUM_FRAMES);
+    drop(encoding_context);
+    assert_eq!(
+        access_units.len(),
+        NUM_FRAMES,
+        "テスト用ストリームのフレーム数が想定と異なる"
     );
 
     let mut config = DecoderConfig::new(DecoderCodec::H264);
     config.low_latency = Some(true);
     config.reorder_mode = Some(DecoderReorderMode::LowLatency);
     let results = decode_access_units_with_config(config, &access_units);
-    assert_user_data_in_input_order(results, access_units.len());
+    assert_user_data_in_input_order(results, NUM_FRAMES);
 }
 
-/// 低遅延モードで B フレームを含む HEVC ストリームをデコードし、出力フレームの
-/// 欠落と重複がなく、出力順が入力順になることを確認する
+/// 低遅延モードで並べ替えを伴わない HEVC ストリームをデコードし、
+/// 出力フレームの欠落と重複がなく、出力順が入力順になることを確認する
+///
+/// `DecoderReorderMode::LowLatency` はフレームの並べ替えを伴わないストリームを
+/// 前提とするため、B フレームを生成しないストリームを使う。
 #[test]
 fn test_decode_hevc_low_latency_outputs_frames_in_input_order() {
-    let access_units = split_access_units(HEVC_BFRAME_STREAM, is_hevc_vcl);
-    assert!(
-        access_units.len() > 1,
-        "テスト用ビットストリームから複数のアクセスユニットが得られない"
+    /// デコードするフレーム数
+    const NUM_FRAMES: usize = 30;
+
+    let encoding_context = create_context();
+    let access_units = encode_nv12_stream(
+        &encoding_context,
+        CodecConfig::Hevc(HevcEncoderConfig::default()),
+        320,
+        240,
+        NUM_FRAMES,
+    );
+    drop(encoding_context);
+    assert_eq!(
+        access_units.len(),
+        NUM_FRAMES,
+        "テスト用ストリームのフレーム数が想定と異なる"
     );
 
     let mut config = DecoderConfig::new(DecoderCodec::Hevc);
     config.low_latency = Some(true);
     config.reorder_mode = Some(DecoderReorderMode::LowLatency);
     let results = decode_access_units_with_config(config, &access_units);
-    assert_user_data_in_input_order(results, access_units.len());
+    assert_user_data_in_input_order(results, NUM_FRAMES);
 }
 
 /// サーフェスプールのサイズを指定しても、出力フレームの欠落と重複がないことを
 /// 確認する
 ///
-/// `surface_pool_size` が 0 の場合は AMF が DPB サイズからプールサイズを計算する。
+/// `surface_pool_size` が 0 の場合は AMF が DPB サイズ + 5 をプールサイズとして計算する。
 /// 明示した場合も、B フレームの並べ替えに必要なサーフェス数が確保される。
 #[test]
 fn test_decode_with_surface_pool_size_outputs_all_frames() {
@@ -1204,8 +1187,28 @@ fn encode_h264_stream(
     height: u32,
     frame_count: usize,
 ) -> Vec<Vec<u8>> {
-    let mut config = EncoderConfig::new(
+    encode_nv12_stream(
+        context,
         CodecConfig::H264(H264EncoderConfig::default()),
+        width,
+        height,
+        frame_count,
+    )
+}
+
+/// 指定したコーデックの NV12 ストリームをエンコードし、フレームごとのビット列を返す
+///
+/// B フレームは生成しないため、低遅延モードのテストに使える並べ替えを伴わない
+/// ストリームになる。
+fn encode_nv12_stream(
+    context: &Context,
+    codec: CodecConfig,
+    width: u32,
+    height: u32,
+    frame_count: usize,
+) -> Vec<Vec<u8>> {
+    let mut config = EncoderConfig::new(
+        codec,
         width,
         height,
         FrameFormat::Nv12,
