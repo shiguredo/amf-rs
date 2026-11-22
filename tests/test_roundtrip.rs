@@ -269,9 +269,7 @@ fn decode<U>(
 where
     U: Send + std::fmt::Debug + 'static,
 {
-    let config = DecoderConfig {
-        codec: decoder_codec,
-    };
+    let config = DecoderConfig::new(decoder_codec);
     let result = Arc::new(Mutex::new(Vec::new()));
     let r = result.clone();
     let mut decoder = Decoder::new(
@@ -2090,9 +2088,7 @@ fn test_decode_rejects_buffer_with_cloned_handle() {
 
     let mut decoder = Decoder::new(
         context.clone(),
-        DecoderConfig {
-            codec: DecoderCodec::H264,
-        },
+        DecoderConfig::new(DecoderCodec::H264),
         FnDecodeHandler::<()>::new(|_| {}),
     )
     .expect("デコーダーの作成に失敗");
@@ -2222,9 +2218,7 @@ fn test_decode_rejects_buffer_from_other_context() {
 
     let mut decoder = Decoder::new(
         decoder_context,
-        DecoderConfig {
-            codec: DecoderCodec::H264,
-        },
+        DecoderConfig::new(DecoderCodec::H264),
         FnDecodeHandler::<()>::new(|_| {}),
     )
     .expect("デコーダーの作成に失敗");

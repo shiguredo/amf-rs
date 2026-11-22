@@ -256,9 +256,7 @@ fn check_decoder_init(context: &Context, codec: VideoCodecType) -> bool {
         VideoCodecType::Av1 => DecoderCodec::Av1,
         VideoCodecType::Vp9 => DecoderCodec::Vp9,
     };
-    let config = DecoderConfig {
-        codec: decoder_codec,
-    };
+    let config = DecoderConfig::new(decoder_codec);
     match Decoder::new(context.clone(), config, FnDecodeHandler::<()>::new(|_| {})) {
         Ok(_decoder) => {
             println!("OK");

@@ -30,6 +30,7 @@ AMF ランタイムライブラリ (libamfrt64.so.1) は AMD GPU ドライバー
 - Vulkan バックエンドによる GPU 処理
 - エンコード入力フォーマット選択 (AMD Radeon 780M では NV12 / YV12 / I420 / BGRA / ARGB / RGBA / YUY2 / P010 を確認済み。P010 は HEVC と AV1 で利用できる)
 - デコード出力は NV12 フォーマット
+- デコーダーの低遅延モード、リオーダーモード、サーフェスプールサイズの指定
 - フレーム単位のエンコードオプション (IDR フレーム強制)
 - B フレーム (H.264 / AV1、GPU と AMF が対応している場合)
 - エンコード中の動的プロパティ再設定 (`reconfigure`)
@@ -205,9 +206,7 @@ use shiguredo_amf::{
 
 let context = AmfLibrary::instance().create_context()?;
 
-let config = DecoderConfig {
-    codec: DecoderCodec::H264,
-};
+let config = DecoderConfig::new(DecoderCodec::H264);
 
 // デコード結果はワーカースレッドからチャネルで受け取る
 let (frame_tx, frame_rx) = mpsc::channel();
@@ -250,6 +249,30 @@ B フレームを含むストリームでは出力順が入力順と異なりま
 付けた値になります。入出力の対応付けには `ShiguredoAmfFrameId` プロパティを
 使います。この名前はライブラリの予約名であり、利用者は入力 `Buffer` に
 設定しないでください。
+
+`DecoderConfig` ではデコーダーの遅延とサーフェスプールを調整できます。
+`DecoderConfig::new(codec)` で必須項目だけを指定し、公開フィールドを書き換えて
+残りの項目を指定します。
+
+| フィールド | 説明 |
+|-----------|------|
+| `low_latency` | AMF の低遅延デコードを指定する。`None` は AMF の既定値を使う |
+| `reorder_mode` | DPB のリオーダーモード。`None` は AMF の既定値を使う |
+| `surface_pool_size` | デコード用サーフェスプールのサイズ。`0` は AMF が DPB サイズ + 5 を計算する。`None` は AMF の既定値を使う |
+
+`reorder_mode` に `DecoderReorderMode::LowLatency` を指定すると、DPB の遅延が
+0 になります。このモードはフレームの並べ替えを伴わないストリームを前提とし、
+B フレームと P フレームは並べ替えを伴わない場合に限り含められます。並べ替えを
+伴うストリームを投入した場合の出力順は保証されず、提示順の復元も行われません。
+`low_latency` は AMF の `LowLatencyDecode` を設定しますが、出力フレームの順序は
+`reorder_mode` で決まります。
+
+`surface_pool_size` が小さすぎる場合、出力サーフェスが不足して `decode()` が
+エラーになります。`0` を指定すると AMF が DPB サイズ + 5 をプールサイズとして
+計算します。
+
+AMF の DPB サイズは Linux の AMF ランタイム 1.5.3.0 で設定が許可されないため、
+`DecoderConfig` では指定できません。
 
 フレームデータは unsafe な `Plane::as_slice` / `Plane::as_mut_slice` で、ビットストリームは
 unsafe な `Buffer::as_slice` / `Buffer::as_mut_slice` で読み書きします。`Plane` のスライスは
