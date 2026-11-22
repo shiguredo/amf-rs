@@ -1,7 +1,7 @@
 # エンコーダーの用途と品質プリセットを設定できるようにする
 
 - Created: 2026-11-10
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-11-22
 - Branch: feature/add-encoder-usage-quality-preset
 - Polished: {YYYY-MM-DD}
 - Reporter: @melpon
@@ -36,3 +36,12 @@
 - usage と quality preset の関係、および他のレート制御設定との優先順位が doc に書かれている。
 - 実機テストが追加され、`cargo test --workspace` が通る。
 - `CHANGES.md` の `## develop` に `[ADD]` を追記する。
+
+## 解決方法
+
+- `EncoderUsage` と `QualityPreset` を追加し、H.264 / HEVC / AV1 の AMF 定数へコーデック別に写像した
+- `EncoderConfig::usage` は `EncoderUsage`（既定 `EncoderUsage::Transcoding`）とし、`quality_preset` は `Option<QualityPreset>` とした。`usage` を `Option` にすると AMF の既定 (`N/A`) に依存し、既存の `USAGE = 0` 固定の挙動を保証できないため
+- 用途を最初に設定し、`QueryOutput` のタイムアウトを 0 に固定したうえで、品質プリセット、レート制御モード、その他の明示設定を上書きする
+- H.264 / HEVC / AV1 の全 `EncoderUsage` と `QualityPreset` で初期化と 3 フレームのエンコードを確認する実機テスト、および用途と品質プリセットの同時指定テストを追加した
+- `README.md` と `skills/shiguredo-amf/SKILL.md` に用途・品質プリセットの設定項目を追加し、`CHANGES.md` の `## develop` に `[ADD]` を追記した
+- `cargo fmt --all -- --check` と `cargo clippy --workspace --all-targets -- -D warnings` が成功し、AMD GPU 実機で `cargo test --workspace` が成功した（全 154 テスト + doctest）

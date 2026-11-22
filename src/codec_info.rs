@@ -21,12 +21,14 @@ pub enum VideoCodecType {
     Hevc,
     /// AV1 コーデック
     Av1,
+    /// VP9 コーデック
+    Vp9,
 }
 
 impl VideoCodecType {
     /// すべてのコーデック種別を返す
     fn all() -> &'static [Self] {
-        &[Self::H264, Self::Hevc, Self::Av1]
+        &[Self::H264, Self::Hevc, Self::Av1, Self::Vp9]
     }
 }
 
@@ -141,6 +143,8 @@ impl VideoProfile {
                     Some(Self::Unknown(value))
                 }
             }
+            // VP9 は AMF のエンコーダーを持たないため、プロファイル値を扱わない。
+            VideoCodecType::Vp9 => None,
         }
     }
 }
@@ -166,7 +170,6 @@ pub struct MemoryTypeCapability {
 /// 入出力の能力情報
 ///
 /// 解像度範囲、垂直アライメント、対応する surface format / memory type、インターレース対応を表す。
-/// `formats` と `memory_types` は AMF が返した順序を維持する。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IoCapabilities {
     /// 最小幅
@@ -458,7 +461,7 @@ pub struct DecodingInfo {
     pub output: Option<IoCapabilities>,
     /// デコーダーに関する全プロパティ
     ///
-    /// 要素は AMF が返した順序で並ぶ。取得できなかった場合は空になる。
+    /// 取得できなかった場合は空になる。
     pub properties: Vec<Property>,
 }
 
@@ -491,7 +494,7 @@ pub struct EncodingInfo {
     /// エンコーダーに関する全プロパティ
     ///
     /// `max_profile` / `max_level` / `supports_frame_reordering` に使うプロパティも含む。
-    /// 要素は AMF が返した順序で並ぶ。全件を取得できなかった場合は空になる。
+    /// 全件を取得できなかった場合は空になる。
     pub properties: Vec<Property>,
 }
 
@@ -523,12 +526,15 @@ pub fn supported_codecs() -> Result<Vec<CodecInfo>, Error> {
 // 内部実装
 // ---------------------------------------------------------------------------
 
-/// エンコーダーのコンポーネント ID を返す
-fn encoder_component_id(codec: VideoCodecType) -> &'static str {
+/// エンコーダーを提供するコーデックのコンポーネント ID を返す
+///
+/// AMF がエンコーダーを提供しないコーデックの場合は `None` を返す。
+fn encoder_component_id(codec: VideoCodecType) -> Option<&'static str> {
     match codec {
-        VideoCodecType::H264 => sys::str::AMFVideoEncoderVCE_AVC,
-        VideoCodecType::Hevc => sys::str::AMFVideoEncoder_HEVC,
-        VideoCodecType::Av1 => sys::str::AMFVideoEncoder_AV1,
+        VideoCodecType::H264 => Some(sys::str::AMFVideoEncoderVCE_AVC),
+        VideoCodecType::Hevc => Some(sys::str::AMFVideoEncoder_HEVC),
+        VideoCodecType::Av1 => Some(sys::str::AMFVideoEncoder_AV1),
+        VideoCodecType::Vp9 => None,
     }
 }
 
@@ -538,24 +544,27 @@ fn decoder_component_id(codec: VideoCodecType) -> &'static str {
         VideoCodecType::H264 => sys::str::AMFVideoDecoderUVD_H264_AVC,
         VideoCodecType::Hevc => sys::str::AMFVideoDecoderHW_H265_HEVC,
         VideoCodecType::Av1 => sys::str::AMFVideoDecoderHW_AV1,
+        VideoCodecType::Vp9 => sys::str::AMFVideoDecoderHW_VP9,
     }
 }
 
 /// 最大プロファイルのプロパティ名を返す
-fn max_profile_property(codec: VideoCodecType) -> &'static str {
+fn max_profile_property(codec: VideoCodecType) -> Option<&'static str> {
     match codec {
-        VideoCodecType::H264 => sys::str::AMF_VIDEO_ENCODER_CAP_MAX_PROFILE,
-        VideoCodecType::Hevc => sys::str::AMF_VIDEO_ENCODER_HEVC_CAP_MAX_PROFILE,
-        VideoCodecType::Av1 => sys::str::AMF_VIDEO_ENCODER_AV1_CAP_MAX_PROFILE,
+        VideoCodecType::H264 => Some(sys::str::AMF_VIDEO_ENCODER_CAP_MAX_PROFILE),
+        VideoCodecType::Hevc => Some(sys::str::AMF_VIDEO_ENCODER_HEVC_CAP_MAX_PROFILE),
+        VideoCodecType::Av1 => Some(sys::str::AMF_VIDEO_ENCODER_AV1_CAP_MAX_PROFILE),
+        VideoCodecType::Vp9 => None,
     }
 }
 
 /// 最大レベルのプロパティ名を返す
-fn max_level_property(codec: VideoCodecType) -> &'static str {
+fn max_level_property(codec: VideoCodecType) -> Option<&'static str> {
     match codec {
-        VideoCodecType::H264 => sys::str::AMF_VIDEO_ENCODER_CAP_MAX_LEVEL,
-        VideoCodecType::Hevc => sys::str::AMF_VIDEO_ENCODER_HEVC_CAP_MAX_LEVEL,
-        VideoCodecType::Av1 => sys::str::AMF_VIDEO_ENCODER_AV1_CAP_MAX_LEVEL,
+        VideoCodecType::H264 => Some(sys::str::AMF_VIDEO_ENCODER_CAP_MAX_LEVEL),
+        VideoCodecType::Hevc => Some(sys::str::AMF_VIDEO_ENCODER_HEVC_CAP_MAX_LEVEL),
+        VideoCodecType::Av1 => Some(sys::str::AMF_VIDEO_ENCODER_AV1_CAP_MAX_LEVEL),
+        VideoCodecType::Vp9 => None,
     }
 }
 
@@ -567,13 +576,17 @@ fn supports_frame_reordering_property(codec: VideoCodecType) -> Option<&'static 
         VideoCodecType::H264 => Some(sys::str::AMF_VIDEO_ENCODER_CAP_BFRAMES),
         VideoCodecType::Hevc => None,
         VideoCodecType::Av1 => Some(sys::str::AMF_VIDEO_ENCODER_AV1_CAP_BFRAMES),
+        VideoCodecType::Vp9 => None,
     }
 }
 
 /// エンコーダーの能力情報を返す
+///
+/// AMF がエンコーダーを提供しないコーデックの場合は `None` を返す。
 fn probe_encoding(context: &Context, codec: VideoCodecType) -> Option<EncodingInfo> {
+    let component_id = encoder_component_id(codec)?;
     let component = AmfLibrary::instance()
-        .create_component(context, encoder_component_id(codec))
+        .create_component(context, component_id)
         .ok()?;
     let caps = component.get_caps().ok();
     Some(build_encoding_info(codec, caps.as_ref()))
@@ -591,12 +604,12 @@ fn probe_decoding(context: &Context, codec: VideoCodecType) -> Option<DecodingIn
 /// エンコーダーの能力情報を構築する
 fn build_encoding_info(codec: VideoCodecType, caps: Option<&Caps>) -> EncodingInfo {
     let acceleration = caps.map(|caps| AccelerationType::from_amf(caps.get_acceleration_type()));
-    let max_profile = caps
-        .and_then(|caps| caps.get_property(max_profile_property(codec)))
+    let max_profile = max_profile_property(codec)
+        .and_then(|name| caps.and_then(|caps| caps.get_property(name)))
         .and_then(|value| value.as_int64())
         .and_then(|value| VideoProfile::from_amf(codec, value));
-    let max_level = caps
-        .and_then(|caps| caps.get_property(max_level_property(codec)))
+    let max_level = max_level_property(codec)
+        .and_then(|name| caps.and_then(|caps| caps.get_property(name)))
         .and_then(|value| value.as_int64());
     let supports_frame_reordering = caps.and_then(|caps| {
         supports_frame_reordering_property(codec)
@@ -814,11 +827,16 @@ mod tests {
     }
 
     /// テスト対象の GPU で報告されるエンコーダー能力の期待値を返す
-    fn expected_encoding(codec: VideoCodecType) -> (VideoProfile, i64, i64, Option<bool>) {
+    ///
+    /// VP9 は AMF のエンコーダーを持たないため `None` を返す。
+    fn expected_encoding(codec: VideoCodecType) -> Option<(VideoProfile, i64, i64, Option<bool>)> {
         match codec {
-            VideoCodecType::H264 => (VideoProfile::H264(H264Profile::High), 100, 52, Some(true)),
-            VideoCodecType::Hevc => (VideoProfile::Hevc(HevcProfile::Main10), 2, 186, None),
-            VideoCodecType::Av1 => (VideoProfile::Av1(Av1Profile::Main), 1, 16, Some(false)),
+            VideoCodecType::H264 => {
+                Some((VideoProfile::H264(H264Profile::High), 100, 52, Some(true)))
+            }
+            VideoCodecType::Hevc => Some((VideoProfile::Hevc(HevcProfile::Main10), 2, 186, None)),
+            VideoCodecType::Av1 => Some((VideoProfile::Av1(Av1Profile::Main), 1, 16, Some(false))),
+            VideoCodecType::Vp9 => None,
         }
     }
 
@@ -827,20 +845,29 @@ mod tests {
     fn test_encoding_info_matches_caps() {
         let context = create_context();
         for &codec in VideoCodecType::all() {
+            // VP9 は AMF のエンコーダーを持たないため、エンコーダー能力を検証しない。
+            let Some(component_id) = encoder_component_id(codec) else {
+                continue;
+            };
+            let (profile, profile_value, level, frame_reordering) =
+                expected_encoding(codec).expect("エンコーダーを持つコーデックの期待値がない");
             let component = AmfLibrary::instance()
-                .create_component(&context, encoder_component_id(codec))
+                .create_component(&context, component_id)
                 .expect("エンコーダーの作成に失敗");
             let caps = component.get_caps().expect("GetCaps に失敗");
-            let (profile, profile_value, level, frame_reordering) = expected_encoding(codec);
+            let profile_property_name =
+                max_profile_property(codec).expect("最大プロファイルのプロパティ名がない");
+            let level_property_name =
+                max_level_property(codec).expect("最大レベルのプロパティ名がない");
 
             assert_eq!(
-                caps.get_property(max_profile_property(codec))
+                caps.get_property(profile_property_name)
                     .and_then(|value| value.as_int64()),
                 Some(profile_value),
                 "{codec:?} の最大プロファイルプロパティが期待値と一致しない"
             );
             assert_eq!(
-                caps.get_property(max_level_property(codec))
+                caps.get_property(level_property_name)
                     .and_then(|value| value.as_int64()),
                 Some(level),
                 "{codec:?} の最大レベルプロパティが期待値と一致しない"
@@ -892,24 +919,24 @@ mod tests {
                 );
             }
 
-            let max_profile_property = info
+            let profile_property = info
                 .properties
                 .iter()
-                .find(|property| property.name == max_profile_property(codec))
+                .find(|property| property.name == profile_property_name)
                 .unwrap_or_else(|| panic!("{codec:?} の最大プロファイルプロパティが見つからない"));
             assert_eq!(
-                max_profile_property.value,
+                profile_property.value,
                 Value::Int64(profile_value),
                 "{codec:?} の最大プロファイルプロパティ値が一致しない"
             );
 
-            let max_level_property = info
+            let level_property = info
                 .properties
                 .iter()
-                .find(|property| property.name == max_level_property(codec))
+                .find(|property| property.name == level_property_name)
                 .unwrap_or_else(|| panic!("{codec:?} の最大レベルプロパティが見つからない"));
             assert_eq!(
-                max_level_property.value,
+                level_property.value,
                 Value::Int64(level),
                 "{codec:?} の最大レベルプロパティ値が一致しない"
             );
@@ -986,29 +1013,38 @@ mod tests {
         }
     }
     /// `probe_encoding` / `probe_decoding` が能力情報を取得できることを確認する
+    ///
+    /// VP9 は AMF のエンコーダーを持たないため、エンコーダー能力が `None` になることを確認する。
     #[test]
     fn test_probe_returns_capabilities() {
         let context = create_context();
         for &codec in VideoCodecType::all() {
-            let encoding = probe_encoding(&context, codec)
-                .unwrap_or_else(|| panic!("{codec:?} のエンコーダー能力を取得できない"));
-            assert_eq!(
-                encoding.acceleration,
-                Some(AccelerationType::Hardware),
-                "{codec:?} のエンコーダー acceleration が期待値と一致しない"
-            );
-            assert!(
-                encoding.input.is_some(),
-                "{codec:?} のエンコーダー入力能力がない"
-            );
-            assert!(
-                encoding.output.is_some(),
-                "{codec:?} のエンコーダー出力能力がない"
-            );
-            assert!(
-                !encoding.properties.is_empty(),
-                "{codec:?} のエンコーダープロパティがない"
-            );
+            match probe_encoding(&context, codec) {
+                Some(encoding) => {
+                    assert_eq!(
+                        encoding.acceleration,
+                        Some(AccelerationType::Hardware),
+                        "{codec:?} のエンコーダー acceleration が期待値と一致しない"
+                    );
+                    assert!(
+                        encoding.input.is_some(),
+                        "{codec:?} のエンコーダー入力能力がない"
+                    );
+                    assert!(
+                        encoding.output.is_some(),
+                        "{codec:?} のエンコーダー出力能力がない"
+                    );
+                    assert!(
+                        !encoding.properties.is_empty(),
+                        "{codec:?} のエンコーダープロパティがない"
+                    );
+                }
+                None => assert_eq!(
+                    codec,
+                    VideoCodecType::Vp9,
+                    "{codec:?} のエンコーダー能力を取得できない"
+                ),
+            }
 
             let decoding = probe_decoding(&context, codec)
                 .unwrap_or_else(|| panic!("{codec:?} のデコーダー能力を取得できない"));

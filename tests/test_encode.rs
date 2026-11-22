@@ -5,9 +5,9 @@ use shiguredo_amf::amf::{Context, Surface};
 use shiguredo_amf::ffi::AMF_RESULT;
 use shiguredo_amf::{
     AmfError, Av1EncoderConfig, Av1Profile, CodecConfig, EncodeHandler, EncodeOptions,
-    EncodedFrame, Encoder, EncoderConfig, Error, FnEncodeHandler, FrameFormat, H264EncoderConfig,
-    H264Profile, HevcEncoderConfig, HevcProfile, PictureType, PlaneType, QpRange, RateControlMode,
-    ReconfigureParams, VideoCodecType, supported_codecs,
+    EncodedFrame, Encoder, EncoderConfig, EncoderUsage, Error, FnEncodeHandler, FrameFormat,
+    H264EncoderConfig, H264Profile, HevcEncoderConfig, HevcProfile, PictureType, PlaneType,
+    QpRange, QualityPreset, RateControlMode, ReconfigureParams, VideoCodecType, supported_codecs,
 };
 
 pub mod helpers;
@@ -81,13 +81,37 @@ fn create_encoder(config: EncoderConfig) -> Result<Encoder<FnEncodeHandler<()>>,
     Encoder::new(create_context(), config, FnEncodeHandler::<()>::new(|_| {}))
 }
 
-/// 指定した設定でフレームをエンコードし、すべての出力が得られることを確認する
-fn encode_frames_and_assert(
-    context: &Context,
-    config: EncoderConfig,
-    label: &str,
-    num_frames: usize,
-) {
+/// テスト対象のコーデック一覧を H.264 / HEVC / AV1 の順に返す
+fn all_codecs() -> [(&'static str, CodecConfig); 3] {
+    [
+        (
+            "H.264",
+            CodecConfig::H264(H264EncoderConfig {
+                profile: Some(H264Profile::High),
+                ..Default::default()
+            }),
+        ),
+        ("HEVC", hevc_main()),
+        ("AV1", av1_main()),
+    ]
+}
+
+/// 指定した設定で 3 フレームをエンコードし、すべての出力が得られることを確認する
+///
+/// 入力フレームは NV12 として生成するため、`config.frame_format` は
+/// `FrameFormat::Nv12` でなければならない。`label` は失敗時にどの設定で
+/// 失敗したかを示すために使う。
+fn assert_encoder_encodes(context: &Context, config: EncoderConfig, label: &str) {
+    const NUM_FRAMES: usize = 3;
+
+    assert_eq!(
+        config.frame_format,
+        FrameFormat::Nv12,
+        "{label}: assert_encoder_encodes は NV12 専用である"
+    );
+
+    let width = config.width as usize;
+    let height = config.height as usize;
     let (tx, rx) = mpsc::channel();
     let mut encoder = Encoder::new(
         context.clone(),
@@ -98,12 +122,12 @@ fn encode_frames_and_assert(
     )
     .unwrap_or_else(|error| panic!("{label}: エンコーダーの作成に失敗: {error}"));
 
-    for frame_index in 0..num_frames {
+    for frame_index in 0..NUM_FRAMES {
         let surface = encoder
             .alloc_surface()
             .unwrap_or_else(|error| panic!("{label}: Surface の確保に失敗: {error}"));
-        let data = generate_dummy_nv12(320, 240, frame_index);
-        copy_nv12_to_surface(&surface, &data, 320, 240);
+        let data = generate_dummy_nv12(width, height, frame_index);
+        copy_nv12_to_surface(&surface, &data, width, height);
         encoder
             .encode(surface, EncodeOptions::default(), ())
             .unwrap_or_else(|error| {
@@ -118,7 +142,7 @@ fn encode_frames_and_assert(
     let frames: Vec<_> = rx.try_iter().collect();
     assert_eq!(
         frames.len(),
-        num_frames,
+        NUM_FRAMES,
         "{label}: エンコードされたフレーム数が一致しない"
     );
     for (frame_index, result) in frames.iter().enumerate() {
@@ -790,17 +814,7 @@ fn test_encoder_y210_y410_initialization() {
 #[test]
 fn test_encoder_all_rate_control_modes() {
     let context = create_context();
-    let codecs = [
-        (
-            "H.264",
-            CodecConfig::H264(H264EncoderConfig {
-                profile: Some(H264Profile::High),
-                ..Default::default()
-            }),
-        ),
-        ("HEVC", hevc_main()),
-        ("AV1", av1_main()),
-    ];
+    let codecs = all_codecs();
     let modes = [
         RateControlMode::Cqp,
         RateControlMode::Cbr,
@@ -828,10 +842,79 @@ fn test_encoder_all_rate_control_modes() {
                 }
             }
 
-            let label = format!("{codec_name} {mode:?}");
-            encode_frames_and_assert(&context, config, &label, 3);
+            assert_encoder_encodes(&context, config, &format!("{codec_name} {mode:?}"));
         }
     }
+}
+
+/// すべての用途でエンコーダーを作成し、数フレームをエンコードできることを確認する
+///
+/// 用途の enum 値は H.264 / HEVC と AV1 で並びが異なるため、すべての用途について
+/// 実際の AMF がその値を受け付けて出力を返すことを確認する。
+#[test]
+fn test_encoder_all_usages() {
+    let context = create_context();
+    let codecs = all_codecs();
+    let usages = [
+        EncoderUsage::Transcoding,
+        EncoderUsage::UltraLowLatency,
+        EncoderUsage::LowLatency,
+        EncoderUsage::Webcam,
+        EncoderUsage::HighQuality,
+        EncoderUsage::LowLatencyHighQuality,
+    ];
+
+    for (codec_name, codec) in codecs {
+        for usage in usages {
+            let mut config = test_encoder_config(codec.clone(), FrameFormat::Nv12);
+            config.usage = usage;
+            assert_encoder_encodes(&context, config, &format!("{codec_name} {usage:?}"));
+        }
+    }
+}
+
+/// すべての品質プリセットでエンコーダーを作成し、数フレームをエンコードできることを確認する
+///
+/// 品質プリセットの enum 値は H.264 / HEVC / AV1 で並びが異なるため、すべての
+/// プリセットについて実際の AMF がその値を受け付けて出力を返すことを確認する。
+#[test]
+fn test_encoder_all_quality_presets() {
+    let context = create_context();
+    let codecs = all_codecs();
+    let presets = [
+        QualityPreset::Speed,
+        QualityPreset::Balanced,
+        QualityPreset::Quality,
+        QualityPreset::HighQuality,
+    ];
+
+    for (codec_name, codec) in codecs {
+        for preset in presets {
+            let mut config = test_encoder_config(codec.clone(), FrameFormat::Nv12);
+            config.quality_preset = Some(preset);
+            assert_encoder_encodes(&context, config, &format!("{codec_name} {preset:?}"));
+        }
+    }
+}
+
+/// 用途と品質プリセットを同時に指定できることを確認する
+///
+/// 品質プリセットの既定値は用途とコーデックによって決まる。用途と品質プリセットを
+/// 同時に指定した状態で、初期化と数フレームのエンコードが完了することを H.264 で
+/// 確認する。
+#[test]
+fn test_encoder_usage_and_quality_preset_combined() {
+    let context = create_context();
+    let codecs = all_codecs();
+    let (codec_name, codec) = &codecs[0];
+    let mut config = test_encoder_config(codec.clone(), FrameFormat::Nv12);
+    config.usage = EncoderUsage::LowLatency;
+    config.quality_preset = Some(QualityPreset::HighQuality);
+    assert_encoder_encodes(
+        &context,
+        config,
+        &format!("{codec_name} usage + quality_preset"),
+    );
 }
 
 /// 各コーデックで QP 範囲を指定したエンコーダーが数フレームのエンコードに成功することを確認する
@@ -845,17 +928,16 @@ fn test_encoder_qp_range() {
         (
             "H.264",
             CodecConfig::H264(H264EncoderConfig {
-                profile: Some(H264Profile::High),
                 qp_range: QpRange {
                     min: Some(18),
                     max: Some(38),
                 },
+                ..Default::default()
             }),
         ),
         (
             "HEVC",
             CodecConfig::Hevc(HevcEncoderConfig {
-                profile: Some(HevcProfile::Main),
                 qp_range_i: QpRange {
                     min: Some(16),
                     max: Some(36),
@@ -864,12 +946,12 @@ fn test_encoder_qp_range() {
                     min: Some(20),
                     max: Some(40),
                 },
+                ..Default::default()
             }),
         ),
         (
             "AV1",
             CodecConfig::Av1(Av1EncoderConfig {
-                profile: Some(Av1Profile::Main),
                 qp_range_intra: QpRange {
                     min: Some(10),
                     max: Some(200),
@@ -882,17 +964,17 @@ fn test_encoder_qp_range() {
                     min: Some(30),
                     max: Some(220),
                 },
+                ..Default::default()
             }),
         ),
     ];
 
     let context = create_context();
     for (codec_name, codec) in codecs {
-        encode_frames_and_assert(
+        assert_encoder_encodes(
             &context,
             test_encoder_config(codec, FrameFormat::Nv12),
             codec_name,
-            5,
         );
     }
 }

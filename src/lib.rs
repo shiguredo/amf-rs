@@ -97,8 +97,8 @@ pub use decode::{
 };
 pub use encode::{
     Av1EncoderConfig, CodecConfig, EncodeHandler, EncodeOptions, EncodedFrame, Encoder,
-    EncoderConfig, FnEncodeHandler, H264EncoderConfig, HevcEncoderConfig, PictureType, QpRange,
-    RateControlMode, ReconfigureParams, frame_type,
+    EncoderConfig, EncoderUsage, FnEncodeHandler, H264EncoderConfig, HevcEncoderConfig,
+    PictureType, QpRange, QualityPreset, RateControlMode, ReconfigureParams, frame_type,
 };
 pub use error::{
     AmfError, EnvironmentError, Error, InternalError, InvalidArgumentError, InvalidStateError,

@@ -96,6 +96,12 @@
   - 公開フィールドを追加するため、構造体リテラルでの構築はコンパイルエラーになる
   - AMF の仕様上の値域は、H.264 と HEVC が QP の 0-51、AV1 が Q インデックスの 1-255
   - @melpon
+- [ADD] `EncoderConfig` に `usage` と `quality_preset` を追加し、エンコーダーの用途と品質プリセットを設定できるようにする
+  - `EncoderUsage` は `Transcoding` / `UltraLowLatency` / `LowLatency` / `Webcam` / `HighQuality` / `LowLatencyHighQuality`
+  - `QualityPreset` は `Speed` / `Balanced` / `Quality` / `HighQuality`
+  - `QueryOutput` のタイムアウトを 0 に固定し、用途の既定による出力回収のブロックを防ぐ
+  - `usage` の既定は `Transcoding`、`quality_preset` が `None` のときは用途とコーデックに応じた AMF の既定値を使う
+  - @melpon
 - [ADD] `Counter` / `Gauge` / `EncoderStats` / `DecoderStats` を追加し、`Encoder::stats()` / `Decoder::stats()` で統計値を取得できるようにする
   - `EncoderStats` は送信件数、出力フレーム数、エラー件数、出力ビット数、再設定回数、in-flight フレーム数を保持する
   - `DecoderStats` は送信件数、出力フレーム数、エラー件数、in-flight フレーム数を保持する
@@ -127,6 +133,10 @@
 - [ADD] `amf::Buffer::set_pts` と `amf::Surface::get_pts` を追加する
   - @melpon
 - [ADD] `amf::PropertyStorage::get_property_size` を追加する
+  - @melpon
+- [ADD] VP9 のデコードに対応する
+  - `DecoderCodec::Vp9` を追加する
+  - `VideoCodecType::Vp9` を追加し、`supported_codecs` に含める
   - @melpon
 - [FIX] `Decoder::decode` の `user_data` が B フレームを含むストリームで誤ったフレームに付く問題を修正する
   - 入力 `Buffer` に一意な frame ID を設定し、出力 `Surface` の frame ID で `user_data` を引き当てる

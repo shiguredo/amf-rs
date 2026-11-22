@@ -153,6 +153,182 @@ impl RateControlMode {
     }
 }
 
+/// エンコーダーの用途
+///
+/// AMF の用途別プリセットを表す。用途を指定すると、AMF が用途ごとの既定
+/// パラメータ一式を適用する。[`EncoderConfig`] の他のフィールドで明示的に
+/// 設定した値は、用途の既定より優先される。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EncoderUsage {
+    /// 変換・編集向け。圧縮効率とスループットを優先する
+    Transcoding,
+    /// 超低遅延向け。ゲームストリーミングなど対話性を優先する用途で使う
+    UltraLowLatency,
+    /// 低遅延向け。ビデオ会議やリモートデスクトップで使う
+    ///
+    /// 画質維持のため、ビットレートが一時的に超過することがある。
+    LowLatency,
+    /// カメラ入力向け。低遅延のビデオ会議で使う
+    Webcam,
+    /// 高画質向け。性能より主観画質を優先する
+    HighQuality,
+    /// 低遅延かつ高画質向け
+    LowLatencyHighQuality,
+}
+
+impl EncoderUsage {
+    /// H.264 エンコーダーの用途値へ変換する
+    fn to_h264(self) -> amf_int64 {
+        let usage = match self {
+            EncoderUsage::Transcoding => {
+                sys::AMF_VIDEO_ENCODER_USAGE_ENUM_AMF_VIDEO_ENCODER_USAGE_TRANSCODING
+            }
+            EncoderUsage::UltraLowLatency => {
+                sys::AMF_VIDEO_ENCODER_USAGE_ENUM_AMF_VIDEO_ENCODER_USAGE_ULTRA_LOW_LATENCY
+            }
+            EncoderUsage::LowLatency => {
+                sys::AMF_VIDEO_ENCODER_USAGE_ENUM_AMF_VIDEO_ENCODER_USAGE_LOW_LATENCY
+            }
+            EncoderUsage::Webcam => {
+                sys::AMF_VIDEO_ENCODER_USAGE_ENUM_AMF_VIDEO_ENCODER_USAGE_WEBCAM
+            }
+            EncoderUsage::HighQuality => {
+                sys::AMF_VIDEO_ENCODER_USAGE_ENUM_AMF_VIDEO_ENCODER_USAGE_HIGH_QUALITY
+            }
+            EncoderUsage::LowLatencyHighQuality => {
+                sys::AMF_VIDEO_ENCODER_USAGE_ENUM_AMF_VIDEO_ENCODER_USAGE_LOW_LATENCY_HIGH_QUALITY
+            }
+        };
+        usage as amf_int64
+    }
+
+    /// HEVC エンコーダーの用途値へ変換する
+    fn to_hevc(self) -> amf_int64 {
+        let usage = match self {
+            EncoderUsage::Transcoding => {
+                sys::AMF_VIDEO_ENCODER_HEVC_USAGE_ENUM_AMF_VIDEO_ENCODER_HEVC_USAGE_TRANSCODING
+            }
+            EncoderUsage::UltraLowLatency => {
+                sys::AMF_VIDEO_ENCODER_HEVC_USAGE_ENUM_AMF_VIDEO_ENCODER_HEVC_USAGE_ULTRA_LOW_LATENCY
+            }
+            EncoderUsage::LowLatency => {
+                sys::AMF_VIDEO_ENCODER_HEVC_USAGE_ENUM_AMF_VIDEO_ENCODER_HEVC_USAGE_LOW_LATENCY
+            }
+            EncoderUsage::Webcam => {
+                sys::AMF_VIDEO_ENCODER_HEVC_USAGE_ENUM_AMF_VIDEO_ENCODER_HEVC_USAGE_WEBCAM
+            }
+            EncoderUsage::HighQuality => {
+                sys::AMF_VIDEO_ENCODER_HEVC_USAGE_ENUM_AMF_VIDEO_ENCODER_HEVC_USAGE_HIGH_QUALITY
+            }
+            EncoderUsage::LowLatencyHighQuality => {
+                sys::AMF_VIDEO_ENCODER_HEVC_USAGE_ENUM_AMF_VIDEO_ENCODER_HEVC_USAGE_LOW_LATENCY_HIGH_QUALITY
+            }
+        };
+        usage as amf_int64
+    }
+
+    /// AV1 エンコーダーの用途値へ変換する
+    fn to_av1(self) -> amf_int64 {
+        let usage = match self {
+            EncoderUsage::Transcoding => {
+                sys::AMF_VIDEO_ENCODER_AV1_USAGE_ENUM_AMF_VIDEO_ENCODER_AV1_USAGE_TRANSCODING
+            }
+            EncoderUsage::UltraLowLatency => {
+                sys::AMF_VIDEO_ENCODER_AV1_USAGE_ENUM_AMF_VIDEO_ENCODER_AV1_USAGE_ULTRA_LOW_LATENCY
+            }
+            EncoderUsage::LowLatency => {
+                sys::AMF_VIDEO_ENCODER_AV1_USAGE_ENUM_AMF_VIDEO_ENCODER_AV1_USAGE_LOW_LATENCY
+            }
+            EncoderUsage::Webcam => {
+                sys::AMF_VIDEO_ENCODER_AV1_USAGE_ENUM_AMF_VIDEO_ENCODER_AV1_USAGE_WEBCAM
+            }
+            EncoderUsage::HighQuality => {
+                sys::AMF_VIDEO_ENCODER_AV1_USAGE_ENUM_AMF_VIDEO_ENCODER_AV1_USAGE_HIGH_QUALITY
+            }
+            EncoderUsage::LowLatencyHighQuality => {
+                sys::AMF_VIDEO_ENCODER_AV1_USAGE_ENUM_AMF_VIDEO_ENCODER_AV1_USAGE_LOW_LATENCY_HIGH_QUALITY
+            }
+        };
+        usage as amf_int64
+    }
+}
+
+/// 品質プリセット
+///
+/// エンコード速度と画質のバランスを表す。AMF の既定値は用途とコーデックによって
+/// 決まる。レート制御モードには [`EncoderConfig::rate_control_mode`] を使い、
+/// 品質プリセットはそのモードの中での速度と画質のバランスを変える。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum QualityPreset {
+    /// 速度優先
+    Speed,
+    /// 速度と画質のバランス
+    Balanced,
+    /// 画質優先
+    Quality,
+    /// 最高画質
+    HighQuality,
+}
+
+impl QualityPreset {
+    /// H.264 エンコーダーの品質プリセット値へ変換する
+    fn to_h264(self) -> amf_int64 {
+        let preset = match self {
+            QualityPreset::Speed => {
+                sys::AMF_VIDEO_ENCODER_QUALITY_PRESET_ENUM_AMF_VIDEO_ENCODER_QUALITY_PRESET_SPEED
+            }
+            QualityPreset::Balanced => {
+                sys::AMF_VIDEO_ENCODER_QUALITY_PRESET_ENUM_AMF_VIDEO_ENCODER_QUALITY_PRESET_BALANCED
+            }
+            QualityPreset::Quality => {
+                sys::AMF_VIDEO_ENCODER_QUALITY_PRESET_ENUM_AMF_VIDEO_ENCODER_QUALITY_PRESET_QUALITY
+            }
+            QualityPreset::HighQuality => {
+                sys::AMF_VIDEO_ENCODER_QUALITY_PRESET_ENUM_AMF_VIDEO_ENCODER_QUALITY_PRESET_HIGH_QUALITY
+            }
+        };
+        preset as amf_int64
+    }
+
+    /// HEVC エンコーダーの品質プリセット値へ変換する
+    fn to_hevc(self) -> amf_int64 {
+        let preset = match self {
+            QualityPreset::Speed => {
+                sys::AMF_VIDEO_ENCODER_HEVC_QUALITY_PRESET_ENUM_AMF_VIDEO_ENCODER_HEVC_QUALITY_PRESET_SPEED
+            }
+            QualityPreset::Balanced => {
+                sys::AMF_VIDEO_ENCODER_HEVC_QUALITY_PRESET_ENUM_AMF_VIDEO_ENCODER_HEVC_QUALITY_PRESET_BALANCED
+            }
+            QualityPreset::Quality => {
+                sys::AMF_VIDEO_ENCODER_HEVC_QUALITY_PRESET_ENUM_AMF_VIDEO_ENCODER_HEVC_QUALITY_PRESET_QUALITY
+            }
+            QualityPreset::HighQuality => {
+                sys::AMF_VIDEO_ENCODER_HEVC_QUALITY_PRESET_ENUM_AMF_VIDEO_ENCODER_HEVC_QUALITY_PRESET_HIGH_QUALITY
+            }
+        };
+        preset as amf_int64
+    }
+
+    /// AV1 エンコーダーの品質プリセット値へ変換する
+    fn to_av1(self) -> amf_int64 {
+        let preset = match self {
+            QualityPreset::Speed => {
+                sys::AMF_VIDEO_ENCODER_AV1_QUALITY_PRESET_ENUM_AMF_VIDEO_ENCODER_AV1_QUALITY_PRESET_SPEED
+            }
+            QualityPreset::Balanced => {
+                sys::AMF_VIDEO_ENCODER_AV1_QUALITY_PRESET_ENUM_AMF_VIDEO_ENCODER_AV1_QUALITY_PRESET_BALANCED
+            }
+            QualityPreset::Quality => {
+                sys::AMF_VIDEO_ENCODER_AV1_QUALITY_PRESET_ENUM_AMF_VIDEO_ENCODER_AV1_QUALITY_PRESET_QUALITY
+            }
+            QualityPreset::HighQuality => {
+                sys::AMF_VIDEO_ENCODER_AV1_QUALITY_PRESET_ENUM_AMF_VIDEO_ENCODER_AV1_QUALITY_PRESET_HIGH_QUALITY
+            }
+        };
+        preset as amf_int64
+    }
+}
+
 /// ピクチャタイプ
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PictureType {
@@ -276,6 +452,19 @@ pub struct EncoderConfig {
     ///
     /// `target_kbps` と `max_kbps` の使われ方はこのモードによって変わる。
     pub rate_control_mode: RateControlMode,
+    /// エンコーダーの用途
+    ///
+    /// 既定は [`EncoderUsage::Transcoding`]。用途は AMF の既定パラメータ一式を
+    /// 決める。このライブラリが [`EncoderConfig`] の他のフィールドから設定する
+    /// 値は、用途の既定より優先される。
+    pub usage: EncoderUsage,
+    /// 品質プリセット
+    ///
+    /// `None` のときは用途とコーデックに応じた AMF の既定値を使い、`Some` のときは
+    /// その既定値よりこの値が優先される。レート制御モードには
+    /// [`EncoderConfig::rate_control_mode`] を使い、品質プリセットはそのモードの
+    /// 中でエンコード速度と画質のバランスを変える。
+    pub quality_preset: Option<QualityPreset>,
     /// 目標ビットレート (kbps 単位)
     ///
     /// CBR と VBR 系のレート制御で使う。
@@ -307,7 +496,8 @@ pub struct EncoderConfig {
 impl EncoderConfig {
     /// エンコーダー設定を作成する
     ///
-    /// 必須の項目を指定し、`Option` のフィールドは `None` で初期化する。
+    /// 必須の項目を指定し、`usage` は [`EncoderUsage::Transcoding`]、`Option` の
+    /// フィールドは `None` で初期化する。
     pub fn new(
         codec: CodecConfig,
         width: u32,
@@ -325,6 +515,8 @@ impl EncoderConfig {
             framerate_num,
             framerate_den,
             rate_control_mode,
+            usage: EncoderUsage::Transcoding,
+            quality_preset: None,
             target_kbps: None,
             max_kbps: None,
             qpi: None,
@@ -939,8 +1131,19 @@ impl<H: EncodeHandler> Encoder<H> {
         config: &EncoderConfig,
         h264: &H264EncoderConfig,
     ) -> Result<(), Error> {
-        // 用途: トランスコーディング
-        prop.set_property_int64(sys::str::AMF_VIDEO_ENCODER_USAGE, 0)?;
+        // 用途は AMF の既定パラメータ一式を決めるため、他のプロパティより先に設定する。
+        prop.set_property_int64(sys::str::AMF_VIDEO_ENCODER_USAGE, config.usage.to_h264())?;
+
+        // 出力の回収をブロックさせないため、用途の既定より 0 を優先する。
+        prop.set_property_int64(sys::str::AMF_VIDEO_ENCODER_QUERY_TIMEOUT, 0)?;
+
+        // 品質プリセットを指定した場合だけ設定し、未指定時は用途に応じた AMF の既定を使う。
+        if let Some(quality_preset) = config.quality_preset {
+            prop.set_property_int64(
+                sys::str::AMF_VIDEO_ENCODER_QUALITY_PRESET,
+                quality_preset.to_h264(),
+            )?;
+        }
 
         // プロファイル
         if let Some(profile) = h264.profile {
@@ -1027,7 +1230,22 @@ impl<H: EncodeHandler> Encoder<H> {
         config: &EncoderConfig,
         hevc: &HevcEncoderConfig,
     ) -> Result<(), Error> {
-        prop.set_property_int64(sys::str::AMF_VIDEO_ENCODER_HEVC_USAGE, 0)?;
+        // 用途は AMF の既定パラメータ一式を決めるため、他のプロパティより先に設定する。
+        prop.set_property_int64(
+            sys::str::AMF_VIDEO_ENCODER_HEVC_USAGE,
+            config.usage.to_hevc(),
+        )?;
+
+        // 出力の回収をブロックさせないため、用途の既定より 0 を優先する。
+        prop.set_property_int64(sys::str::AMF_VIDEO_ENCODER_HEVC_QUERY_TIMEOUT, 0)?;
+
+        // 品質プリセットを指定した場合だけ設定し、未指定時は用途に応じた AMF の既定を使う。
+        if let Some(quality_preset) = config.quality_preset {
+            prop.set_property_int64(
+                sys::str::AMF_VIDEO_ENCODER_HEVC_QUALITY_PRESET,
+                quality_preset.to_hevc(),
+            )?;
+        }
 
         if let Some(profile) = hevc.profile {
             let profile_val: amf_int64 = match profile {
@@ -1101,7 +1319,19 @@ impl<H: EncodeHandler> Encoder<H> {
         config: &EncoderConfig,
         av1: &Av1EncoderConfig,
     ) -> Result<(), Error> {
-        prop.set_property_int64(sys::str::AMF_VIDEO_ENCODER_AV1_USAGE, 0)?;
+        // 用途は AMF の既定パラメータ一式を決めるため、他のプロパティより先に設定する。
+        prop.set_property_int64(sys::str::AMF_VIDEO_ENCODER_AV1_USAGE, config.usage.to_av1())?;
+
+        // 出力の回収をブロックさせないため、用途の既定より 0 を優先する。
+        prop.set_property_int64(sys::str::AMF_VIDEO_ENCODER_AV1_QUERY_TIMEOUT, 0)?;
+
+        // 品質プリセットを指定した場合だけ設定し、未指定時は用途に応じた AMF の既定を使う。
+        if let Some(quality_preset) = config.quality_preset {
+            prop.set_property_int64(
+                sys::str::AMF_VIDEO_ENCODER_AV1_QUALITY_PRESET,
+                quality_preset.to_av1(),
+            )?;
+        }
 
         // プロファイル
         if let Some(profile) = av1.profile {

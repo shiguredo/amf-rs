@@ -1,6 +1,6 @@
 ---
 name: shiguredo-amf
-description: 時雨堂の AMD AMF (Advanced Media Framework) Rust バインディング shiguredo_amf の機能・API リファレンス。H.264 / H.265 / AV1 のハードウェアエンコード・デコード、AMF ランタイムの動的ロード、Surface / Buffer 管理、ハンドラーベースのコールバック設計、エンコード中の動的プロパティ再設定に関する質問時に使用。
+description: 時雨堂の AMD AMF (Advanced Media Framework) Rust バインディング shiguredo_amf の機能・API リファレンス。H.264 / H.265 / AV1 のハードウェアエンコード、H.264 / H.265 / AV1 / VP9 のハードウェアデコード、AMF ランタイムの動的ロード、Surface / Buffer 管理、ハンドラーベースのコールバック設計、エンコード中の動的プロパティ再設定に関する質問時に使用。
 ---
 
 # shiguredo_amf
@@ -9,7 +9,7 @@ AMD GPU 向けハードウェアアクセラレーションによるビデオエ
 
 ## 特徴
 
-- **AMD AMF (Advanced Media Framework)** ベースの H.264 / H.265 / AV1 ハードウェアエンコード・デコード
+- **AMD AMF (Advanced Media Framework)** ベースの H.264 / H.265 / AV1 ハードウェアエンコード、H.264 / H.265 / AV1 / VP9 ハードウェアデコード
 - **AMF ランタイムライブラリ** (`libamfrt64.so.1`) を `dlopen` で動的にロード (ビルド時のリンク不要)
 - **Vulkan バックエンド**で GPU 処理を実行 (Linux x86_64)
 - **エンコード入力フォーマット選択**: 8bit / 10bit (AMD Radeon 780M では NV12 / YV12 / I420 / BGRA / ARGB / RGBA / YUY2 / P010 を確認済み。P010 は HEVC と AV1 で利用できる)
@@ -18,6 +18,7 @@ AMD GPU 向けハードウェアアクセラレーションによるビデオエ
 - **エンコード中の動的プロパティ再設定** (`Encoder::reconfigure`)
 - **CQP / CBR / VBR / LCVBR / QVBR / HQVBR / HQCBR** レート制御モード
 - **レート制御時の QP 範囲指定** (`QpRange`、コーデック別に指定可能)
+- **エンコーダーの用途** (`EncoderUsage`) と**品質プリセット** (`QualityPreset`) の指定
 - **ハンドラーベースのコールバック**設計: エンコード/デコード結果はワーカースレッドから `EncodeHandler` / `DecodeHandler` に通知される
 - **AMFContext の明示的な管理**: 利用者が任意の個数の Context を作成し、`Context` を Clone して Encoder / Decoder に渡す。同じ Context ならデコード結果の Surface をそのままエンコードできる
 - ビルド時に GitHub から AMF ヘッダーを自動取得 (`bindgen` 経由)
@@ -63,7 +64,7 @@ AMD GPU 向けハードウェアアクセラレーションによるビデオエ
 
 | 型 | 説明 | 主要メソッド |
 |----|------|-------------|
-| `EncoderConfig` | エンコーダー設定 | `new(CodecConfig, width, height, FrameFormat, framerate_num, framerate_den, RateControlMode)`, フィールド: `target_kbps`, `max_kbps`, `qpi`, `qpp`, `qpb`, `gop_pic_size`, `b_pic_pattern` (全て `Option`) |
+| `EncoderConfig` | エンコーダー設定 | `new(CodecConfig, width, height, FrameFormat, framerate_num, framerate_den, RateControlMode)`, フィールド: `usage` (`EncoderUsage`、既定 `Transcoding`), `quality_preset`, `target_kbps`, `max_kbps`, `qpi`, `qpp`, `qpb`, `gop_pic_size`, `b_pic_pattern` (`usage` 以外は `Option`) |
 | `CodecConfig` | コーデック設定 enum | `H264(H264EncoderConfig)`, `Hevc(HevcEncoderConfig)`, `Av1(Av1EncoderConfig)` |
 | `H264EncoderConfig` | H.264 エンコーダー固有設定 | `profile: Option<H264Profile>`, `qp_range: QpRange` |
 | `HevcEncoderConfig` | HEVC エンコーダー固有設定 | `profile: Option<HevcProfile>`, `qp_range_i: QpRange`, `qp_range_p: QpRange` |
@@ -74,6 +75,8 @@ AMD GPU 向けハードウェアアクセラレーションによるビデオエ
 | `Av1Profile` | AV1 プロファイル | `Main` |
 | `FrameFormat` | エンコーダー入力フレームフォーマット | `Nv12`, `Yv12`, `I420`, `Bgra`, `Argb`, `Rgba`, `Yuy2`, `Uyvy`, `P010`, `P012`, `P016`, `Y210`, `Ayuv`, `Y410`, `Y416` |
 | `RateControlMode` | レート制御モード | `Cqp`, `Cbr`, `Vbr`, `LatencyConstrainedVbr`, `QualityVbr`, `HighQualityVbr`, `HighQualityCbr` |
+| `EncoderUsage` | エンコーダーの用途 | `Transcoding`, `UltraLowLatency`, `LowLatency`, `Webcam`, `HighQuality`, `LowLatencyHighQuality` |
+| `QualityPreset` | 品質プリセット | `Speed`, `Balanced`, `Quality`, `HighQuality` |
 | `EncodeOptions` | フレーム単位のエンコードオプション | `frame_type: u16` (デフォルト 0 = 自動。`frame_type` モジュール参照) |
 | `ReconfigureParams` | 動的プロパティ再設定パラメータ | `framerate_num`, `framerate_den`, `target_kbps`, `max_kbps`, `qpi`, `qpp`, `qpb`, `gop_pic_size` (全て `Option`、`None` の項目は変更しない) |
 | `EncodedFrame<T>` | エンコード済みフレーム | `buffer() -> &Buffer`, `picture_type() -> PictureType`, `user_data() -> &T`, `into_parts() -> (Buffer, T)` |
@@ -84,7 +87,7 @@ AMD GPU 向けハードウェアアクセラレーションによるビデオエ
 | 型 | 説明 | 主要メソッド |
 |----|------|-------------|
 | `DecoderConfig` | デコーダー設定 | `codec: DecoderCodec` |
-| `DecoderCodec` | デコーダーのコーデック種別 | `H264`, `Hevc`, `Av1` |
+| `DecoderCodec` | デコーダーのコーデック種別 | `H264`, `Hevc`, `Av1`, `Vp9` |
 | `DecodedFrame<T>` | デコード済みフレーム | `surface() -> &Surface`, `user_data() -> &T`, `into_parts() -> (Surface, T)` |
 
 ### コーデック情報 (`codec_info`)
@@ -92,7 +95,7 @@ AMD GPU 向けハードウェアアクセラレーションによるビデオエ
 | 型/関数 | 説明 |
 |--------|------|
 | `supported_codecs() -> Result<Vec<CodecInfo>, Error>` | このバックエンドで利用可能なコーデック情報の一覧 |
-| `VideoCodecType` | コーデック種別 (`H264`, `Hevc`, `Av1`) |
+| `VideoCodecType` | コーデック種別 (`H264`, `Hevc`, `Av1`, `Vp9`) |
 | `CodecInfo` | コーデックごとの情報 (`codec`, `decoding: Option<DecodingInfo>`, `encoding: Option<EncodingInfo>`) |
 | `DecodingInfo` | `acceleration: Option<AccelerationType>`, `input: Option<IoCapabilities>`, `output: Option<IoCapabilities>`, `properties: Vec<Property>` |
 | `EncodingInfo` | `acceleration: Option<AccelerationType>`, `max_profile: Option<VideoProfile>`, `max_level: Option<i64>`, `supports_frame_reordering: Option<bool>`, `input: Option<IoCapabilities>`, `output: Option<IoCapabilities>`, `properties: Vec<Property>` |
@@ -237,8 +240,9 @@ AMFContext が破棄され、そのデストラクタが `Terminate` を呼ぶ�
 use std::sync::mpsc;
 
 use shiguredo_amf::{
-    AmfLibrary, CodecConfig, EncodeOptions, EncodedFrame, Encoder, EncoderConfig, FnEncodeHandler,
-    FrameFormat, H264EncoderConfig, H264Profile, QpRange, RateControlMode, frame_type,
+    AmfLibrary, CodecConfig, EncodeOptions, EncodedFrame, Encoder, EncoderConfig, EncoderUsage,
+    FnEncodeHandler, FrameFormat, H264EncoderConfig, H264Profile, QpRange, QualityPreset,
+    RateControlMode, frame_type,
 };
 
 let context = AmfLibrary::instance().create_context()?;
@@ -259,6 +263,8 @@ let mut config = EncoderConfig::new(
     RateControlMode::Cbr,
 );
 config.target_kbps = Some(5_000);
+config.usage = EncoderUsage::LowLatency;
+config.quality_preset = Some(QualityPreset::Balanced);
 
 // クロージャをハンドラーにラップする
 let (frame_tx, frame_rx) = mpsc::channel();
@@ -418,7 +424,11 @@ for info in &codecs {
 }
 ```
 
-`supported_codecs()` は AMF ランタイムをロードして利用可能なコーデックを判定する。AMF ランタイムを初期化できない場合は `Err` を返し、個々のコーデックの非対応は `decoding` / `encoding` の `None` になる。
+`supported_codecs()` は AMF ランタイムをロードして利用可能なコーデックを判定する。AMF ランタイムを初期化できない場合は `Err` を返し、個々のコーデックの非対応は `decoding` / `encoding` の `None` になる。H.264 / HEVC / AV1 / VP9 の 4 件を返し、VP9 は AMF にエンコーダーがないため `encoding` が常に `None` になる。
+
+実機で確認済みの VP9 は Profile 0 (8bit 4:2:0) である。10bit (Profile 2) と 4:2:2 / 4:4:4 は、出力フォーマットが NV12 固定のため未検証である。
+
+VP9 の superframe は 1 フレームずつ分割して投入する必要がある。不可視フレーム (`show_frame=0`) や `show_existing_frame` を含むストリームは、入力と出力の対応付けができないため `DecodeHandler` にエラーが通知される。
 
 ### AMF ランタイムバージョンの取得
 
@@ -511,6 +521,41 @@ AMD Radeon 780M Graphics (Phoenix1)、Ubuntu 26.04.1、AMF ランタイム 1.5.3
 | `HighQualityCbr` | 高品質 CBR |
 
 H.264 / HEVC / AV1 で AMF SDK 内部の enum 値順序が異なるが、`shiguredo_amf` 側ではこの enum で抽象化されている。
+
+## エンコーダーの用途 (`EncoderUsage`)
+
+`EncoderConfig::usage` に指定する。
+
+| 用途 | `EncoderUsage` | 説明 |
+|---|---|---|
+| トランスコーディング | `EncoderUsage::Transcoding` | 変換・編集向け。圧縮効率とスループットを優先する |
+| 超低遅延 | `EncoderUsage::UltraLowLatency` | ゲームストリーミングなど、対話性を優先する用途向け |
+| 低遅延 | `EncoderUsage::LowLatency` | ビデオ会議やリモートデスクトップ向け。画質維持のためビットレートが一時的に超過することがある |
+| カメラ入力 | `EncoderUsage::Webcam` | 低遅延のビデオ会議向け |
+| 高画質 | `EncoderUsage::HighQuality` | 性能より主観画質を優先する |
+| 低遅延かつ高画質 | `EncoderUsage::LowLatencyHighQuality` | 低遅延と高画質の両立を重視する |
+
+既定は `EncoderUsage::Transcoding` である。
+用途は AMF が用意する既定パラメータ一式を選ぶ。
+`EncoderConfig` の他のフィールドで指定した値は用途の既定より優先される。
+`rate_control_mode` も常に設定されるため、用途ごとの既定レート制御メソッドより優先される。
+用途の既定に関係なく、`QueryOutput` のタイムアウトは 0 に設定する。これは出力の回収をブロックさせないためである。
+H.264 / HEVC と AV1 では `EncoderUsage` の enum 値の並びが異なる (AV1 は `UltraLowLatency` と `LowLatency` が逆) が、`shiguredo_amf` 側ではこの enum で抽象化されている。
+
+## 品質プリセット (`QualityPreset`)
+
+`EncoderConfig::quality_preset` に指定する。
+
+| プリセット | `QualityPreset` | 説明 |
+|---|---|---|
+| 速度優先 | `QualityPreset::Speed` | 画質よりエンコード速度を優先する |
+| バランス | `QualityPreset::Balanced` | エンコード速度と画質のバランスを取る |
+| 画質優先 | `QualityPreset::Quality` | エンコード速度より画質を優先する |
+| 高画質 | `QualityPreset::HighQuality` | 最も高い画質を優先する |
+
+`None` の場合は用途とコーデックに応じた AMF の既定値を使う。例えば `Webcam` の既定は H.264 が `Speed`、HEVC と AV1 が `Quality` である。`Some` の場合は、その既定値より指定した値が優先される。
+レート制御モードには `EncoderConfig::rate_control_mode` を使う。品質プリセットはそのモードの中でのエンコード速度と画質のバランスを変える。
+AMF SDK 内部の enum 値は H.264 / HEVC / AV1 で異なるが、`shiguredo_amf` 側ではこの enum で抽象化されている。
 
 ## EncoderConfig のバリデーション
 

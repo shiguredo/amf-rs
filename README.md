@@ -25,7 +25,7 @@ AMF ランタイムライブラリ (libamfrt64.so.1) は AMD GPU ドライバー
 ## 特徴
 
 - AMF によるハードウェアエンコード (H.264 / H.265 / AV1)
-- AMF によるハードウェアデコード (H.264 / H.265 / AV1)
+- AMF によるハードウェアデコード (H.264 / H.265 / AV1 / VP9)
 - AMF ランタイムライブラリの実行時動的ロード (ビルド時のリンク不要)
 - Vulkan バックエンドによる GPU 処理
 - エンコード入力フォーマット選択 (AMD Radeon 780M では NV12 / YV12 / I420 / BGRA / ARGB / RGBA / YUY2 / P010 を確認済み。P010 は HEVC と AV1 で利用できる)
@@ -35,6 +35,7 @@ AMF ランタイムライブラリ (libamfrt64.so.1) は AMD GPU ドライバー
 - エンコード中の動的プロパティ再設定 (`reconfigure`)
 - CQP / CBR / VBR / LCVBR / QVBR / HQVBR / HQCBR レート制御モード
 - レート制御時の QP 範囲指定 (`QpRange`、コーデック別に指定可能)
+- エンコーダーの用途 (`EncoderUsage`) と品質プリセット (`QualityPreset`) の指定
 - ビルド時に GitHub から AMF ヘッダーを自動取得
 
 ## 動作要件
@@ -88,9 +89,9 @@ DOCS_RS=1 cargo doc --no-deps
 use std::sync::mpsc;
 
 use shiguredo_amf::{
-    AmfLibrary, CodecConfig, EncodeOptions, EncodedFrame, Encoder, EncoderConfig, FnEncodeHandler,
-    FrameFormat, H264EncoderConfig, H264Profile, RateControlMode, ReconfigureParams,
-    frame_type,
+    AmfLibrary, CodecConfig, EncodeOptions, EncodedFrame, Encoder, EncoderConfig, EncoderUsage,
+    FnEncodeHandler, FrameFormat, H264EncoderConfig, H264Profile, QualityPreset, RateControlMode,
+    ReconfigureParams, frame_type,
 };
 
 let context = AmfLibrary::instance().create_context()?;
@@ -108,6 +109,8 @@ let mut config = EncoderConfig::new(
     RateControlMode::Cbr,
 );
 config.target_kbps = Some(5_000);
+config.usage = EncoderUsage::LowLatency;
+config.quality_preset = Some(QualityPreset::Balanced);
 
 // エンコード結果はワーカースレッドからチャネルで受け取る
 let (frame_tx, frame_rx) = mpsc::channel();
@@ -321,6 +324,17 @@ cargo run -p amf-check -- --width 1280 --height 720
 | H.264     | `DecoderCodec::H264` |
 | H.265     | `DecoderCodec::Hevc` |
 | AV1       | `DecoderCodec::Av1` |
+| VP9       | `DecoderCodec::Vp9` |
+
+VP9 はデコードのみに対応します。AMF に VP9 エンコーダーがないため、`CodecConfig` に
+VP9 はなく、`supported_codecs` が返す VP9 の `encoding` は `None` になります。
+
+実機で確認済みの VP9 は Profile 0 (8bit 4:2:0) です。10bit (Profile 2) と
+4:2:2 / 4:4:4 は、出力フォーマットが NV12 固定のため未検証です。
+
+VP9 の superframe は 1 フレームずつ分割して投入してください。不可視フレーム
+(`show_frame=0`) や `show_existing_frame` を含むストリームは、入力と出力の対応付けが
+できないため、`DecodeHandler` にエラーが通知されます。
 
 ## サポートフォーマット
 
@@ -393,6 +407,41 @@ HEVC の 10bit 入力には `HevcProfile::Main10` が必要です。`HevcProfile
 | QVBR | `RateControlMode::QualityVbr` | 品質 VBR |
 | HQVBR | `RateControlMode::HighQualityVbr` | 高品質 VBR |
 | HQCBR | `RateControlMode::HighQualityCbr` | 高品質 CBR |
+
+## エンコーダーの用途 (`EncoderUsage`)
+
+`EncoderConfig::usage` に指定します。
+
+| 用途 | `EncoderUsage` | 説明 |
+|---|---|---|
+| トランスコーディング | `EncoderUsage::Transcoding` | 変換・編集向け。圧縮効率とスループットを優先する |
+| 超低遅延 | `EncoderUsage::UltraLowLatency` | ゲームストリーミングなど、対話性を優先する用途向け |
+| 低遅延 | `EncoderUsage::LowLatency` | ビデオ会議やリモートデスクトップ向け。画質維持のためビットレートが一時的に超過することがある |
+| カメラ入力 | `EncoderUsage::Webcam` | 低遅延のビデオ会議向け |
+| 高画質 | `EncoderUsage::HighQuality` | 性能より主観画質を優先する |
+| 低遅延かつ高画質 | `EncoderUsage::LowLatencyHighQuality` | 低遅延と高画質の両立を重視する |
+
+既定は `EncoderUsage::Transcoding` です。
+用途は AMF が用意する既定パラメータ一式を選びます。
+`EncoderConfig` の他のフィールドで指定した値は用途の既定より優先されます。
+`rate_control_mode` も常に設定されるため、用途ごとの既定レート制御メソッドより優先されます。
+用途の既定に関係なく、`QueryOutput` のタイムアウトは 0 に設定します。これは出力の回収をブロックさせないためです。
+H.264 / HEVC と AV1 では `EncoderUsage` の enum 値の並びが異なります (AV1 は `UltraLowLatency` と `LowLatency` が逆) が、`shiguredo_amf` 側ではこの enum で抽象化されています。
+
+## 品質プリセット (`QualityPreset`)
+
+`EncoderConfig::quality_preset` に指定します。
+
+| プリセット | `QualityPreset` | 説明 |
+|---|---|---|
+| 速度優先 | `QualityPreset::Speed` | 画質よりエンコード速度を優先する |
+| バランス | `QualityPreset::Balanced` | エンコード速度と画質のバランスを取る |
+| 画質優先 | `QualityPreset::Quality` | エンコード速度より画質を優先する |
+| 高画質 | `QualityPreset::HighQuality` | 最も高い画質を優先する |
+
+`None` のときは用途とコーデックに応じた AMF の既定値を使います。例えば `Webcam` の既定は H.264 が `Speed`、HEVC と AV1 が `Quality` です。`Some` のときは、その既定値より指定した値が優先されます。
+レート制御モードには `EncoderConfig::rate_control_mode` を使います。品質プリセットはそのモードの中でのエンコード速度と画質のバランスを変えます。
+AMF SDK 内部の enum 値は H.264 / HEVC / AV1 で異なりますが、`shiguredo_amf` 側ではこの enum で抽象化されています。
 
 ## ライセンス
 
