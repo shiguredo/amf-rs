@@ -1,7 +1,7 @@
 # デコーダーの低遅延・サーフェスプール設定に対応する
 
 - Created: 2026-11-10
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-11-22
 - Branch: feature/add-decoder-latency-options
 - Polished: {YYYY-MM-DD}
 - Reporter: @melpon
@@ -38,3 +38,16 @@
 - 低遅延設定で出力フレームの欠落・重複がないことを検証するテストが追加される。
 - `cargo test --workspace` が通る。
 - `CHANGES.md` の `## develop` に `[ADD]` を追記する。
+
+## 解決方法
+
+- `DecoderConfig` に `low_latency` / `reorder_mode` / `surface_pool_size` を追加し、`DecoderReorderMode` と `DecoderConfig::new` を追加した。
+- `low_latency` は `AMF_VIDEO_DECODER_LOW_LATENCY`、`reorder_mode` は `AMF_VIDEO_DECODER_REORDER_MODE`、`surface_pool_size` は `AMF_VIDEO_DECODER_SURFACE_POOL_SIZE` に `Init` 前に設定するようにした。
+- 解像度変化で `Terminate` / `Init` する場合も、作成時と同じ設定を再適用するようにした。
+- `DecoderReorderMode` は AMF の `AMF_VIDEO_DECODER_MODE_ENUM` に写像した。`LowLatency` はフレームの並べ替えを伴わないストリームを前提とし、並べ替えを伴うストリームの出力順は保証せず、提示順の復元も行わないことを doc に書いた。
+- `low_latency` と `reorder_mode` の役割の違い、出力フレームの PTS と `user_data` の対応付けを README / `skills/shiguredo-amf/SKILL.md` に書いた。
+- H.264 / HEVC / AV1 / VP9 の各デコーダーで設定が受け付けられることを実機テストで確認した。H.264 / HEVC / AV1 / VP9 の低遅延デコードでフレームの欠落・重複がないことを確認するテストと、解像度変化を挟んでも設定を指定したまま全フレームが出力されることを確認するテストを追加した。
+- `src/decode.rs` の単体テストで、`Regular` / `Compliant` / `LowLatency` が AMF の列挙値に正しく写像されることを確認した。
+- DPB サイズは Linux の AMF ランタイム 1.5.3.0 で `AMF_ACCESS_DENIED` になり設定できないため、公開 API に含めない判断とし、その理由を doc に書いた。
+- README / `skills/shiguredo-amf/SKILL.md` / `CHANGES.md` を更新し、`CHANGES.md` の `## develop` に `[CHANGE]` と `[ADD]` を追記した。
+- AMD Radeon 780M / AMF ランタイム 1.5.3.0 の実機で `cargo test --workspace` が成功した。`cargo fmt --all -- --check`、`cargo clippy --workspace --all-targets -- -D warnings`、`cargo test --workspace --no-run` も通した。
