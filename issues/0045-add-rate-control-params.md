@@ -1,7 +1,7 @@
 # エンコーダーにコーデック別の Min / Max QP 範囲を追加する
 
 - Created: 2026-11-10
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-11-22
 - Branch: feature/add-qp-range-params
 - Polished: {YYYY-MM-DD}
 - Reporter: @melpon
@@ -61,3 +61,17 @@ pub struct QpRange {
 - README / SKILL.md の設定項目とコード例が実装と一致する。
 - 実機テストが追加され、`cargo test --workspace` が通る。
 - `CHANGES.md` の `## develop` に `[CHANGE]` を追記する。
+
+## 解決方法
+
+- 公開型 `QpRange` を追加した。`min` / `max` はそれぞれ `Option<u16>` で独立して指定でき、`None` の側は AMF の既定値を使う。
+- `H264EncoderConfig::qp_range`、`HevcEncoderConfig::qp_range_i` / `qp_range_p`、`Av1EncoderConfig::qp_range_intra` / `qp_range_inter` / `qp_range_inter_b` を `QpRange` 型で追加した。省略時は `QpRange::default()` となり、QP 範囲を設定しない。
+- `set_h264_properties` / `set_hevc_properties` / `set_av1_properties` で、H.264 は `AMF_VIDEO_ENCODER_MIN_QP` / `MAX_QP`、HEVC は `AMF_VIDEO_ENCODER_HEVC_MIN_QP_I` / `MAX_QP_I` と `_P`、AV1 は `AMF_VIDEO_ENCODER_AV1_MIN_Q_INDEX_INTRA` / `MAX_Q_INDEX_INTRA`、`_INTER`、`_INTER_B` に設定するようにした。USAGE の設定後に設定する。
+- `H264EncoderConfig` / `HevcEncoderConfig` / `Av1EncoderConfig` に `Default` を実装し、既存の構造体リテラルを `..Default::default()` に移行した。
+- QP の値域や `min` と `max` の大小関係はローカルで検証せず、範囲外の値は AMF に渡して返されたエラーをそのまま返す。
+- `qpi` / `qpp` / `qpb` は CQP の固定 QP、`qp_range` 系はレート制御時の QP の範囲であることを doc に書いた。
+- `ReconfigureParams` は変更対象外とし、`Encoder::new` でのみ設定できるようにした。
+- `src/encode.rs` の単体テストで `PropertyStorage::get_property_int64` を使い、各プロパティに指定値が設定されること、片側だけ指定した場合に反対側が変更されないこと、範囲外の値で `Encoder::new` がエラーになることを確認した。
+- `tests/test_encode.rs` に実機テストを追加し、H.264 / HEVC / AV1 で QP 範囲を指定した `Encoder::new` と数フレームのエンコードが成功することを確認した。
+- README / `skills/shiguredo-amf/SKILL.md` / `CHANGES.md` を更新した。
+- AMD GPU 実機で `cargo fmt --all --check`、`cargo clippy --workspace --all-targets -- -D warnings`、`cargo test --workspace` を通した。
