@@ -94,7 +94,7 @@
   - `Av1EncoderConfig` に `qp_range_intra` / `qp_range_inter` / `qp_range_inter_b` を追加する
   - `H264EncoderConfig` / `HevcEncoderConfig` / `Av1EncoderConfig` に `Default` を実装する
   - 公開フィールドを追加するため、構造体リテラルでの構築はコンパイルエラーになる
-  - 値の範囲は H.264 と HEVC が 0-51、AV1 が 1-255
+  - AMF の仕様上の値域は、H.264 と HEVC が QP の 0-51、AV1 が Q インデックスの 1-255
   - @melpon
 - [ADD] `Counter` / `Gauge` / `EncoderStats` / `DecoderStats` を追加し、`Encoder::stats()` / `Decoder::stats()` で統計値を取得できるようにする
   - `EncoderStats` は送信件数、出力フレーム数、エラー件数、出力ビット数、再設定回数、in-flight フレーム数を保持する

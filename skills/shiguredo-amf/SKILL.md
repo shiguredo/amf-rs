@@ -68,7 +68,7 @@ AMD GPU 向けハードウェアアクセラレーションによるビデオエ
 | `H264EncoderConfig` | H.264 エンコーダー固有設定 | `profile: Option<H264Profile>`, `qp_range: QpRange` |
 | `HevcEncoderConfig` | HEVC エンコーダー固有設定 | `profile: Option<HevcProfile>`, `qp_range_i: QpRange`, `qp_range_p: QpRange` |
 | `Av1EncoderConfig` | AV1 エンコーダー固有設定 | `profile: Option<Av1Profile>`, `qp_range_intra: QpRange`, `qp_range_inter: QpRange`, `qp_range_inter_b: QpRange` |
-| `QpRange` | レート制御時の QP の下限と上限 | `min: Option<u16>`, `max: Option<u16>` (それぞれ独立して指定でき、`None` は AMF の既定値) |
+| `QpRange` | レート制御時の QP / Q インデックスの下限と上限 | `min: Option<u16>`, `max: Option<u16>` (それぞれ独立して指定でき、`None` は AMF の既定値) |
 | `H264Profile` | H.264 プロファイル | `Baseline`, `Main`, `High`, `ConstrainedBaseline`, `ConstrainedHigh` |
 | `HevcProfile` | HEVC プロファイル | `Main`, `Main10` |
 | `Av1Profile` | AV1 プロファイル | `Main` |
@@ -294,7 +294,7 @@ for frame in frame_rx.try_iter() {
 
 `EncoderConfig::b_pic_pattern` に GOP 内の連続 B フレーム数を指定すると B フレームを有効にできる。AMF の仕様上の値域は H.264 が 0-3、AV1 が 0-127 で、0 は B フレームなし、`None` は AMF の既定値 (0) になる。HEVC は B フレームを扱わないため指定できない。B フレームを有効にすると、ハンドラーへの通知順は入力順 (提示順) と異なる符号化順になるが、`encode()` に渡した `UserData` は対応する入力フレームの出力に付く。B フレームに対応していない GPU で 1 以上を指定した場合は `Encoder::new` がエラーを返す。`Encoder` は入出力の対応付けに `ShiguredoAmfFrameId` プロパティを使う。この名前はライブラリの予約名であり、利用者は入力 `Surface` に設定しないこと。`encode()` は入力 `Surface` の PTS を変更せず、出力 `Buffer` の PTS も設定しない。出力 `Buffer` の PTS は AMF が付けた値になる。
 
-コーデック別設定の `qp_range` 系に `QpRange` を指定すると、レート制御時の QP の下限と上限を指定できる。H.264 は `qp_range` (I / P / B 共通)、HEVC は `qp_range_i` / `qp_range_p`、AV1 は `qp_range_intra` / `qp_range_inter` / `qp_range_inter_b` を使う。`min` と `max` はそれぞれ独立して指定でき、`None` の側は AMF の既定値になる。値の範囲は H.264 と HEVC が 0-51、AV1 が 1-255 である。`EncoderConfig::qpi` / `qpp` / `qpb` は CQP の固定 QP を指定するものであり、`qp_range` 系とは別の設定である。`H264EncoderConfig` / `HevcEncoderConfig` / `Av1EncoderConfig` は `Default` を実装しており、`..Default::default()` で未指定のフィールドを既定値にできる。
+コーデック別設定の `qp_range` 系に `QpRange` を指定すると、レート制御時の QP (AV1 は Q インデックス) の下限と上限を指定できる。H.264 は `qp_range` (AMF の MinQP / MaxQP はフレーム種別を分けない 1 組)、HEVC は `qp_range_i` / `qp_range_p`、AV1 は `qp_range_intra` / `qp_range_inter` / `qp_range_inter_b` を使う。`min` と `max` はそれぞれ独立して指定でき、`None` の側は AMF の既定値になる。AMF の仕様上の値域は、H.264 と HEVC が QP の 0-51、AV1 が Q インデックスの 1-255 である。`EncoderConfig::qpi` / `qpp` / `qpb` は CQP の固定 QP を指定するものであり、`qp_range` 系とは別の設定である。`H264EncoderConfig` / `HevcEncoderConfig` / `Av1EncoderConfig` は `Default` を実装しており、`..Default::default()` で未指定のフィールドを既定値にできる。
 
 `Encoder::encode` は入力 1 つにつき出力 1 つを前提とし、同じ入力に対応する出力が複数ある場合や、対応する入力がない出力が得られた場合はワーカーが `Err` として通知する。
 

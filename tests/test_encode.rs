@@ -1,7 +1,7 @@
 use std::sync::{Arc, Mutex, mpsc};
 use std::time::{Duration, Instant};
 
-use shiguredo_amf::amf::Surface;
+use shiguredo_amf::amf::{Context, Surface};
 use shiguredo_amf::ffi::AMF_RESULT;
 use shiguredo_amf::{
     AmfError, Av1EncoderConfig, Av1Profile, CodecConfig, EncodeHandler, EncodeOptions,
@@ -58,10 +58,7 @@ fn hevc_main() -> CodecConfig {
 
 /// テスト用の HEVC プロファイル未指定の設定を返す
 fn hevc_default_profile() -> CodecConfig {
-    CodecConfig::Hevc(HevcEncoderConfig {
-        profile: None,
-        ..Default::default()
-    })
+    CodecConfig::Hevc(HevcEncoderConfig::default())
 }
 
 /// テスト用の AV1 Main プロファイル設定を返す
@@ -82,6 +79,57 @@ fn test_encoder_config(codec: CodecConfig, frame_format: FrameFormat) -> Encoder
 /// 指定した設定でエンコーダーを作成する
 fn create_encoder(config: EncoderConfig) -> Result<Encoder<FnEncodeHandler<()>>, Error> {
     Encoder::new(create_context(), config, FnEncodeHandler::<()>::new(|_| {}))
+}
+
+/// 指定した設定でフレームをエンコードし、すべての出力が得られることを確認する
+fn encode_frames_and_assert(
+    context: &Context,
+    config: EncoderConfig,
+    label: &str,
+    num_frames: usize,
+) {
+    let (tx, rx) = mpsc::channel();
+    let mut encoder = Encoder::new(
+        context.clone(),
+        config,
+        FnEncodeHandler::<()>::new(move |result| {
+            tx.send(result).expect("エンコード結果の送信に失敗");
+        }),
+    )
+    .unwrap_or_else(|error| panic!("{label}: エンコーダーの作成に失敗: {error}"));
+
+    for frame_index in 0..num_frames {
+        let surface = encoder
+            .alloc_surface()
+            .unwrap_or_else(|error| panic!("{label}: Surface の確保に失敗: {error}"));
+        let data = generate_dummy_nv12(320, 240, frame_index);
+        copy_nv12_to_surface(&surface, &data, 320, 240);
+        encoder
+            .encode(surface, EncodeOptions::default(), ())
+            .unwrap_or_else(|error| {
+                panic!("{label}: フレーム {frame_index} のエンコードに失敗: {error}")
+            });
+    }
+    encoder
+        .finish()
+        .unwrap_or_else(|error| panic!("{label}: finish に失敗: {error}"));
+    drop(encoder);
+
+    let frames: Vec<_> = rx.try_iter().collect();
+    assert_eq!(
+        frames.len(),
+        num_frames,
+        "{label}: エンコードされたフレーム数が一致しない"
+    );
+    for (frame_index, result) in frames.iter().enumerate() {
+        let frame = result.as_ref().unwrap_or_else(|error| {
+            panic!("{label}: フレーム {frame_index} のエンコードに失敗: {error}")
+        });
+        assert!(
+            frame.buffer().get_size() > 0,
+            "{label}: フレーム {frame_index} のビットストリームが空"
+        );
+    }
 }
 
 /// 最初の通知でブロックするハンドラー
@@ -780,55 +828,8 @@ fn test_encoder_all_rate_control_modes() {
                 }
             }
 
-            let (tx, rx) = mpsc::channel();
-            let mut encoder = Encoder::new(
-                context.clone(),
-                config,
-                FnEncodeHandler::<()>::new(move |result| {
-                    tx.send(result).expect("エンコード結果の送信に失敗");
-                }),
-            )
-            .unwrap_or_else(|error| {
-                panic!("{codec_name} {mode:?}: エンコーダーの作成に失敗: {error}")
-            });
-
-            let num_frames = 3;
-            for frame_index in 0..num_frames {
-                let surface = encoder.alloc_surface().unwrap_or_else(|error| {
-                    panic!("{codec_name} {mode:?}: Surface の確保に失敗: {error}")
-                });
-                let data = generate_dummy_nv12(320, 240, frame_index);
-                copy_nv12_to_surface(&surface, &data, 320, 240);
-                encoder
-                    .encode(surface, EncodeOptions::default(), ())
-                    .unwrap_or_else(|error| {
-                        panic!(
-                            "{codec_name} {mode:?}: フレーム {frame_index} のエンコードに失敗: {error}"
-                        )
-                    });
-            }
-            encoder
-                .finish()
-                .unwrap_or_else(|error| panic!("{codec_name} {mode:?}: finish に失敗: {error}"));
-            drop(encoder);
-
-            let frames: Vec<_> = rx.try_iter().collect();
-            assert_eq!(
-                frames.len(),
-                num_frames,
-                "{codec_name} {mode:?}: エンコードされたフレーム数が一致しない"
-            );
-            for (frame_index, result) in frames.iter().enumerate() {
-                let frame = result.as_ref().unwrap_or_else(|error| {
-                    panic!(
-                        "{codec_name} {mode:?}: フレーム {frame_index} のエンコードに失敗: {error}"
-                    )
-                });
-                assert!(
-                    frame.buffer().get_size() > 0,
-                    "{codec_name} {mode:?}: フレーム {frame_index} のビットストリームが空"
-                );
-            }
+            let label = format!("{codec_name} {mode:?}");
+            encode_frames_and_assert(&context, config, &label, 3);
         }
     }
 }
@@ -887,51 +888,12 @@ fn test_encoder_qp_range() {
 
     let context = create_context();
     for (codec_name, codec) in codecs {
-        let (tx, rx) = mpsc::channel();
-        let mut encoder = Encoder::new(
-            context.clone(),
+        encode_frames_and_assert(
+            &context,
             test_encoder_config(codec, FrameFormat::Nv12),
-            FnEncodeHandler::<()>::new(move |result| {
-                tx.send(result).expect("エンコード結果の送信に失敗");
-            }),
-        )
-        .unwrap_or_else(|error| {
-            panic!("{codec_name}: QP 範囲を指定したエンコーダーの作成に失敗: {error}")
-        });
-
-        let num_frames = 5;
-        for frame_index in 0..num_frames {
-            let surface = encoder
-                .alloc_surface()
-                .unwrap_or_else(|error| panic!("{codec_name}: Surface の確保に失敗: {error}"));
-            let data = generate_dummy_nv12(320, 240, frame_index);
-            copy_nv12_to_surface(&surface, &data, 320, 240);
-            encoder
-                .encode(surface, EncodeOptions::default(), ())
-                .unwrap_or_else(|error| {
-                    panic!("{codec_name}: フレーム {frame_index} のエンコードに失敗: {error}")
-                });
-        }
-        encoder
-            .finish()
-            .unwrap_or_else(|error| panic!("{codec_name}: finish に失敗: {error}"));
-        drop(encoder);
-
-        let frames: Vec<_> = rx.try_iter().collect();
-        assert_eq!(
-            frames.len(),
-            num_frames,
-            "{codec_name}: エンコードされたフレーム数が一致しない"
+            codec_name,
+            5,
         );
-        for (frame_index, result) in frames.iter().enumerate() {
-            let frame = result.as_ref().unwrap_or_else(|error| {
-                panic!("{codec_name}: フレーム {frame_index} のエンコードに失敗: {error}")
-            });
-            assert!(
-                frame.buffer().get_size() > 0,
-                "{codec_name}: フレーム {frame_index} のビットストリームが空"
-            );
-        }
     }
 }
 
