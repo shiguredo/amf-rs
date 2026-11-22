@@ -193,7 +193,7 @@ pub struct H264EncoderConfig {
     /// レート制御時の QP の下限と上限
     ///
     /// I / P / B フレームに共通で適用する。
-    pub qp_range: Option<QpRange>,
+    pub qp_range: QpRange,
 }
 
 /// HEVC エンコーダー固有設定
@@ -206,9 +206,9 @@ pub struct HevcEncoderConfig {
     /// エラーを返す。
     pub profile: Option<HevcProfile>,
     /// レート制御時の I フレームの QP の下限と上限
-    pub qp_range_i: Option<QpRange>,
+    pub qp_range_i: QpRange,
     /// レート制御時の P フレームの QP の下限と上限
-    pub qp_range_p: Option<QpRange>,
+    pub qp_range_p: QpRange,
 }
 
 /// AV1 エンコーダー固有設定
@@ -217,11 +217,11 @@ pub struct Av1EncoderConfig {
     /// プロファイル
     pub profile: Option<Av1Profile>,
     /// レート制御時の intra フレームの Q インデックスの下限と上限
-    pub qp_range_intra: Option<QpRange>,
+    pub qp_range_intra: QpRange,
     /// レート制御時の inter フレームの Q インデックスの下限と上限
-    pub qp_range_inter: Option<QpRange>,
+    pub qp_range_inter: QpRange,
     /// レート制御時の bi-directional inter フレームの Q インデックスの下限と上限
-    pub qp_range_inter_b: Option<QpRange>,
+    pub qp_range_inter_b: QpRange,
 }
 
 /// コーデックとコーデック固有設定
@@ -904,9 +904,13 @@ impl<H: EncodeHandler> Encoder<H> {
         Ok(())
     }
 
-    /// 指定した下限と上限を AMF のプロパティに設定する
+    /// 指定した側の QP 範囲の値だけを設定する
     ///
-    /// `min` または `max` が `None` の側は AMF の既定値を使う。
+    /// `min` または `max` が `None` のフィールドに対応する値は変更しない。
+    ///
+    /// # Errors
+    ///
+    /// AMF が値を受け付けない場合にエラーを返す。
     fn set_qp_range(
         prop: &PropertyStorage,
         min_name: &str,
@@ -975,14 +979,12 @@ impl<H: EncodeHandler> Encoder<H> {
         )?;
 
         // QP 範囲は USAGE によって既定値が変わるため、USAGE の設定後に指定する。
-        if let Some(qp_range) = h264.qp_range {
-            Self::set_qp_range(
-                prop,
-                sys::str::AMF_VIDEO_ENCODER_MIN_QP,
-                sys::str::AMF_VIDEO_ENCODER_MAX_QP,
-                qp_range,
-            )?;
-        }
+        Self::set_qp_range(
+            prop,
+            sys::str::AMF_VIDEO_ENCODER_MIN_QP,
+            sys::str::AMF_VIDEO_ENCODER_MAX_QP,
+            h264.qp_range,
+        )?;
 
         let params = ReconfigureParams {
             target_kbps: config.target_kbps,
@@ -1056,22 +1058,18 @@ impl<H: EncodeHandler> Encoder<H> {
         )?;
 
         // QP 範囲は USAGE によって既定値が変わるため、USAGE の設定後に指定する。
-        if let Some(qp_range) = hevc.qp_range_i {
-            Self::set_qp_range(
-                prop,
-                sys::str::AMF_VIDEO_ENCODER_HEVC_MIN_QP_I,
-                sys::str::AMF_VIDEO_ENCODER_HEVC_MAX_QP_I,
-                qp_range,
-            )?;
-        }
-        if let Some(qp_range) = hevc.qp_range_p {
-            Self::set_qp_range(
-                prop,
-                sys::str::AMF_VIDEO_ENCODER_HEVC_MIN_QP_P,
-                sys::str::AMF_VIDEO_ENCODER_HEVC_MAX_QP_P,
-                qp_range,
-            )?;
-        }
+        Self::set_qp_range(
+            prop,
+            sys::str::AMF_VIDEO_ENCODER_HEVC_MIN_QP_I,
+            sys::str::AMF_VIDEO_ENCODER_HEVC_MAX_QP_I,
+            hevc.qp_range_i,
+        )?;
+        Self::set_qp_range(
+            prop,
+            sys::str::AMF_VIDEO_ENCODER_HEVC_MIN_QP_P,
+            sys::str::AMF_VIDEO_ENCODER_HEVC_MAX_QP_P,
+            hevc.qp_range_p,
+        )?;
 
         let params = ReconfigureParams {
             target_kbps: config.target_kbps,
@@ -1132,30 +1130,24 @@ impl<H: EncodeHandler> Encoder<H> {
         )?;
 
         // QP 範囲は USAGE によって既定値が変わるため、USAGE の設定後に指定する。
-        if let Some(qp_range) = av1.qp_range_intra {
-            Self::set_qp_range(
-                prop,
-                sys::str::AMF_VIDEO_ENCODER_AV1_MIN_Q_INDEX_INTRA,
-                sys::str::AMF_VIDEO_ENCODER_AV1_MAX_Q_INDEX_INTRA,
-                qp_range,
-            )?;
-        }
-        if let Some(qp_range) = av1.qp_range_inter {
-            Self::set_qp_range(
-                prop,
-                sys::str::AMF_VIDEO_ENCODER_AV1_MIN_Q_INDEX_INTER,
-                sys::str::AMF_VIDEO_ENCODER_AV1_MAX_Q_INDEX_INTER,
-                qp_range,
-            )?;
-        }
-        if let Some(qp_range) = av1.qp_range_inter_b {
-            Self::set_qp_range(
-                prop,
-                sys::str::AMF_VIDEO_ENCODER_AV1_MIN_Q_INDEX_INTER_B,
-                sys::str::AMF_VIDEO_ENCODER_AV1_MAX_Q_INDEX_INTER_B,
-                qp_range,
-            )?;
-        }
+        Self::set_qp_range(
+            prop,
+            sys::str::AMF_VIDEO_ENCODER_AV1_MIN_Q_INDEX_INTRA,
+            sys::str::AMF_VIDEO_ENCODER_AV1_MAX_Q_INDEX_INTRA,
+            av1.qp_range_intra,
+        )?;
+        Self::set_qp_range(
+            prop,
+            sys::str::AMF_VIDEO_ENCODER_AV1_MIN_Q_INDEX_INTER,
+            sys::str::AMF_VIDEO_ENCODER_AV1_MAX_Q_INDEX_INTER,
+            av1.qp_range_inter,
+        )?;
+        Self::set_qp_range(
+            prop,
+            sys::str::AMF_VIDEO_ENCODER_AV1_MIN_Q_INDEX_INTER_B,
+            sys::str::AMF_VIDEO_ENCODER_AV1_MAX_Q_INDEX_INTER_B,
+            av1.qp_range_inter_b,
+        )?;
 
         let params = ReconfigureParams {
             target_kbps: config.target_kbps,
@@ -1599,10 +1591,10 @@ mod tests {
             .expect("Context の作成に失敗");
         let codec = CodecConfig::H264(H264EncoderConfig {
             profile: Some(H264Profile::High),
-            qp_range: Some(QpRange {
+            qp_range: QpRange {
                 min: Some(10),
                 max: Some(40),
-            }),
+            },
         });
         let config = cbr_config(codec.clone());
         let prop = codec_property_storage(&context, &codec);
@@ -1624,37 +1616,76 @@ mod tests {
 
     /// QpRange で指定していない側の値を変更しないことを確認する
     ///
-    /// `max` を `None` にした場合、AMF の既定の MaxQP が保持される。
+    /// `qp_range` を指定しない設定を基準にし、`min` のみ / `max` のみを
+    /// 指定した場合に、指定していない側の値が基準値のままであることを確認する。
     #[test]
     fn test_qp_range_properties_partial() {
         let context = AmfLibrary::instance()
             .create_context()
             .expect("Context の作成に失敗");
-        let codec = CodecConfig::H264(H264EncoderConfig {
+
+        // QP 範囲を指定しない場合の MinQP / MaxQP を基準値とする。
+        let base_codec = CodecConfig::H264(H264EncoderConfig {
             profile: Some(H264Profile::High),
-            qp_range: Some(QpRange {
-                min: Some(10),
-                max: None,
-            }),
+            qp_range: QpRange::default(),
         });
-        let config = cbr_config(codec.clone());
-        let prop = codec_property_storage(&context, &codec);
-        let default_max = prop
+        let base_prop = codec_property_storage(&context, &base_codec);
+        apply_properties(&base_prop, &cbr_config(base_codec));
+        let default_min = base_prop
+            .get_property_int64(sys::str::AMF_VIDEO_ENCODER_MIN_QP)
+            .expect("既定の MinQP の取得に失敗");
+        let default_max = base_prop
             .get_property_int64(sys::str::AMF_VIDEO_ENCODER_MAX_QP)
             .expect("既定の MaxQP の取得に失敗");
-        apply_properties(&prop, &config);
 
+        // min だけを指定した場合、MaxQP は基準値のままである。
+        let min_only_codec = CodecConfig::H264(H264EncoderConfig {
+            profile: Some(H264Profile::High),
+            qp_range: QpRange {
+                min: Some(10),
+                max: None,
+            },
+        });
+        let min_only_prop = codec_property_storage(&context, &min_only_codec);
+        apply_properties(&min_only_prop, &cbr_config(min_only_codec));
         assert_eq!(
-            prop.get_property_int64(sys::str::AMF_VIDEO_ENCODER_MIN_QP)
+            min_only_prop
+                .get_property_int64(sys::str::AMF_VIDEO_ENCODER_MIN_QP)
                 .expect("MinQP の取得に失敗"),
             10,
-            "MinQP が指定値と一致しない"
+            "min だけを指定した場合の MinQP が指定値と一致しない"
         );
         assert_eq!(
-            prop.get_property_int64(sys::str::AMF_VIDEO_ENCODER_MAX_QP)
+            min_only_prop
+                .get_property_int64(sys::str::AMF_VIDEO_ENCODER_MAX_QP)
                 .expect("MaxQP の取得に失敗"),
             default_max,
-            "指定していない MaxQP が変更されている"
+            "min だけを指定した場合に MaxQP が変更されている"
+        );
+
+        // max だけを指定した場合、MinQP は基準値のままである。
+        let max_only_codec = CodecConfig::H264(H264EncoderConfig {
+            profile: Some(H264Profile::High),
+            qp_range: QpRange {
+                min: None,
+                max: Some(40),
+            },
+        });
+        let max_only_prop = codec_property_storage(&context, &max_only_codec);
+        apply_properties(&max_only_prop, &cbr_config(max_only_codec));
+        assert_eq!(
+            max_only_prop
+                .get_property_int64(sys::str::AMF_VIDEO_ENCODER_MIN_QP)
+                .expect("MinQP の取得に失敗"),
+            default_min,
+            "max だけを指定した場合に MinQP が変更されている"
+        );
+        assert_eq!(
+            max_only_prop
+                .get_property_int64(sys::str::AMF_VIDEO_ENCODER_MAX_QP)
+                .expect("MaxQP の取得に失敗"),
+            40,
+            "max だけを指定した場合の MaxQP が指定値と一致しない"
         );
     }
 
@@ -1666,10 +1697,10 @@ mod tests {
     fn test_qp_range_out_of_range_returns_amf_error() {
         let codec = CodecConfig::H264(H264EncoderConfig {
             profile: Some(H264Profile::High),
-            qp_range: Some(QpRange {
+            qp_range: QpRange {
                 min: Some(60),
                 max: Some(100),
-            }),
+            },
         });
         let config = cbr_config(codec);
         let result = Encoder::new(
@@ -1707,14 +1738,14 @@ mod tests {
             .expect("Context の作成に失敗");
         let codec = CodecConfig::Hevc(HevcEncoderConfig {
             profile: Some(HevcProfile::Main),
-            qp_range_i: Some(QpRange {
+            qp_range_i: QpRange {
                 min: Some(11),
                 max: Some(41),
-            }),
-            qp_range_p: Some(QpRange {
+            },
+            qp_range_p: QpRange {
                 min: Some(12),
                 max: Some(42),
-            }),
+            },
         });
         let config = cbr_config(codec.clone());
         let prop = codec_property_storage(&context, &codec);
@@ -1755,18 +1786,18 @@ mod tests {
             .expect("Context の作成に失敗");
         let codec = CodecConfig::Av1(Av1EncoderConfig {
             profile: Some(Av1Profile::Main),
-            qp_range_intra: Some(QpRange {
+            qp_range_intra: QpRange {
                 min: Some(10),
                 max: Some(200),
-            }),
-            qp_range_inter: Some(QpRange {
+            },
+            qp_range_inter: QpRange {
                 min: Some(20),
                 max: Some(210),
-            }),
-            qp_range_inter_b: Some(QpRange {
+            },
+            qp_range_inter_b: QpRange {
                 min: Some(30),
                 max: Some(220),
-            }),
+            },
         });
         let config = cbr_config(codec.clone());
         let prop = codec_property_storage(&context, &codec);

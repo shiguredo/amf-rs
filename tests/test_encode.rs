@@ -845,42 +845,42 @@ fn test_encoder_qp_range() {
             "H.264",
             CodecConfig::H264(H264EncoderConfig {
                 profile: Some(H264Profile::High),
-                qp_range: Some(QpRange {
+                qp_range: QpRange {
                     min: Some(18),
                     max: Some(38),
-                }),
+                },
             }),
         ),
         (
             "HEVC",
             CodecConfig::Hevc(HevcEncoderConfig {
                 profile: Some(HevcProfile::Main),
-                qp_range_i: Some(QpRange {
+                qp_range_i: QpRange {
                     min: Some(16),
                     max: Some(36),
-                }),
-                qp_range_p: Some(QpRange {
+                },
+                qp_range_p: QpRange {
                     min: Some(20),
                     max: Some(40),
-                }),
+                },
             }),
         ),
         (
             "AV1",
             CodecConfig::Av1(Av1EncoderConfig {
                 profile: Some(Av1Profile::Main),
-                qp_range_intra: Some(QpRange {
+                qp_range_intra: QpRange {
                     min: Some(10),
                     max: Some(200),
-                }),
-                qp_range_inter: Some(QpRange {
+                },
+                qp_range_inter: QpRange {
                     min: Some(20),
                     max: Some(210),
-                }),
-                qp_range_inter_b: Some(QpRange {
+                },
+                qp_range_inter_b: QpRange {
                     min: Some(30),
                     max: Some(220),
-                }),
+                },
             }),
         ),
     ];

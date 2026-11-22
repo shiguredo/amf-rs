@@ -65,9 +65,9 @@ AMD GPU 向けハードウェアアクセラレーションによるビデオエ
 |----|------|-------------|
 | `EncoderConfig` | エンコーダー設定 | `new(CodecConfig, width, height, FrameFormat, framerate_num, framerate_den, RateControlMode)`, フィールド: `target_kbps`, `max_kbps`, `qpi`, `qpp`, `qpb`, `gop_pic_size`, `b_pic_pattern` (全て `Option`) |
 | `CodecConfig` | コーデック設定 enum | `H264(H264EncoderConfig)`, `Hevc(HevcEncoderConfig)`, `Av1(Av1EncoderConfig)` |
-| `H264EncoderConfig` | H.264 エンコーダー固有設定 | `profile: Option<H264Profile>`, `qp_range: Option<QpRange>` |
-| `HevcEncoderConfig` | HEVC エンコーダー固有設定 | `profile: Option<HevcProfile>`, `qp_range_i: Option<QpRange>`, `qp_range_p: Option<QpRange>` |
-| `Av1EncoderConfig` | AV1 エンコーダー固有設定 | `profile: Option<Av1Profile>`, `qp_range_intra: Option<QpRange>`, `qp_range_inter: Option<QpRange>`, `qp_range_inter_b: Option<QpRange>` |
+| `H264EncoderConfig` | H.264 エンコーダー固有設定 | `profile: Option<H264Profile>`, `qp_range: QpRange` |
+| `HevcEncoderConfig` | HEVC エンコーダー固有設定 | `profile: Option<HevcProfile>`, `qp_range_i: QpRange`, `qp_range_p: QpRange` |
+| `Av1EncoderConfig` | AV1 エンコーダー固有設定 | `profile: Option<Av1Profile>`, `qp_range_intra: QpRange`, `qp_range_inter: QpRange`, `qp_range_inter_b: QpRange` |
 | `QpRange` | レート制御時の QP の下限と上限 | `min: Option<u16>`, `max: Option<u16>` (それぞれ独立して指定でき、`None` は AMF の既定値) |
 | `H264Profile` | H.264 プロファイル | `Baseline`, `Main`, `High`, `ConstrainedBaseline`, `ConstrainedHigh` |
 | `HevcProfile` | HEVC プロファイル | `Main`, `Main10` |
@@ -75,7 +75,7 @@ AMD GPU 向けハードウェアアクセラレーションによるビデオエ
 | `FrameFormat` | エンコーダー入力フレームフォーマット | `Nv12`, `Yv12`, `I420`, `Bgra`, `Argb`, `Rgba`, `Yuy2`, `Uyvy`, `P010`, `P012`, `P016`, `Y210`, `Ayuv`, `Y410`, `Y416` |
 | `RateControlMode` | レート制御モード | `Cqp`, `Cbr`, `Vbr`, `LatencyConstrainedVbr`, `QualityVbr`, `HighQualityVbr`, `HighQualityCbr` |
 | `EncodeOptions` | フレーム単位のエンコードオプション | `frame_type: u16` (デフォルト 0 = 自動。`frame_type` モジュール参照) |
-| `ReconfigureParams` | 動的プロパティ再設定パラメータ | `framerate_num`, `framerate_den`, `target_kbps`, `max_kbps`, `qpi`, `qpp`, `qpb`, `gop_pic_size` (全て `Option`、`None` の項目は変更しない。コーデック別設定の `qp_range` 系は変更できない) |
+| `ReconfigureParams` | 動的プロパティ再設定パラメータ | `framerate_num`, `framerate_den`, `target_kbps`, `max_kbps`, `qpi`, `qpp`, `qpb`, `gop_pic_size` (全て `Option`、`None` の項目は変更しない) |
 | `EncodedFrame<T>` | エンコード済みフレーム | `buffer() -> &Buffer`, `picture_type() -> PictureType`, `user_data() -> &T`, `into_parts() -> (Buffer, T)` |
 | `PictureType` | エンコード済みフレームのピクチャタイプ | `Idr`, `I`, `P`, `B`, `Unknown` |
 
@@ -246,10 +246,10 @@ let context = AmfLibrary::instance().create_context()?;
 let mut config = EncoderConfig::new(
     CodecConfig::H264(H264EncoderConfig {
         profile: Some(H264Profile::High),
-        qp_range: Some(QpRange {
+        qp_range: QpRange {
             min: Some(18),
             max: Some(38),
-        }),
+        },
     }),
     1920, // width
     1080, // height

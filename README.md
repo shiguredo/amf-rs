@@ -88,7 +88,7 @@ use std::sync::mpsc;
 
 use shiguredo_amf::{
     AmfLibrary, CodecConfig, EncodeOptions, EncodedFrame, Encoder, EncoderConfig, FnEncodeHandler,
-    FrameFormat, H264EncoderConfig, H264Profile, QpRange, RateControlMode, ReconfigureParams,
+    FrameFormat, H264EncoderConfig, H264Profile, RateControlMode, ReconfigureParams,
     frame_type,
 };
 
@@ -97,6 +97,7 @@ let context = AmfLibrary::instance().create_context()?;
 let mut config = EncoderConfig::new(
     CodecConfig::H264(H264EncoderConfig {
         profile: Some(H264Profile::High),
+        ..Default::default()
     }),
     1920, // width
     1080, // height
