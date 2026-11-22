@@ -40,7 +40,7 @@
 - [CHANGE] 最小サポート Rust バージョン (MSRV) を 1.88 から 1.95 に上げる
   - @voluntas
 - [CHANGE] `amf::Context` 周りの整理
-  - `init_vulkan` を非公開にし、`AmfLibrary::create_context` で Vulkan デバイスを初期化した `amf::Context` を作成できるようにする
+  - `Context::init_vulkan` を削除し、`AmfLibrary::create_context` で既定の Vulkan デバイスで初期化した `amf::Context` を作成できるようにする
   - `from_raw` / `from_raw_acquired` を非公開にする
   - `terminate` / `into_raw` を削除する
   - `PartialEq` / `Eq` を実装する
@@ -95,6 +95,14 @@
   - `H264EncoderConfig` / `HevcEncoderConfig` / `Av1EncoderConfig` に `Default` を実装する
   - 公開フィールドを追加するため、構造体リテラルでの構築はコンパイルエラーになる
   - AMF の仕様上の値域は、H.264 と HEVC が QP の 0-51、AV1 が Q インデックスの 1-255
+  - @melpon
+- [ADD] GPU デバイスを選択できるようにする
+  - `amf::VulkanDevice` を追加する
+  - `amf::UninitializedContext` を追加する
+  - `AmfLibrary::create_uninitialized_context` を追加する
+  - `amf::UninitializedContext::vulkan_device_extensions` を追加する
+  - `amf::UninitializedContext::init_vulkan` / `init_vulkan_with_device` を追加する
+  - `amf::Context::vulkan_device` を追加する
   - @melpon
 - [ADD] `EncoderConfig` に `usage` と `quality_preset` を追加し、エンコーダーの用途と品質プリセットを設定できるようにする
   - `EncoderUsage` は `Transcoding` / `UltraLowLatency` / `LowLatency` / `Webcam` / `HighQuality` / `LowLatencyHighQuality`

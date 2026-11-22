@@ -2,14 +2,16 @@
 //!
 //! このファイルのテストは実 GPU と AMF ランタイムを必要とする。
 
-use std::sync::{Arc, Barrier, Mutex};
+use std::sync::{Arc, Barrier, Mutex, mpsc};
 
-use shiguredo_amf::amf::{Buffer, Component, Context, Data, Plane, PropertyStorage, Surface};
+use shiguredo_amf::amf::{
+    Buffer, Component, Context, Data, Plane, PropertyStorage, Surface, VulkanDevice,
+};
 use shiguredo_amf::ffi::amf_long;
 use shiguredo_amf::{
-    CodecConfig, Decoder, DecoderCodec, DecoderConfig, EncodeOptions, Encoder, EncoderConfig,
-    Error, FnDecodeHandler, FnEncodeHandler, FrameFormat, H264EncoderConfig, H264Profile,
-    MemoryType, PlaneType, RateControlMode, SurfaceFormat, frame_type,
+    AmfLibrary, CodecConfig, Decoder, DecoderCodec, DecoderConfig, EncodeOptions, Encoder,
+    EncoderConfig, Error, FnDecodeHandler, FnEncodeHandler, FrameFormat, H264EncoderConfig,
+    H264Profile, MemoryType, PlaneType, RateControlMode, SurfaceFormat, frame_type,
 };
 
 pub mod helpers;
@@ -913,6 +915,192 @@ fn test_multiple_contexts_can_be_created() {
         context_b,
         "Surface B の Context が確保元と一致しない"
     );
+}
+
+/// 既定の Context から使用中の Vulkan デバイスを取得できることを確認する
+#[test]
+fn test_context_vulkan_device() {
+    let context = helpers::create_context();
+    let device = context
+        .vulkan_device()
+        .expect("Context から Vulkan デバイスの取得に失敗");
+
+    assert!(!device.instance().is_null(), "VkInstance が null である");
+    assert!(
+        !device.physical_device().is_null(),
+        "VkPhysicalDevice が null である"
+    );
+    assert!(!device.device().is_null(), "VkDevice が null である");
+}
+
+/// 既定の Context から取得した Vulkan デバイスで UninitializedContext を初期化し、Context を作成してエンコードできることを確認する
+#[test]
+fn test_init_vulkan_with_device_encodes() {
+    // 既定の Vulkan デバイスで初期化した Context を取得元にする
+    let source_context = helpers::create_context();
+    let device = source_context
+        .vulkan_device()
+        .expect("既定の Context から Vulkan デバイスの取得に失敗");
+
+    // 取得した Vulkan デバイスを指定する前に、UninitializedContext で拡張を取得する
+    let uninitialized_context = AmfLibrary::instance()
+        .create_uninitialized_context()
+        .expect("Context の作成に失敗");
+    let extensions = uninitialized_context
+        .vulkan_device_extensions()
+        .expect("Vulkan デバイス拡張の取得に失敗");
+    assert!(
+        !extensions.is_empty(),
+        "取得した Vulkan デバイス拡張が空である"
+    );
+
+    let context = unsafe { uninitialized_context.init_vulkan_with_device(device) }
+        .expect("Vulkan デバイスを指定した Context の初期化に失敗");
+
+    // 作成した Context が指定したハンドルを保持していることを確認する
+    let created_device = context
+        .vulkan_device()
+        .expect("作成した Context から Vulkan デバイスの取得に失敗");
+    assert_eq!(
+        created_device.instance(),
+        device.instance(),
+        "VkInstance が指定した値と一致しない"
+    );
+    assert_eq!(
+        created_device.physical_device(),
+        device.physical_device(),
+        "VkPhysicalDevice が指定した値と一致しない"
+    );
+    assert_eq!(
+        created_device.device(),
+        device.device(),
+        "VkDevice が指定した値と一致しない"
+    );
+
+    // 作成した Context で実際にエンコードできることを確認する
+    let (tx, rx) = mpsc::channel();
+    let mut encoder = Encoder::new(
+        context.clone(),
+        h264_cqp_test_encoder_config(),
+        FnEncodeHandler::<()>::new(move |result| {
+            tx.send(result).expect("エンコード結果の送信に失敗");
+        }),
+    )
+    .expect("エンコーダーの作成に失敗");
+    let surface = encoder.alloc_surface().expect("Surface の確保に失敗");
+    fill_nv12_surface(&surface, 320, 240);
+    encoder
+        .encode(surface, EncodeOptions::default(), ())
+        .expect("エンコードに失敗");
+    encoder.finish().expect("finish に失敗");
+
+    let frame = rx
+        .try_iter()
+        .next()
+        .expect("エンコード結果が通知されなかった")
+        .expect("エンコード結果がエラーになった");
+    assert!(
+        frame.buffer().get_size() > 0,
+        "エンコード結果のサイズが 0 である"
+    );
+
+    // エンコード結果が保持する Context を先に破棄してから、Context を破棄する
+    drop(frame);
+
+    // 取得元の Context を、作成した Context より後に破棄する
+    drop(encoder);
+    drop(context);
+
+    // AMF が取得元の Vulkan デバイスを破棄していないことを、取得元の Context で
+    // エンコードして確認する
+    let mut source_encoder = Encoder::new(
+        source_context.clone(),
+        h264_cqp_test_encoder_config(),
+        FnEncodeHandler::<()>::new(|_| {}),
+    )
+    .expect("取得元の Context のエンコーダーの作成に失敗");
+    let surface = source_encoder
+        .alloc_surface()
+        .expect("取得元の Context の Surface の確保に失敗");
+    fill_nv12_surface(&surface, 320, 240);
+    source_encoder
+        .encode(surface, EncodeOptions::default(), ())
+        .expect("取得元の Context のエンコードに失敗");
+    source_encoder
+        .finish()
+        .expect("取得元の Context の finish に失敗");
+    drop(source_encoder);
+    drop(source_context);
+}
+
+/// null の Vulkan ハンドルを指定した UninitializedContext の初期化が拒否されることを確認する
+#[test]
+fn test_init_vulkan_with_null_device_is_rejected() {
+    let source_context = helpers::create_context();
+    let device = source_context
+        .vulkan_device()
+        .expect("Context から Vulkan デバイスの取得に失敗");
+    let null = std::ptr::null_mut();
+
+    // 3 つのハンドルのいずれかが null である場合と、すべて null である場合を確認する
+    let cases = [
+        unsafe { VulkanDevice::from_raw(null, device.physical_device(), device.device()) },
+        unsafe { VulkanDevice::from_raw(device.instance(), null, device.device()) },
+        unsafe { VulkanDevice::from_raw(device.instance(), device.physical_device(), null) },
+        unsafe { VulkanDevice::from_raw(null, null, null) },
+    ];
+    for (index, case) in cases.into_iter().enumerate() {
+        let context = AmfLibrary::instance()
+            .create_uninitialized_context()
+            .expect("Context の作成に失敗");
+        let error = unsafe { context.init_vulkan_with_device(case) }
+            .expect_err("null の Vulkan ハンドルが受理された");
+        assert!(
+            matches!(&error, Error::InvalidArgument(_)),
+            "null の Vulkan ハンドル {index} のエラーが InvalidArgument でない: {error}"
+        );
+    }
+}
+
+/// UninitializedContext を既定の Vulkan デバイスで初期化できることを確認する
+#[test]
+fn test_uninitialized_context_init_vulkan() {
+    let context = AmfLibrary::instance()
+        .create_uninitialized_context()
+        .expect("Context の作成に失敗")
+        .init_vulkan()
+        .expect("Vulkan の初期化に失敗");
+    let device = context
+        .vulkan_device()
+        .expect("Context から Vulkan デバイスの取得に失敗");
+    assert!(!device.instance().is_null(), "VkInstance が null である");
+    assert!(
+        !device.physical_device().is_null(),
+        "VkPhysicalDevice が null である"
+    );
+    assert!(!device.device().is_null(), "VkDevice が null である");
+}
+
+/// AMF が要求する Vulkan デバイス拡張の一覧を取得できることを確認する
+#[test]
+fn test_vulkan_device_extensions() {
+    let context = AmfLibrary::instance()
+        .create_uninitialized_context()
+        .expect("Context の作成に失敗");
+    let extensions = context
+        .vulkan_device_extensions()
+        .expect("Vulkan デバイス拡張の取得に失敗");
+
+    assert!(
+        !extensions.is_empty(),
+        "取得した Vulkan デバイス拡張が空である"
+    );
+    for extension in &extensions {
+        assert!(
+            extension.starts_with("VK_"),
+            "Vulkan の拡張名ではない文字列が含まれる: {extension}"
+        );
+    }
 }
 
 /// 各ハンドルが保持する Context を公開 API から取得できることを確認する

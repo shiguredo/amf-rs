@@ -258,6 +258,57 @@ unsafe な `Buffer::as_slice` / `Buffer::as_mut_slice` で読み書きします�
 確保済みサイズ以下の範囲でサイズを変更でき、確保済みサイズを超える値はエラーに
 なります。PTS と Duration の単位は 100 ナノ秒です。
 
+### GPU デバイスの選択
+
+`AmfLibrary::create_context()` は既定の Vulkan デバイスで初期化した `Context` を
+返します。複数 GPU を搭載した環境で使用する GPU を選ぶ場合は、
+`AmfLibrary::create_uninitialized_context()` で Vulkan 未初期化の
+`UninitializedContext` を作成し、利用者が Vulkan デバイスを作成してから
+`UninitializedContext::init_vulkan_with_device()` で初期化します。
+
+```rust
+use shiguredo_amf::AmfLibrary;
+use shiguredo_amf::amf::VulkanDevice;
+
+let context = AmfLibrary::instance().create_uninitialized_context()?;
+
+// AMF が要求する Vulkan デバイス拡張を取得する
+let extensions = context.vulkan_device_extensions()?;
+
+// 利用者が Vulkan インスタンスと物理デバイスを選択し、extensions を有効にした
+// VkDevice を作成する (Vulkan の呼び出しは利用者が行う)
+let device = unsafe {
+    VulkanDevice::from_raw(instance, physical_device, vk_device)
+};
+let context = unsafe {
+    context.init_vulkan_with_device(device)?
+};
+```
+
+`vulkan_device_extensions()` は Vulkan デバイスを作成する前に呼び出せます。
+返った拡張名を `VkDeviceCreateInfo::ppEnabledExtensionNames` に指定してください。
+AMF はコンピュート対応のキューファミリのインデックス 0 のキューを使うため、
+そのキューを作成した `VkDevice` を渡してください。インスタンス作成、物理デバイス
+選択、拡張と feature の有効化の手順は
+[AMF SDK の `DeviceVulkan.cpp`](https://github.com/GPUOpen-LibrariesAndSDKs/AMF/blob/v1.5.2/amf/public/samples/CPPSamples/common/DeviceVulkan.cpp)
+を参照してください。
+
+`Context::vulkan_device()` を使うと、初期化した `Context` が使用している Vulkan
+デバイスのハンドルを取得できます。`Context` から取得したハンドルを別の
+`Context` の初期化に渡す場合、取得元の `Context` を新しい `Context` より後に
+破棄してください。ハンドルは取得元の `Context` が生きている間だけ有効です。
+
+AMF は利用者が渡した Vulkan デバイスを破棄しません。`Context` を破棄した後に、
+利用者が Vulkan のハンドルを破棄してください。既定の Vulkan デバイスは
+`Context` の破棄に伴って AMF が破棄します。
+
+複数 GPU を使う場合は GPU ごとに `Context` を作成します。`Surface` / `Buffer` は
+同じ `Context` のコンポーネントにしか投入できないため、`Context` をまたいだ
+受け渡しはできません。
+
+`UninitializedContext::init_vulkan()` を使うと、既定の Vulkan デバイスで
+初期化した `Context` を取得できます。拡張一覧を先に取得したい場合に使います。
+
 ### コーデック対応状況の確認
 
 ```rust
@@ -283,7 +334,7 @@ for info in &codecs {
 }
 ```
 
-`supported_codecs()` は AMF ランタイムを初期化できない場合に `Err` を返します。
+`supported_codecs()` は AMF ランタイムまたは Vulkan デバイスを初期化できない場合に `Err` を返します。
 個々のコーデックの非対応は `decoding` / `encoding` の `None` で表されます。
 
 CLI で確認する場合は [amf-check](#amf-check) を利用してください。

@@ -9,6 +9,30 @@ use std::{
 // 依存ライブラリの名前
 const LIB_NAME: &str = "AMF";
 
+// AMF の VulkanAMF.h が参照する Vulkan の型宣言だけを持つスタブヘッダー
+const VULKAN_STUB_HEADER: &str = r#"#ifndef AMF_RS_VULKAN_STUB_H
+#define AMF_RS_VULKAN_STUB_H
+
+#include <stdint.h>
+
+typedef void *VkInstance;
+typedef void *VkPhysicalDevice;
+typedef void *VkDevice;
+
+typedef uint64_t VkSemaphore;
+typedef uint64_t VkFence;
+typedef uint64_t VkBuffer;
+typedef uint64_t VkDeviceMemory;
+typedef uint64_t VkImage;
+typedef uint64_t VkImageView;
+typedef uint32_t VkFormat;
+typedef uint32_t VkImageTiling;
+typedef uint32_t VkImageLayout;
+typedef uint32_t VkAccessFlagBits;
+
+#endif
+"#;
+
 fn main() {
     // Cargo.toml か build.rs が更新されたら、依存ライブラリを再ビルドする
     println!("cargo::rerun-if-changed=Cargo.toml");
@@ -60,6 +84,17 @@ fn main() {
     // 依存ライブラリのリポジトリを取得する
     git_clone_external_lib(&out_build_dir, &git_url, &version);
 
+    // VulkanAMF.h が vulkan/vulkan.h をインクルードするため、スタブヘッダーを
+    // 生成してインクルードパスに追加する。
+    let vulkan_stub_dir = out_dir.join("vulkan-stub");
+    std::fs::create_dir_all(vulkan_stub_dir.join("vulkan"))
+        .expect("failed to create vulkan stub directory");
+    std::fs::write(
+        vulkan_stub_dir.join("vulkan").join("vulkan.h"),
+        VULKAN_STUB_HEADER,
+    )
+    .expect("failed to write vulkan stub header");
+
     // ラッパーヘッダーを生成する
     let wrapper_path = out_dir.join("wrapper.h");
     std::fs::write(
@@ -76,6 +111,7 @@ fn main() {
             "#include <core/Surface.h>",
             "#include <core/Buffer.h>",
             "#include <core/Context.h>",
+            "#include <core/VulkanAMF.h>",
             "#include <core/Factory.h>",
             "#include <components/Component.h>",
             "#include <components/VideoEncoderVCE.h>",
@@ -90,6 +126,10 @@ fn main() {
     // バインディングを生成する
     bindgen::Builder::default()
         .header(wrapper_path.to_str().expect("invalid wrapper path"))
+        .clang_arg(format!(
+            "-I{}",
+            vulkan_stub_dir.to_str().expect("invalid vulkan stub path")
+        ))
         .clang_arg(format!(
             "-I{}",
             include_dir.to_str().expect("invalid include path")
@@ -359,6 +399,18 @@ pub struct AMFFactory { pub pVtbl: *const std::ffi::c_void }
 pub struct AMFContext { pub pVtbl: *const std::ffi::c_void }
 #[repr(C)]
 pub struct AMFContext1 { pub pVtbl: *const std::ffi::c_void }
+pub type VkInstance = *mut std::ffi::c_void;
+pub type VkPhysicalDevice = *mut std::ffi::c_void;
+pub type VkDevice = *mut std::ffi::c_void;
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default)]
+pub struct AMFVulkanDevice {
+    pub cbSizeof: amf_size,
+    pub pNext: *mut std::ffi::c_void,
+    pub hInstance: VkInstance,
+    pub hPhysicalDevice: VkPhysicalDevice,
+    pub hDevice: VkDevice,
+}
 #[repr(C)]
 pub struct AMFPropertyStorage { pub pVtbl: *const std::ffi::c_void }
 #[repr(C)]
