@@ -93,7 +93,8 @@ pub use codec_info::{
     Property, SurfaceFormatCapability, Value, VideoCodecType, VideoProfile, supported_codecs,
 };
 pub use decode::{
-    DecodeHandler, DecodedFrame, Decoder, DecoderCodec, DecoderConfig, FnDecodeHandler,
+    DecodeHandler, DecodedFrame, Decoder, DecoderCodec, DecoderConfig, DecoderReorderMode,
+    FnDecodeHandler,
 };
 pub use encode::{
     Av1EncoderConfig, CodecConfig, EncodeHandler, EncodeOptions, EncodedFrame, Encoder,

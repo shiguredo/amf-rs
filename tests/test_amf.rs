@@ -58,9 +58,7 @@ fn h264_cqp_test_encoder_config() -> EncoderConfig {
 
 /// テスト用の H.264 デコーダー設定を返す
 fn h264_test_decoder_config() -> DecoderConfig {
-    DecoderConfig {
-        codec: DecoderCodec::H264,
-    }
+    DecoderConfig::new(DecoderCodec::H264)
 }
 
 /// テスト用の HOST NV12 Surface を確保する
@@ -182,9 +180,7 @@ fn test_decoder_rejects_buffer_shared_with_data() {
     let context = helpers::create_context();
     let mut decoder = Decoder::new(
         context,
-        DecoderConfig {
-            codec: DecoderCodec::H264,
-        },
+        DecoderConfig::new(DecoderCodec::H264),
         FnDecodeHandler::<()>::new(|_| {}),
     )
     .expect("デコーダーの作成に失敗");

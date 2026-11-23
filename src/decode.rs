@@ -6,9 +6,9 @@
 use std::sync::Arc;
 
 use crate::AmfLibrary;
-use crate::amf::{Buffer, Component, Context, Data, Surface};
+use crate::amf::{Buffer, Component, Context, Data, PropertyStorage, Surface};
 use crate::error::{AmfError, Error, InvalidArgumentError, InvalidStateError};
-use crate::sys::{self, AMF_RESULT};
+use crate::sys::{self, AMF_RESULT, amf_int64};
 use crate::types::{FrameFormat, MemoryType, SurfaceFormat};
 use crate::worker::{DecoderStats, Worker, WorkerConfig, WorkerStats};
 
@@ -36,13 +36,87 @@ pub enum DecoderCodec {
     Vp9,
 }
 
+/// コーデックに対応する AMF デコーダーコンポーネント ID を返す
+fn decoder_component_id(codec: DecoderCodec) -> &'static str {
+    match codec {
+        DecoderCodec::H264 => sys::str::AMFVideoDecoderUVD_H264_AVC,
+        DecoderCodec::Hevc => sys::str::AMFVideoDecoderHW_H265_HEVC,
+        DecoderCodec::Av1 => sys::str::AMFVideoDecoderHW_AV1,
+        DecoderCodec::Vp9 => sys::str::AMFVideoDecoderHW_VP9,
+    }
+}
+
+/// デコーダーのリオーダーモード
+///
+/// デコーダーが出力フレームの提示順を待ち合わせるために保持する DPB の遅延を
+/// 指定する。AMF の `AMF_VIDEO_DECODER_MODE_ENUM` に対応する
+/// (AMF SDK v1.5.2 の `components/VideoDecoderUVD.h`)。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DecoderReorderMode {
+    /// ストリームの SPS が示す参照フレーム数 + 1 を DPB の遅延にする
+    Regular,
+    /// プロファイルに基づき最大 16 フレームを DPB の遅延にする
+    Compliant,
+    /// DPB の遅延を 0 にする
+    ///
+    /// フレームの並べ替えを伴わないストリームを前提とする。B フレームと P フレームは、
+    /// 並べ替えを伴わない場合に限り含められる。並べ替えを伴うストリームを投入した
+    /// 場合の出力順は保証しない。このモードでは提示順の復元を行わない。
+    LowLatency,
+}
+
+impl DecoderReorderMode {
+    /// AMF の `AMF_VIDEO_DECODER_MODE_ENUM` の値を返す
+    fn to_amf(self) -> sys::AMF_VIDEO_DECODER_MODE_ENUM {
+        match self {
+            Self::Regular => sys::AMF_VIDEO_DECODER_MODE_ENUM_AMF_VIDEO_DECODER_MODE_REGULAR,
+            Self::Compliant => sys::AMF_VIDEO_DECODER_MODE_ENUM_AMF_VIDEO_DECODER_MODE_COMPLIANT,
+            Self::LowLatency => sys::AMF_VIDEO_DECODER_MODE_ENUM_AMF_VIDEO_DECODER_MODE_LOW_LATENCY,
+        }
+    }
+}
+
 /// デコーダー設定
+///
+/// `Option` のフィールドは `None` のとき AMF の既定値を使う。
 #[derive(Debug, Clone)]
 pub struct DecoderConfig {
     /// デコードするコーデック
     ///
     /// 出力フォーマットは NV12 に固定される。
     pub codec: DecoderCodec,
+    /// 低遅延デコードを有効にする
+    ///
+    /// `Some(false)` は通常のデコードを明示する。出力フレームの順序は
+    /// [`DecoderConfig::reorder_mode`] で決まる。
+    ///
+    /// AMF の `AMF_VIDEO_DECODER_LOW_LATENCY` に対応する。
+    pub low_latency: Option<bool>,
+    /// DPB のリオーダーモード
+    ///
+    /// デコーダーが出力フレームの提示順を待ち合わせるために保持するフレーム数を
+    /// 決める。AMF の `AMF_VIDEO_DECODER_REORDER_MODE` に対応する。
+    pub reorder_mode: Option<DecoderReorderMode>,
+    /// デコード用サーフェスプールのサイズ
+    ///
+    /// DPB が保持するサーフェス数と、提示用に保持するサーフェス数の合計を
+    /// 指定する。`Some(0)` は AMF に DPB サイズ + 5 を計算させる。
+    /// AMF の `AMF_VIDEO_DECODER_SURFACE_POOL_SIZE` に対応する。
+    pub surface_pool_size: Option<u32>,
+}
+
+impl DecoderConfig {
+    /// コーデックだけを指定してデコーダー設定を作成する
+    ///
+    /// 遅延とサーフェスプールの各項目は `None` に設定する。
+    pub fn new(codec: DecoderCodec) -> Self {
+        Self {
+            codec,
+            low_latency: None,
+            reorder_mode: None,
+            surface_pool_size: None,
+        }
+    }
 }
 
 /// デコード済みフレーム
@@ -53,7 +127,7 @@ pub struct DecodedFrame<T> {
 }
 
 impl<T> DecodedFrame<T> {
-    /// デコード後の Surface (convert 済み)
+    /// デコード後の Surface
     pub fn surface(&self) -> &Surface {
         &self.surface
     }
@@ -131,6 +205,11 @@ where
 pub struct Decoder<H: DecodeHandler> {
     component: Component,
     context: Context,
+    /// 初期化時に適用した設定
+    ///
+    /// 解像度変化で AMF コンポーネントを作り直すときに、同じ設定を再適用するために
+    /// 保持する。
+    config: DecoderConfig,
     /// ワーカースレッドの制御
     worker: Worker<H::UserData>,
     /// 統計値
@@ -157,22 +236,16 @@ impl<H: DecodeHandler> Decoder<H> {
     /// # Errors
     ///
     /// AMF のデコーダーを初期化できない場合にエラーを返す。GPU と AMF の実装が
-    /// 指定したコーデックに対応していない場合も含む。
+    /// 指定したコーデックや設定に対応していない場合も含む。
     pub fn new(context: Context, config: DecoderConfig, mut handler: H) -> Result<Self, Error> {
         let lib = AmfLibrary::instance();
 
-        let component_id = match config.codec {
-            DecoderCodec::H264 => sys::str::AMFVideoDecoderUVD_H264_AVC,
-            DecoderCodec::Hevc => sys::str::AMFVideoDecoderHW_H265_HEVC,
-            DecoderCodec::Av1 => sys::str::AMFVideoDecoderHW_AV1,
-            DecoderCodec::Vp9 => sys::str::AMFVideoDecoderHW_VP9,
-        };
+        let component = lib.create_component(&context, decoder_component_id(config.codec))?;
 
-        let component = lib.create_component(&context, component_id)?;
-
-        // デコーダーを初期化する (解像度は 0,0 でストリームから自動検出)
-        let result = component.init(SurfaceFormat::from(FrameFormat::Nv12), 0, 0);
-        AmfError::check(result, "AMFComponent::Init")?;
+        // 解像度は 0,0 でストリームから自動検出させる。デコーダー固有の設定は
+        // Init より前に設定する必要がある。
+        let prop = component.property_storage()?;
+        Self::initialize_component(&component, &prop, &config, 0, 0)?;
 
         let stats = Arc::new(DecoderStats::default());
 
@@ -186,7 +259,6 @@ impl<H: DecodeHandler> Decoder<H> {
                     let result: Result<DecodedFrame<H::UserData>, H::Error> = result
                         .and_then(|(data, user_data)| {
                             let surface = data.to_surface()?;
-                            surface.convert(MemoryType::Host)?;
                             Ok(DecodedFrame { surface, user_data })
                         })
                         .map_err(Into::into);
@@ -203,11 +275,57 @@ impl<H: DecodeHandler> Decoder<H> {
         Ok(Self {
             component,
             context,
+            config,
             worker,
             stats,
             drain_required: false,
             initialized: true,
         })
+    }
+
+    /// デコーダー固有のプロパティを設定する
+    ///
+    /// `Some` の項目だけを設定し、`None` の項目のプロパティは変更しない。
+    ///
+    /// # Errors
+    ///
+    /// AMF が指定した値を受け付けない場合にエラーを返す。
+    fn set_properties(prop: &PropertyStorage, config: &DecoderConfig) -> Result<(), Error> {
+        if let Some(low_latency) = config.low_latency {
+            prop.set_property_bool(sys::str::AMF_VIDEO_DECODER_LOW_LATENCY, low_latency)?;
+        }
+        if let Some(reorder_mode) = config.reorder_mode {
+            prop.set_property_int64(
+                sys::str::AMF_VIDEO_DECODER_REORDER_MODE,
+                reorder_mode.to_amf() as amf_int64,
+            )?;
+        }
+        if let Some(surface_pool_size) = config.surface_pool_size {
+            prop.set_property_int64(
+                sys::str::AMF_VIDEO_DECODER_SURFACE_POOL_SIZE,
+                surface_pool_size as amf_int64,
+            )?;
+        }
+        Ok(())
+    }
+
+    /// デコーダー設定をプロパティストレージに適用し、コンポーネントを初期化する
+    ///
+    /// # Errors
+    ///
+    /// AMF が設定値を受け付けない場合、またはコンポーネントを初期化できない
+    /// 場合にエラーを返す。
+    fn initialize_component(
+        component: &Component,
+        prop: &PropertyStorage,
+        config: &DecoderConfig,
+        width: i32,
+        height: i32,
+    ) -> Result<(), Error> {
+        Self::set_properties(prop, config)?;
+        let result = component.init(SurfaceFormat::from(FrameFormat::Nv12), width, height);
+        AmfError::check(result, "AMFComponent::Init")?;
+        Ok(())
     }
 
     /// このデコーダーが使用する `Context` を返す
@@ -241,6 +359,9 @@ impl<H: DecodeHandler> Decoder<H> {
     /// `buffer` はこのデコーダーと同じ `Context` から確保したものでなければならない。
     /// 別の Context から確保した Buffer を渡した場合はエラーを返す。`buffer` が他の
     /// ハンドルと共有されている場合もエラーを返す。
+    ///
+    /// `surface_pool_size` が小さすぎる場合、出力サーフェスが不足してエラーを
+    /// 返すことがある。
     ///
     /// 解像度が変化するストリームも扱える。解像度の変化を検出した場合も、
     /// 投入したフレームは新しい解像度でデコードされ、他のフレームと同様に
@@ -337,10 +458,15 @@ impl<H: DecodeHandler> Decoder<H> {
         AmfError::check(result, "AMFComponent::Terminate")?;
         self.initialized = false;
         self.drain_required = false;
-        let result = self
-            .component
-            .init(SurfaceFormat::from(FrameFormat::Nv12), width, height);
-        AmfError::check(result, "AMFComponent::Init")?;
+
+        // Init より前に、作成時と同じデコーダー固有の設定を再適用する。
+        Self::initialize_component(
+            &self.component,
+            &property_storage,
+            &self.config,
+            width,
+            height,
+        )?;
         self.initialized = true;
 
         // AMF に受理されなかったバッファを新しい解像度のデコーダーへ再投入する。
@@ -416,6 +542,63 @@ impl<H: DecodeHandler> Drop for Decoder<H> {
             if result != AMF_RESULT::AMF_OK {
                 tracing::error!("Decoder::drop: AMFComponent::Terminate failed: {result:?}");
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// テスト用の Context を作成する
+    fn create_context() -> Context {
+        AmfLibrary::instance()
+            .create_context()
+            .expect("Context の作成に失敗")
+    }
+
+    /// 指定したコーデックのコンポーネントを作成し、プロパティストレージを返す
+    ///
+    /// コンポーネントは初期化していない。Init 前のプロパティストレージでも
+    /// 設定と取得ができる。
+    fn decoder_property_storage(context: &Context, codec: DecoderCodec) -> PropertyStorage {
+        AmfLibrary::instance()
+            .create_component(context, decoder_component_id(codec))
+            .expect("デコーダーコンポーネントの作成に失敗")
+            .property_storage()
+            .expect("プロパティストレージの取得に失敗")
+    }
+
+    /// `DecoderReorderMode` が AMF の `AMF_VIDEO_DECODER_MODE_ENUM` の値に
+    /// 写像されることを確認する
+    #[test]
+    fn test_reorder_mode_properties() {
+        let context = create_context();
+        for (mode, expected) in [
+            (
+                DecoderReorderMode::Regular,
+                sys::AMF_VIDEO_DECODER_MODE_ENUM_AMF_VIDEO_DECODER_MODE_REGULAR,
+            ),
+            (
+                DecoderReorderMode::Compliant,
+                sys::AMF_VIDEO_DECODER_MODE_ENUM_AMF_VIDEO_DECODER_MODE_COMPLIANT,
+            ),
+            (
+                DecoderReorderMode::LowLatency,
+                sys::AMF_VIDEO_DECODER_MODE_ENUM_AMF_VIDEO_DECODER_MODE_LOW_LATENCY,
+            ),
+        ] {
+            let prop = decoder_property_storage(&context, DecoderCodec::H264);
+            let mut config = DecoderConfig::new(DecoderCodec::H264);
+            config.reorder_mode = Some(mode);
+            Decoder::<FnDecodeHandler<()>>::set_properties(&prop, &config)
+                .expect("デコーダーのプロパティ設定に失敗");
+            assert_eq!(
+                prop.get_property_int64(sys::str::AMF_VIDEO_DECODER_REORDER_MODE)
+                    .expect("ReorderMode の取得に失敗"),
+                expected as i64,
+                "{mode:?} の ReorderMode が想定と異なる"
+            );
         }
     }
 }

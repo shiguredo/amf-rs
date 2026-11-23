@@ -1,6 +1,6 @@
 ---
 name: shiguredo-amf
-description: 時雨堂の AMD AMF (Advanced Media Framework) Rust バインディング shiguredo_amf の機能・API リファレンス。H.264 / H.265 / AV1 のハードウェアエンコード、H.264 / H.265 / AV1 / VP9 のハードウェアデコード、AMF ランタイムの動的ロード、Surface / Buffer 管理、ハンドラーベースのコールバック設計、エンコード中の動的プロパティ再設定に関する質問時に使用。
+description: 時雨堂の AMD AMF (Advanced Media Framework) Rust バインディング shiguredo_amf の機能・API リファレンス。H.264 / H.265 / AV1 のハードウェアエンコード、H.264 / H.265 / AV1 / VP9 のハードウェアデコード、AMF ランタイムの動的ロード、Surface / Buffer 管理、ハンドラーベースのコールバック設計、エンコード中の動的プロパティ再設定、デコーダーの低遅延・リオーダー・サーフェスプール設定に関する質問時に使用。
 ---
 
 # shiguredo_amf
@@ -14,6 +14,7 @@ AMD GPU 向けハードウェアアクセラレーションによるビデオエ
 - **Vulkan バックエンド**で GPU 処理を実行 (Linux x86_64)
 - **エンコード入力フォーマット選択**: 8bit / 10bit (AMD Radeon 780M では NV12 / YV12 / I420 / BGRA / ARGB / RGBA / YUY2 / P010 を確認済み。P010 は HEVC と AV1 で利用できる)
 - **デコード出力**は NV12 フォーマット
+- **デコーダーの遅延とサーフェスプールの調整**: `DecoderConfig` の `low_latency` / `reorder_mode` / `surface_pool_size`
 - **フレーム単位のエンコードオプション** (IDR フレーム強制)
 - **エンコード中の動的プロパティ再設定** (`Encoder::reconfigure`)
 - **CQP / CBR / VBR / LCVBR / QVBR / HQVBR / HQCBR** レート制御モード
@@ -91,8 +92,9 @@ AMD GPU 向けハードウェアアクセラレーションによるビデオエ
 
 | 型 | 説明 | 主要メソッド |
 |----|------|-------------|
-| `DecoderConfig` | デコーダー設定 | `codec: DecoderCodec` |
+| `DecoderConfig` | デコーダー設定 | `new(DecoderCodec)`, フィールド: `codec`, `low_latency: Option<bool>`, `reorder_mode: Option<DecoderReorderMode>`, `surface_pool_size: Option<u32>` |
 | `DecoderCodec` | デコーダーのコーデック種別 | `H264`, `Hevc`, `Av1`, `Vp9` |
+| `DecoderReorderMode` | DPB のリオーダーモード | `Regular`, `Compliant`, `LowLatency` |
 | `DecodedFrame<T>` | デコード済みフレーム | `surface() -> &Surface`, `user_data() -> &T`, `into_parts() -> (Surface, T)` |
 
 ### コーデック情報 (`codec_info`)
@@ -154,7 +156,7 @@ AMD GPU 向けハードウェアアクセラレーションによるビデオエ
 | `Surface` | `AMFSurface` のラッパー | `context()`, `get_memory_type() -> MemoryType`, `set_pts(i64)`, `get_pts() -> i64`, `set_duration(i64)`, `get_plane(PlaneType) -> Result<Plane<'_>, Error>`, `get_plane_at(index) -> Result<Plane<'_>, Error>`, `convert(MemoryType) -> Result<(), Error>`, `data() -> Result<Data, Error>`, `into_data() -> Result<Data, Error>`, `property_storage()`, `as_ptr()`, `into_raw()` |
 | `Buffer` | `AMFBuffer` のラッパー | `context()`, `get_memory_type() -> MemoryType`, `get_native() -> *mut c_void`, `get_size() -> usize`, `set_size(usize) -> Result<(), Error>`, `unsafe as_slice() -> Result<&[u8], Error>`, `unsafe as_mut_slice() -> Result<&mut [u8], Error>`, `set_pts(i64)`, `get_pts() -> i64`, `get_duration() -> i64`, `data() -> Result<Data, Error>`, `into_data() -> Result<Data, Error>`, `property_storage() -> Result<PropertyStorage, Error>`, `as_ptr()`, `into_raw()` |
 | `Plane<'a>` | `AMFPlane` の RAII ラッパー。取得元の `Surface` を借用する | `context()`, `get_native() -> *mut c_void`, `get_hpitch() -> i32`, `get_vpitch() -> i32`, `get_width() -> i32`, `get_height() -> i32`, `is_tiled() -> bool`, `unsafe as_slice() -> Result<&[u8], Error>`, `unsafe as_mut_slice() -> Result<&mut [u8], Error>`, `as_ptr()`, `into_raw()` |
-| `PropertyStorage` | `AMFPropertyStorage` のラッパー | `context()`, `unsafe get_property(name_w, *mut AMFVariantStruct)`, `get_property_int64(name) -> Result<i64, Error>`, `get_property_size(name) -> Result<(i32, i32), Error>`, `set_property_int64(name, value)`, `set_property_size(name, width, height)`, `set_property_rate(name, num, den)`, `unsafe set_property(name_w, AMFVariantStruct)`, `as_ptr()`, `into_raw()` |
+| `PropertyStorage` | `AMFPropertyStorage` のラッパー | `context()`, `unsafe get_property(name_w, *mut AMFVariantStruct)`, `get_property_int64(name) -> Result<i64, Error>`, `get_property_size(name) -> Result<(i32, i32), Error>`, `set_property_int64(name, value)`, `set_property_bool(name, value)`, `set_property_size(name, width, height)`, `set_property_rate(name, num, den)`, `unsafe set_property(name_w, AMFVariantStruct)`, `as_ptr()`, `into_raw()` |
 | `Data` | `AMFData` の RAII ハンドル | `context()`, `get_data_type() -> DataType`, `property_storage() -> Result<PropertyStorage, Error>`, `to_buffer() -> Result<Buffer, Error>`, `to_surface() -> Result<Surface, Error>`, `as_ptr()`, `into_raw()`, `unsafe from_raw(*mut AMFData, Context)`, `unsafe from_raw_acquired(*mut AMFData, Context)` |
 | `DataType` | AMF のデータ種別 | `Buffer`, `Surface`, `AudioBuffer`, `User`, `Unknown(u32)` |
 
@@ -349,7 +351,7 @@ use shiguredo_amf::{
 
 let context = AmfLibrary::instance().create_context()?;
 
-let config = DecoderConfig { codec: DecoderCodec::H264 };
+let config = DecoderConfig::new(DecoderCodec::H264);
 
 // クロージャをハンドラーにラップする
 let (frame_tx, frame_rx) = mpsc::channel();
@@ -384,6 +386,24 @@ for frame in frame_rx.try_iter() {
 ```
 
 デコーダーは初期化時に解像度 `0x0` で AMF コンポーネントを Init するため、ビットストリームのシーケンスヘッダーから解像度が自動検出される。出力 `Surface` は内部で `convert(MemoryType::Host)` 済みのため、`get_plane()` 経由でホストメモリから直接読み出せる。
+
+`DecoderConfig` ではデコーダーの遅延とサーフェスプールを調整できる。
+`DecoderConfig::new(codec)` で必須項目だけを指定し、公開フィールドを書き換えて
+残りの項目を指定する。
+
+`low_latency` は AMF の `LowLatencyDecode` を設定するが、出力フレームの順序は
+`reorder_mode` で決まる。`reorder_mode` に `DecoderReorderMode::LowLatency` を
+指定すると、DPB の遅延が 0 になる。このモードはフレームの並べ替えを伴わない
+ストリームを前提とし、B フレームと P フレームは並べ替えを伴わない場合に限り
+含められる。並べ替えを伴うストリームを投入した場合の出力順は保証されず、提示順の
+復元も行われない。
+
+`surface_pool_size` はデコード用サーフェスプールのサイズで、`0` は AMF が
+DPB サイズ + 5 を計算する。値が小さすぎる場合、出力サーフェスが不足して
+`decode()` がエラーになる。
+
+AMF の DPB サイズは Linux の AMF ランタイム 1.5.3.0 で設定が許可されないため、
+`DecoderConfig` では指定できない。
 
 `decode()` には 1 フレーム分のビットストリームを格納した `Buffer` を渡す。複数フレームを含むバッファは未対応で、`AMF_REPEAT` が返された場合はエラーになる。B フレームを含むストリームでは出力順が入力順と異なるが、`decode()` に渡した `UserData` は対応する出力フレームに付く。`decode()` は入力 `Buffer` の PTS を変更せず、出力 `Surface` の PTS も設定しない。出力 `Surface` の PTS は AMF が付けた値になる。入出力の対応付けには `ShiguredoAmfFrameId` プロパティを使う。この名前はライブラリの予約名であり、利用者は入力 `Buffer` に設定しないこと。
 

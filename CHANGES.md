@@ -96,6 +96,16 @@
   - 公開フィールドを追加するため、構造体リテラルでの構築はコンパイルエラーになる
   - AMF の仕様上の値域は、H.264 と HEVC が QP の 0-51、AV1 が Q インデックスの 1-255
   - @melpon
+- [CHANGE] `DecoderConfig` にデコーダーの遅延とサーフェスプールの設定を追加する
+  - `DecoderConfig` に `low_latency` / `reorder_mode` / `surface_pool_size` を追加する
+  - `DecoderReorderMode` を追加し、`Regular` / `Compliant` / `LowLatency` を指定できるようにする
+  - `DecoderConfig::new` を追加し、構造体リテラルでの構築から移行する
+  - 公開フィールドを追加するため、構造体リテラルでの構築はコンパイルエラーになる
+  - `low_latency` は AMF の `LowLatencyDecode` を設定する
+  - `surface_pool_size` はデコード用サーフェスプールのサイズを設定し、`0` は AMF が DPB サイズ + 5 を計算する
+  - `reorder_mode` に `DecoderReorderMode::LowLatency` を指定すると、並べ替えを伴わないストリームを前提に出力の遅延を 0 にする。並べ替えを伴うストリームを投入した場合の出力順は保証しない
+  - AMF の DPB サイズは Linux の AMF ランタイム 1.5.3.0 で設定が許可されないため、公開 API に含めない
+  - @melpon
 - [ADD] GPU デバイスを選択できるようにする
   - `amf::VulkanDevice` を追加する
   - `amf::UninitializedContext` を追加する
@@ -103,6 +113,8 @@
   - `amf::UninitializedContext::vulkan_device_extensions` を追加する
   - `amf::UninitializedContext::init_vulkan` / `init_vulkan_with_device` を追加する
   - `amf::Context::vulkan_device` を追加する
+  - @melpon
+- [ADD] `amf::PropertyStorage::set_property_bool` を追加する
   - @melpon
 - [ADD] `EncoderConfig` に `usage` と `quality_preset` を追加し、エンコーダーの用途と品質プリセットを設定できるようにする
   - `EncoderUsage` は `Transcoding` / `UltraLowLatency` / `LowLatency` / `Webcam` / `HighQuality` / `LowLatencyHighQuality`
@@ -188,6 +200,10 @@
   - @melpon
 - [FIX] 解像度が変化するストリームでもデコードを継続できるようにする
   - 解像度の変化を検出したら、保留中の出力を通知したあと新しい解像度でデコーダーを作り直し、変化を検出したフレームを再投入する
+  - @melpon
+- [FIX] デコーダーが出力 GPU サーフェスを Host メモリへ変換せずに保持し、出力サーフェスの枯渇でデコードが停止する問題を修正する
+  - 出力を取得した直後に Host メモリへ変換し、GPU サーフェスをデコーダーの出力プールへ返す
+  - エンコーダーの出力の扱いは変えない
   - @melpon
 
 ### misc
