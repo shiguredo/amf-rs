@@ -22,6 +22,7 @@ AMD GPU 向けハードウェアアクセラレーションによるビデオエ
 - **エンコーダーの用途** (`EncoderUsage`) と**品質プリセット** (`QualityPreset`) の指定
 - **ハンドラーベースのコールバック**設計: エンコード/デコード結果はワーカースレッドから `EncodeHandler` / `DecodeHandler` に通知される
 - **AMFContext の明示的な管理**: 利用者が任意の個数の Context を作成し、`Context` を Clone して Encoder / Decoder に渡す。同じ Context ならデコード結果の Surface をそのままエンコードできる
+- **Vulkan デバイスの選択**: Vulkan デバイスを `UninitializedContext::init_vulkan_with_device` に渡すことで、複数 GPU 環境で使用する GPU を選べる
 - ビルド時に GitHub から AMF ヘッダーを自動取得 (`bindgen` 経由)
 
 ## バージョン情報
@@ -47,16 +48,20 @@ AMD GPU 向けハードウェアアクセラレーションによるビデオエ
 
 | 型/関数 | 説明 | 主要 API |
 |--------|------|---------|
-| `AmfLibrary` | AMF ランタイムライブラリのプロセスシングルトン | `instance()`, `query_version() -> Result<AmfVersion, Error>`, `create_context() -> Result<Context, Error>` |
+| `AmfLibrary` | AMF ランタイムライブラリのプロセスシングルトン | `instance()`, `query_version() -> Result<AmfVersion, Error>`, `create_context() -> Result<Context, Error>`, `create_uninitialized_context() -> Result<UninitializedContext, Error>` |
 | `Encoder<H: EncodeHandler>` | AMF ハードウェアエンコーダー | `new(Context, EncoderConfig, H)`, `context()`, `alloc_surface()`, `encode(Surface, EncodeOptions, H::UserData)`, `reconfigure(ReconfigureParams)`, `finish()` |
 | `Decoder<H: DecodeHandler>` | AMF ハードウェアデコーダー | `new(Context, DecoderConfig, H)`, `context()`, `alloc_buffer(size)`, `decode(Buffer, H::UserData)`, `finish()` |
-| `supported_codecs() -> Result<Vec<CodecInfo>, Error>` | このバックエンドで利用可能なコーデック情報の一覧を返す (AMF ランタイムを初期化できない場合はエラー) | - |
+| `supported_codecs() -> Result<Vec<CodecInfo>, Error>` | このバックエンドで利用可能なコーデック情報の一覧を返す (AMF ランタイムまたは Vulkan デバイスを初期化できない場合はエラー) | - |
 | `BUILD_VERSION` | ビルド時の AMF バージョン文字列 (`&'static str`) | - |
 | `AmfVersion` | AMF ランタイムのバージョン | フィールド: `major`, `minor`, `release`, `build` (全て `u16`)。`Display` は `major.minor.release.build` 形式 |
 
 `Encoder` / `Decoder` は内部でワーカースレッドを起動し、`encode()` / `decode()` で投入したフレームの結果は `EncodeHandler::on_encoded` / `DecodeHandler::on_decoded` に非同期で通知される。`finish()` は残りのフレームをハンドラーが受け取り終わるまで待機する。`finish()` が成功した後に `encode()` / `reconfigure()` / `decode()` を呼ぶとエラーになる。2 回目の `finish()` もエラーになる。`finish()` を呼ばずに drop すると、drop の処理中に、すでに `encode()` / `decode()` が成功したフレームの出力が通知されることがある。drop は、すべてのフレームの出力が通知されることを保証しない。
 
-`AmfLibrary::instance().create_context()` は呼び出しごとに新しい `Context` を作成する。
+`AmfLibrary::instance().create_context()` は呼び出しごとに新しい `Context` を
+既定の Vulkan デバイスで初期化して返す。Vulkan デバイスを選択する場合は
+`AmfLibrary::create_uninitialized_context()` で `UninitializedContext` を作成し、
+`UninitializedContext::vulkan_device_extensions()` で拡張を取得してから
+`UninitializedContext::init_vulkan_with_device()` で初期化する。
 同じ `Context` を Clone して Encoder と Decoder に渡すと、Decoder の `on_decoded` で受け取った
 `Surface` をそのまま Encoder の `encode()` に投入できる。別の `Context` を渡すこともできるが、
 `Surface` / `Buffer` は同じ Context のコンポーネントにしか投入できない。
@@ -144,7 +149,9 @@ AMD GPU 向けハードウェアアクセラレーションによるビデオエ
 
 | 型 | 説明 | 主要メソッド |
 |----|------|-------------|
-| `Context` | `AMFContext` の参照カウントを管理する Clone 可能なハンドル | `alloc_surface(MemoryType, SurfaceFormat, width, height)`, `alloc_buffer(MemoryType, size)`, `as_ptr()` |
+| `Context` | `AMFContext` の参照カウントを管理する、Vulkan 初期化済みの Clone 可能なハンドル | `vulkan_device() -> Result<VulkanDevice, Error>`, `alloc_surface(MemoryType, SurfaceFormat, width, height)`, `alloc_buffer(MemoryType, size)`, `as_ptr()` |
+| `UninitializedContext` | Vulkan 未初期化の `AMFContext` を保持するハンドル | `vulkan_device_extensions() -> Result<Vec<String>, Error>`, `init_vulkan() -> Result<Context, Error>`, `unsafe init_vulkan_with_device(VulkanDevice) -> Result<Context, Error>` |
+| `VulkanDevice` | AMF に渡す Vulkan デバイスのハンドル一式 (`AMFVulkanDevice` に対応) | `unsafe from_raw(instance, physical_device, device)`, `instance() -> *mut c_void`, `physical_device() -> *mut c_void`, `device() -> *mut c_void` |
 | `Component` | `AMFComponent` のラッパー | `init(SurfaceFormat, width, height)`, `re_init(width, height)`, `terminate()`, `drain()`, `flush()`, `unsafe submit_input(*mut AMFData)`, `unsafe query_output(*mut *mut AMFData)`, `get_context()`, `context()`, `property_storage() -> Result<PropertyStorage, Error>` |
 | `Surface` | `AMFSurface` のラッパー | `context()`, `get_memory_type() -> MemoryType`, `set_pts(i64)`, `get_pts() -> i64`, `set_duration(i64)`, `get_plane(PlaneType) -> Result<Plane<'_>, Error>`, `get_plane_at(index) -> Result<Plane<'_>, Error>`, `convert(MemoryType) -> Result<(), Error>`, `data() -> Result<Data, Error>`, `into_data() -> Result<Data, Error>`, `property_storage()`, `as_ptr()`, `into_raw()` |
 | `Buffer` | `AMFBuffer` のラッパー | `context()`, `get_memory_type() -> MemoryType`, `get_native() -> *mut c_void`, `get_size() -> usize`, `set_size(usize) -> Result<(), Error>`, `unsafe as_slice() -> Result<&[u8], Error>`, `unsafe as_mut_slice() -> Result<&mut [u8], Error>`, `set_pts(i64)`, `get_pts() -> i64`, `get_duration() -> i64`, `data() -> Result<Data, Error>`, `into_data() -> Result<Data, Error>`, `property_storage() -> Result<PropertyStorage, Error>`, `as_ptr()`, `into_raw()` |
@@ -158,6 +165,31 @@ AMD GPU 向けハードウェアアクセラレーションによるビデオエ
 AMFContext が破棄され、そのデストラクタが `Terminate` を呼ぶ。`Context` は `PartialEq` / `Eq` を
 実装しており、同じ AMFContext を指すかを比較できる。各ハンドルは `context()` で保持する
 `Context` を取得できる。
+
+`AmfLibrary::create_context()` は既定の Vulkan デバイスで初期化した `Context` を返す。
+Vulkan デバイスを選択する場合は `AmfLibrary::create_uninitialized_context()` で
+`UninitializedContext` を作成し、`UninitializedContext::vulkan_device_extensions()` で
+拡張を取得してから `UninitializedContext::init_vulkan_with_device(amf::VulkanDevice)` で
+初期化する。`VulkanDevice` は `VkInstance` / `VkPhysicalDevice` /
+`VkDevice` の 3 つのハンドルを保持する。3 つのハンドルは、そのハンドルを使用する
+すべての `Context` と、そこから取得したすべての AMF オブジェクトを破棄するまで
+有効にしておく。`Context::vulkan_device()` は AMF が使用しているハンドルを返す。
+取得元の `Context` から取得したハンドルを別の `Context` に渡す場合は、取得元の
+`Context` を、そのハンドルを使用するすべての `Context` と AMF オブジェクトより後に
+破棄する。
+
+`UninitializedContext::vulkan_device_extensions()` は AMF が要求する Vulkan デバイス拡張の
+一覧を返し、Vulkan デバイスを作成する前に呼び出せる。AMF SDK のサンプルと実機では
+初期化前でも取得できるが、AMF の API リファレンスは未初期化の `Context` に対して
+`AMF_NO_DEVICE` を返すとしている。AMF が未初期化の `Context` を受け付けない場合は
+`Error::Amf` を返す。AMF は既定で、コンピュート対応キューファミリ内のインデックス 0 の
+キューを使うため、そのキューを作成した `VkDevice` を渡す。Vulkan インスタンスの作成、
+物理デバイスの選択、拡張と feature の有効化は利用者が行う。AMF は渡された Vulkan
+デバイスの所有権を変更しない。既定の Vulkan デバイスは AMF が所有し、利用者は
+破棄しない。`VulkanDevice::from_raw` は所有権を変更せず、渡されたハンドルの所有者の
+ままである。利用者が所有するデバイスは、それを使用するすべての `Context` と AMF
+オブジェクトを破棄した後に利用者が破棄する。
+
 `Surface` / `Buffer` / `Plane` / `PropertyStorage` / `Component` は `Clone` 実装で `Acquire` を呼び、
 `Drop` 実装で `Release` を呼ぶ。`Surface` / `Buffer` / `PropertyStorage` は
 `unsafe from_raw(ptr, Context)` (Acquire なし) と `unsafe from_raw_acquired(ptr, Context)` (Acquire 付き) の
@@ -232,7 +264,7 @@ AMFContext が破棄され、そのデストラクタが `Terminate` を呼ぶ�
 
 ## FFI モジュール
 
-`ffi` モジュールは内部 `sys` モジュールの再公開で、`#[doc(hidden)]` 属性が付いている。semver 保証の対象外。`AMFSurface`, `AMFBuffer`, `AMF_SURFACE_FORMAT`, `AMF_PLANE_TYPE`, `AMF_MEMORY_TYPE` 等の `bindgen` 生成型と AMF プロパティ文字列定数 (`sys::str::*`) を含む。
+`ffi` モジュールは内部 `sys` モジュールの再公開で、`#[doc(hidden)]` 属性が付いている。semver 保証の対象外。`AMFSurface`, `AMFBuffer`, `AMFContext1`, `AMFVulkanDevice`, `AMF_SURFACE_FORMAT`, `AMF_PLANE_TYPE`, `AMF_MEMORY_TYPE` 等の `bindgen` 生成型と AMF プロパティ文字列定数 (`sys::str::*`) を含む。
 
 ## コード例
 
@@ -444,7 +476,7 @@ for info in &codecs {
 }
 ```
 
-`supported_codecs()` は AMF ランタイムをロードして利用可能なコーデックを判定する。AMF ランタイムを初期化できない場合は `Err` を返し、個々のコーデックの非対応は `decoding` / `encoding` の `None` になる。H.264 / HEVC / AV1 / VP9 の 4 件を返し、VP9 は AMF にエンコーダーがないため `encoding` が常に `None` になる。
+`supported_codecs()` は AMF ランタイムをロードして利用可能なコーデックを判定する。AMF ランタイムまたは Vulkan デバイスを初期化できない場合は `Err` を返し、個々のコーデックの非対応は `decoding` / `encoding` の `None` になる。H.264 / HEVC / AV1 / VP9 の 4 件を返し、VP9 は AMF にエンコーダーがないため `encoding` が常に `None` になる。
 
 実機で確認済みの VP9 は Profile 0 (8bit 4:2:0) である。10bit (Profile 2) と 4:2:2 / 4:4:4 は、出力フォーマットが NV12 固定のため未検証である。
 
@@ -461,6 +493,29 @@ println!("AMF runtime: {version}");
 ```
 
 `AmfLibrary::instance()` は `LazyLock` によるプロセスシングルトンを返す。`libamfrt64.so.1` の `dlopen` とファクトリの取得は、初めて `query_version()` / `create_context()` / `create_component()` を呼び出したときに行われる。
+
+### Vulkan デバイスの選択
+
+```rust
+use shiguredo_amf::AmfLibrary;
+use shiguredo_amf::amf::VulkanDevice;
+
+let context = AmfLibrary::instance().create_uninitialized_context()?;
+
+// AMF が要求する Vulkan デバイス拡張を取得する
+let extensions = context.vulkan_device_extensions()?;
+
+// 利用者が Vulkan インスタンスと物理デバイスを選択し、extensions を有効にした
+// VkDevice を作成する (Vulkan の呼び出しは利用者が行う)
+let device = unsafe { VulkanDevice::from_raw(instance, physical_device, vk_device)? };
+let context = unsafe { context.init_vulkan_with_device(device)? };
+```
+
+`vulkan_device_extensions()` は Vulkan デバイスを作成する前に呼び出せる。AMF SDK のサンプルと実機では初期化前でも取得できるが、AMF の API リファレンスは未初期化の `Context` に対して `AMF_NO_DEVICE` を返すとしている。AMF が未初期化の `Context` を受け付けない場合は `Error::Amf` を返す。返った拡張名を `VkDeviceCreateInfo::ppEnabledExtensionNames` に指定する。AMF は既定で、コンピュート対応キューファミリ内のインデックス 0 のキューを使うため、そのキューを作成した `VkDevice` を渡す。インスタンス作成、物理デバイス選択、拡張と feature の有効化の手順は AMF SDK の `DeviceVulkan.cpp` を参照する。
+
+`Context::vulkan_device()` は `Context` が使用している Vulkan デバイスのハンドルを返す。ハンドルの寿命と破棄責任は「AMF オブジェクトラッパー」の Vulkan デバイスの節を参照する。複数 GPU を使う場合は GPU ごとに `Context` を作成する。
+
+`UninitializedContext::init_vulkan()` を使うと、既定の Vulkan デバイスで初期化した `Context` を取得できる。拡張一覧を先に取得したい場合に使う。
 
 ### カスタムハンドラートレイトの実装
 
@@ -596,7 +651,7 @@ AMF SDK 内部の enum 値は H.264 / HEVC / AV1 で異なるが、`shiguredo_am
 
 ## スレッド設計
 
-- `AmfLibrary` はプロセスシングルトン (`LazyLock<AmfLibrary>`)。AMF ランタイムを遅延初期化し、`create_context()` で新しい `Context` を作成する。
+- `AmfLibrary` はプロセスシングルトン (`LazyLock<AmfLibrary>`)。AMF ランタイムを遅延初期化し、`create_context()` で既定の Vulkan デバイスで初期化した `Context` を作成する。デバイスを選択する場合は `create_uninitialized_context()` で `UninitializedContext` を作成し、`UninitializedContext::init_vulkan_with_device()` で初期化する。
 - `Context` は `AMFContext` の参照カウントを直接管理する Clone 可能なハンドルである。`Clone` は `AMFContext::Acquire`、`Drop` は `AMFContext::Release` を呼ぶ。最後の参照が解放されたときに AMFContext のデストラクタが `Terminate` を呼ぶ。
 - `Encoder<H>` / `Decoder<H>` は内部で共通のワーカーモジュールを使い、`amf-encoder-worker` / `amf-decoder-worker` という名前のワーカースレッドを起動する。コマンドは `mpsc::channel` で受け取り、`RegisterUserData` / `WaitEof` / `Stop` を使う。出力の変換、ハンドラーへの通知、終了条件だけをクロージャで差し替える。
 - `encode()` / `decode()` はメインスレッドから `SubmitInput` を呼ぶ。共通のリトライ対象は `AMF_INPUT_FULL` と `AMF_DECODER_NO_FREE_SURFACES` で、1ms 間隔で最大 100 回リトライし、それ以外のステータスはそのまま返す。エンコーダーは `AMF_OK` / `AMF_NEED_MORE_INPUT` を受理し、`AMF_REPEAT` は想定外としてエラーにする。デコーダーは `AMF_OK` / `AMF_NEED_MORE_INPUT` / `AMF_RESOLUTION_CHANGED` を受理し、`AMF_REPEAT` は複数フレームを含むバッファとしてエラーにする。`AMF_DECODER_NO_FREE_SURFACES` はデコーダー専用だが、一時的なリソース枯渇を表すため共通のリトライ対象に含める。どちらも受理された後で、入力フレームに割り当てた `ShiguredoAmfFrameId` と `UserData` をワーカーへ送る。

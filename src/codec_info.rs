@@ -509,7 +509,8 @@ pub struct EncodingInfo {
 ///
 /// # Errors
 ///
-/// AMF ランタイムを初期化できない場合にエラーを返す。
+/// AMF ランタイムを初期化できない場合、または Vulkan デバイスの初期化に失敗した
+/// 場合にエラーを返す。
 pub fn supported_codecs() -> Result<Vec<CodecInfo>, Error> {
     let context = AmfLibrary::instance().create_context()?;
     Ok(VideoCodecType::all()

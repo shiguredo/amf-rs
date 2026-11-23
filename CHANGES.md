@@ -40,7 +40,7 @@
 - [CHANGE] 最小サポート Rust バージョン (MSRV) を 1.88 から 1.95 に上げる
   - @voluntas
 - [CHANGE] `amf::Context` 周りの整理
-  - `init_vulkan` を非公開にし、`AmfLibrary::create_context` で Vulkan デバイスを初期化した `amf::Context` を作成できるようにする
+  - `Context::init_vulkan` を削除し、`AmfLibrary::create_context` で既定の Vulkan デバイスで初期化した `amf::Context` を作成できるようにする
   - `from_raw` / `from_raw_acquired` を非公開にする
   - `terminate` / `into_raw` を削除する
   - `PartialEq` / `Eq` を実装する
@@ -105,6 +105,14 @@
   - `surface_pool_size` はデコード用サーフェスプールのサイズを設定し、`0` は AMF が DPB サイズ + 5 を計算する
   - `reorder_mode` に `DecoderReorderMode::LowLatency` を指定すると、並べ替えを伴わないストリームを前提に出力の遅延を 0 にする。並べ替えを伴うストリームを投入した場合の出力順は保証しない
   - AMF の DPB サイズは Linux の AMF ランタイム 1.5.3.0 で設定が許可されないため、公開 API に含めない
+  - @melpon
+- [ADD] GPU デバイスを選択できるようにする
+  - `amf::VulkanDevice` を追加する
+  - `amf::UninitializedContext` を追加する
+  - `AmfLibrary::create_uninitialized_context` を追加する
+  - `amf::UninitializedContext::vulkan_device_extensions` を追加する
+  - `amf::UninitializedContext::init_vulkan` / `init_vulkan_with_device` を追加する
+  - `amf::Context::vulkan_device` を追加する
   - @melpon
 - [ADD] `amf::PropertyStorage::set_property_bool` を追加する
   - @melpon

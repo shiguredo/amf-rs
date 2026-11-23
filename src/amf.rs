@@ -1476,6 +1476,75 @@ impl Drop for Data {
 }
 
 // ---------------------------------------------------------------------------
+// Vulkan デバイスのハンドル
+// ---------------------------------------------------------------------------
+
+/// AMF に渡す Vulkan デバイスのハンドル一式
+///
+/// `VkInstance`、`VkPhysicalDevice`、`VkDevice` の 3 つのハンドルを保持する。
+/// 3 つのハンドルはすべて非 `null` である。
+/// この型は Vulkan のオブジェクトを所有せず、所有権を変更しない。
+#[derive(Debug, Clone, Copy)]
+pub struct VulkanDevice {
+    device: sys::AMFVulkanDevice,
+}
+
+impl VulkanDevice {
+    /// 渡された 3 つのハンドルをそのまま保持する。
+    ///
+    /// # Safety
+    ///
+    /// `instance` は有効な `VkInstance` を指し、
+    /// `physical_device` はそのインスタンスから取得した有効な `VkPhysicalDevice`、
+    /// `device` はその `physical_device` から作成した有効な `VkDevice` を指すこと。
+    ///
+    /// # Errors
+    ///
+    /// `null` を含むハンドルが渡された場合に `Error::InvalidArgument` を返す。
+    pub unsafe fn from_raw(
+        instance: *mut std::ffi::c_void,
+        physical_device: *mut std::ffi::c_void,
+        device: *mut std::ffi::c_void,
+    ) -> Result<Self, Error> {
+        if instance.is_null() || physical_device.is_null() || device.is_null() {
+            return Err(InvalidArgumentError::new("Vulkan device handles must not be null").into());
+        }
+
+        // AMF は cbSizeof を構造体のサイズとして参照し、pNext を拡張チェーンと
+        // して参照する。拡張を使わないため pNext は null にする。
+        Ok(Self {
+            device: sys::AMFVulkanDevice {
+                cbSizeof: std::mem::size_of::<sys::AMFVulkanDevice>(),
+                pNext: std::ptr::null_mut(),
+                hInstance: instance.cast(),
+                hPhysicalDevice: physical_device.cast(),
+                hDevice: device.cast(),
+            },
+        })
+    }
+
+    /// `VkInstance` ハンドルを返す
+    pub fn instance(&self) -> *mut std::ffi::c_void {
+        self.device.hInstance.cast()
+    }
+
+    /// `VkPhysicalDevice` ハンドルを返す
+    pub fn physical_device(&self) -> *mut std::ffi::c_void {
+        self.device.hPhysicalDevice.cast()
+    }
+
+    /// `VkDevice` ハンドルを返す
+    pub fn device(&self) -> *mut std::ffi::c_void {
+        self.device.hDevice.cast()
+    }
+}
+
+// SAFETY: `VulkanDevice` は Vulkan のハンドル値を保持するだけで、それ自体は
+// Vulkan の操作を行わない。ハンドルの有効性は取得経路に従う。
+unsafe impl Send for VulkanDevice {}
+unsafe impl Sync for VulkanDevice {}
+
+// ---------------------------------------------------------------------------
 // Context のラッパー
 // ---------------------------------------------------------------------------
 
@@ -1504,44 +1573,20 @@ struct ContextFuncs {
     ) -> sys::AMF_RESULT,
 }
 
-/// `AMFContext` を共有するハンドル
-///
-/// 新しい Context は [`crate::AmfLibrary::create_context`] で作成する。`Clone` は
-/// 同じ `AMFContext` を指すハンドルを返す。最後のハンドルが破棄されると
-/// `AMFContext` は破棄される。
-///
-/// 同じ `AMFContext` を指すハンドル同士は等しいと判定される。
-pub struct Context {
+// `AMFContext` の所有権と、AMF 呼び出しを直列化する状態を保持する。
+// `UninitializedContext` と `Context` が共有し、解放処理を 1 箇所にまとめる。
+struct ContextInner {
     ptr: *mut sys::AMFContext,
     f: ContextFuncs,
     state: Arc<AmfObjectState>,
 }
 
-unsafe impl Send for Context {}
-unsafe impl Sync for Context {}
-
-impl std::fmt::Debug for Context {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Context")
-            .field("ptr", &format_args!("{:p}", self.ptr))
-            .finish()
-    }
-}
-
-impl PartialEq for Context {
-    fn eq(&self, other: &Self) -> bool {
-        self.ptr == other.ptr
-    }
-}
-
-impl Eq for Context {}
-
-impl Context {
-    /// 共有状態を指定して生ポインタから Context を作成する
+impl ContextInner {
+    /// `AMFContext` の所有権を引き継ぎ、vtable と共有状態を保持した内部型を作成する。
     ///
     /// # Safety
     /// `ptr` は有効な `AMFContext` を指すこと。呼び出し元の参照の所有権を引き継ぐ。
-    pub(crate) unsafe fn from_raw_with_state(
+    unsafe fn from_raw_with_state(
         ptr: *mut sys::AMFContext,
         state: Arc<AmfObjectState>,
     ) -> Result<Self, Error> {
@@ -1557,9 +1602,188 @@ impl Context {
         Ok(Self { ptr, f, state })
     }
 
+    fn as_ptr(&self) -> *mut sys::AMFContext {
+        self.ptr
+    }
+
+    /// `AMFContext1` への参照を取得する
+    ///
+    /// 返すガードが生きている間、`AMFContext1` の参照を保持する。
+    /// 呼び出し元は `self.state` のロックを保持すること。
+    fn context1(&self) -> Result<Context1Guard, Error> {
+        let mut context1_ptr: *mut std::ffi::c_void = std::ptr::null_mut();
+        let result = unsafe {
+            (self.f.query_interface)(self.ptr, &sys::IID_AMF_CONTEXT1, &mut context1_ptr)
+        };
+        AmfError::check(result, "AMFContext::QueryInterface(AMFContext1)")?;
+
+        if context1_ptr.is_null() {
+            return Err(InternalError::new("QueryInterface returned null for AMFContext1").into());
+        }
+
+        let ptr = context1_ptr as *mut sys::AMFContext1;
+        let vtbl = unsafe { &*(*ptr).pVtbl };
+        let release = require_vtbl_fn(vtbl.Release, "AMFContext1::Release")?;
+        // 呼び出し元が続けて vtable を取得する。その取得に失敗して早期に戻る場合も、
+        // ガードの破棄で QueryInterface が増やした参照を解放する。
+        Ok(Context1Guard { ptr, release })
+    }
+
+    /// Vulkan デバイスで初期化する
+    ///
+    /// `device` が `null` の場合は既定の Vulkan デバイスを使用する。
+    ///
+    /// # Safety
+    /// `device` が `null` でない場合、有効な `AMFVulkanDevice` を指し、
+    /// `Context` を破棄するまで有効であること。
+    unsafe fn init_vulkan(&self, device: *mut std::ffi::c_void) -> Result<(), Error> {
+        let _guard = self.state.lock();
+        let context1 = self.context1()?;
+        // SAFETY: context1 は有効な AMFContext1 を指している。
+        let vtbl = unsafe { &*(*context1.ptr).pVtbl };
+        let init_vulkan = require_vtbl_fn(vtbl.InitVulkan, "AMFContext1::InitVulkan")?;
+        let result = unsafe { init_vulkan(context1.ptr, device) };
+        AmfError::check(result, "AMFContext1::InitVulkan")?;
+        Ok(())
+    }
+
+    fn vulkan_device(&self) -> Result<VulkanDevice, Error> {
+        let _guard = self.state.lock();
+        let context1 = self.context1()?;
+        // SAFETY: context1 は有効な AMFContext1 を指している。
+        let vtbl = unsafe { &*(*context1.ptr).pVtbl };
+        let get_vulkan_device =
+            require_vtbl_fn(vtbl.GetVulkanDevice, "AMFContext1::GetVulkanDevice")?;
+        let device = unsafe { get_vulkan_device(context1.ptr) };
+        if device.is_null() {
+            return Err(InternalError::new("GetVulkanDevice returned null").into());
+        }
+
+        // SAFETY: AMF は Vulkan で初期化した Context に対して、初期化に使った
+        // AMFVulkanDevice を指すポインタを返す。
+        let device = unsafe { &*(device as *const sys::AMFVulkanDevice) };
+        if device.hInstance.is_null()
+            || device.hPhysicalDevice.is_null()
+            || device.hDevice.is_null()
+        {
+            return Err(InternalError::new("GetVulkanDevice returned null handles").into());
+        }
+        Ok(VulkanDevice { device: *device })
+    }
+
+    /// AMF が要求する Vulkan デバイス拡張の一覧を返す
+    ///
+    /// # Errors
+    ///
+    /// デバイス拡張の取得に失敗した場合にエラーを返す。
+    fn vulkan_device_extensions(&self) -> Result<Vec<String>, Error> {
+        let _guard = self.state.lock();
+        let context1 = self.context1()?;
+        // SAFETY: context1 は有効な AMFContext1 を指している。
+        let vtbl = unsafe { &*(*context1.ptr).pVtbl };
+        let get_extensions = require_vtbl_fn(
+            vtbl.GetVulkanDeviceExtensions,
+            "AMFContext1::GetVulkanDeviceExtensions",
+        )?;
+
+        // AMF は拡張の個数と名前を別々の呼び出しで返すため、2 回呼び出す。
+        let mut count: sys::amf_size = 0;
+        let result = unsafe { get_extensions(context1.ptr, &mut count, std::ptr::null_mut()) };
+        AmfError::check(result, "AMFContext1::GetVulkanDeviceExtensions")?;
+
+        let mut names: Vec<*const std::ffi::c_char> = vec![std::ptr::null(); count];
+        if count > 0 {
+            let result = unsafe { get_extensions(context1.ptr, &mut count, names.as_mut_ptr()) };
+            AmfError::check(result, "AMFContext1::GetVulkanDeviceExtensions")?;
+            names.truncate(count);
+        }
+
+        let mut extensions = Vec::new();
+        for name in names {
+            if name.is_null() {
+                return Err(InternalError::new(
+                    "GetVulkanDeviceExtensions returned a null extension name",
+                )
+                .into());
+            }
+            // SAFETY: AMF は拡張名を NUL 終端した C 文字列で返す。
+            let name = unsafe { std::ffi::CStr::from_ptr(name) };
+            let name = name.to_str().map_err(|error| {
+                InternalError::with_source("Vulkan extension name is not valid UTF-8", error)
+            })?;
+            extensions.push(name.to_owned());
+        }
+        Ok(extensions)
+    }
+}
+
+impl Clone for ContextInner {
+    fn clone(&self) -> Self {
+        // AMFContext は AMFInterface の参照カウントで管理されている。
+        unsafe {
+            (self.f.acquire)(self.ptr);
+        }
+        self.state.inc();
+        Self {
+            ptr: self.ptr,
+            f: self.f,
+            state: Arc::clone(&self.state),
+        }
+    }
+}
+
+impl Drop for ContextInner {
+    fn drop(&mut self) {
+        // 最後の参照が解放されると AMFContext のデストラクタが Terminate に相当する処理を行う。
+        // ドキュメント上、Release の呼び出しはスレッドセーフであるが、
+        // 実測ベースではスレッドセーフではなかったため、ロックを取って解放する。
+        let _guard = self.state.lock();
+        unsafe {
+            (self.f.release)(self.ptr);
+        }
+        self.state.dec();
+    }
+}
+
+/// Vulkan で初期化済みの `AMFContext` を共有するハンドル
+///
+/// `Clone` は同じ `AMFContext` を指すハンドルを返す。
+/// 最後のハンドルが破棄されると `AMFContext` は破棄される。
+///
+/// 同じ `AMFContext` を指すハンドル同士は等しいと判定される。
+pub struct Context {
+    inner: ContextInner,
+    /// 利用者が指定した Vulkan デバイス
+    ///
+    /// 既定の Vulkan デバイスで初期化した場合は `None` になる。
+    vulkan_device: Option<Arc<VulkanDevice>>,
+}
+
+// SAFETY: `AMFContext` の生ポインタを保持するが、AMF 呼び出しは state のロックで
+// 直列化する。参照カウント操作は AMFInterface の仕様に従う。
+unsafe impl Send for Context {}
+unsafe impl Sync for Context {}
+
+impl std::fmt::Debug for Context {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Context")
+            .field("ptr", &format_args!("{:p}", self.inner.as_ptr()))
+            .finish()
+    }
+}
+
+impl PartialEq for Context {
+    fn eq(&self, other: &Self) -> bool {
+        self.inner.as_ptr() == other.inner.as_ptr()
+    }
+}
+
+impl Eq for Context {}
+
+impl Context {
     /// このハンドルが指す `AMFContext` の生ポインタを返す。
     pub fn as_ptr(&self) -> *mut sys::AMFContext {
-        self.ptr
+        self.inner.as_ptr()
     }
 
     /// Surface を確保する
@@ -1574,11 +1798,11 @@ impl Context {
         height: i32,
     ) -> Result<Surface, Error> {
         let surface = {
-            let _guard = self.state.lock();
+            let _guard = self.inner.state.lock();
             let mut surface: *mut sys::AMFSurface = std::ptr::null_mut();
             let result = unsafe {
-                (self.f.alloc_surface)(
-                    self.ptr,
+                (self.inner.f.alloc_surface)(
+                    self.inner.ptr,
                     memory_type.to_amf(),
                     format.to_amf(),
                     width,
@@ -1611,10 +1835,11 @@ impl Context {
     /// Buffer を確保できない場合にエラーを返す。
     pub fn alloc_buffer(&self, memory_type: MemoryType, size: usize) -> Result<Buffer, Error> {
         let buffer = {
-            let _guard = self.state.lock();
+            let _guard = self.inner.state.lock();
             let mut buffer: *mut sys::AMFBuffer = std::ptr::null_mut();
-            let result =
-                unsafe { (self.f.alloc_buffer)(self.ptr, memory_type.to_amf(), size, &mut buffer) };
+            let result = unsafe {
+                (self.inner.f.alloc_buffer)(self.inner.ptr, memory_type.to_amf(), size, &mut buffer)
+            };
             AmfError::check(result, "AMFContext::AllocBuffer")?;
 
             if buffer.is_null() {
@@ -1626,84 +1851,147 @@ impl Context {
         unsafe { Buffer::from_raw_with_acquire(buffer, false, AmfObjectState::new(), self.clone()) }
     }
 
-    /// Vulkan デバイスを初期化する
+    /// 初期化に使用した Vulkan デバイスを返す。
     ///
-    /// `device` が `null` の場合はデフォルトデバイスが使用される。
+    /// 返すハンドルは Vulkan デバイスを所有しないため、Vulkan デバイスが破棄された場合
+    /// このハンドルも無効になる。
     ///
-    /// # Safety
-    /// `device` は有効な Vulkan デバイスを指すこと。
-    pub(crate) unsafe fn init_vulkan(&self, device: *mut std::ffi::c_void) -> Result<(), Error> {
-        let _guard = self.state.lock();
-
-        let mut context1_ptr: *mut std::ffi::c_void = std::ptr::null_mut();
-        let result = unsafe {
-            (self.f.query_interface)(self.ptr, &sys::IID_AMF_CONTEXT1, &mut context1_ptr)
-        };
-        AmfError::check(result, "AMFContext::QueryInterface(AMFContext1)")?;
-
-        if context1_ptr.is_null() {
-            return Err(InternalError::new("QueryInterface returned null for AMFContext1").into());
+    /// # Errors
+    ///
+    /// Vulkan デバイスを取得できない場合にエラーを返す。
+    pub fn vulkan_device(&self) -> Result<VulkanDevice, Error> {
+        // 利用者が指定したデバイスは AMF がそのまま保持するため、渡した値を返す。
+        if let Some(device) = &self.vulkan_device {
+            return Ok(**device);
         }
-
-        let context1 = context1_ptr as *mut sys::AMFContext1;
-        let vtbl = unsafe { &*(*context1).pVtbl };
-        let release = require_vtbl_fn(vtbl.Release, "AMFContext1::Release")?;
-        // Release を取得した直後にガードを作り、InitVulkan の vtable 取得が
-        // 失敗しても参照が残らないようにする。
-        let context1 = Context1Guard {
-            ptr: context1,
-            release,
-        };
-
-        let init_vulkan = require_vtbl_fn(vtbl.InitVulkan, "AMFContext1::InitVulkan")?;
-        let result = unsafe { init_vulkan(context1.ptr, device) };
-        AmfError::check(result, "AMFContext1::InitVulkan")?;
-        Ok(())
-    }
-}
-
-/// `AMFContext1` の参照を保持し、破棄時に `Release` を呼ぶガード
-struct Context1Guard {
-    /// 解放対象の `AMFContext1`
-    ptr: *mut sys::AMFContext1,
-    /// `AMFContext1::Release` の関数ポインタ
-    release: unsafe extern "C" fn(*mut sys::AMFContext1) -> sys::amf_long,
-}
-
-impl Drop for Context1Guard {
-    fn drop(&mut self) {
-        // InitVulkan の成否にかかわらず、QueryInterface が増やした参照を解放する。
-        unsafe {
-            (self.release)(self.ptr);
-        }
+        self.inner.vulkan_device()
     }
 }
 
 impl Clone for Context {
     fn clone(&self) -> Self {
-        // AMFContext は AMFInterface の参照カウントで管理されている。
-        unsafe {
-            (self.f.acquire)(self.ptr);
-        }
-        self.state.inc();
         Self {
-            ptr: self.ptr,
-            f: self.f,
-            state: Arc::clone(&self.state),
+            inner: self.inner.clone(),
+            vulkan_device: self.vulkan_device.clone(),
         }
     }
 }
 
-impl Drop for Context {
+/// Vulkan 未初期化の `AMFContext` を保持するハンドル
+///
+/// [`UninitializedContext::init_vulkan`] または
+/// [`UninitializedContext::init_vulkan_with_device`] で初期化し、`Context` を返す。
+pub struct UninitializedContext {
+    // 初期化に失敗した場合は、AMF が AMFVulkanDevice へのポインタを保持している
+    // 可能性があるため、inner を先に破棄して AMFContext を解放してから
+    // vulkan_device を破棄する。
+    inner: ContextInner,
+    /// 初期化に使用する Vulkan デバイス
+    vulkan_device: Option<Arc<VulkanDevice>>,
+}
+
+// SAFETY: `AMFContext` の生ポインタを保持するが、AMF 呼び出しは state のロックで
+// 直列化され、初期化は self を消費する。
+unsafe impl Send for UninitializedContext {}
+
+impl std::fmt::Debug for UninitializedContext {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("UninitializedContext")
+            .field("ptr", &format_args!("{:p}", self.inner.as_ptr()))
+            .finish()
+    }
+}
+
+impl UninitializedContext {
+    /// `AMFContext` の所有権を引き継ぎ、Vulkan 未初期化の `UninitializedContext` を作成する。
+    ///
+    /// # Safety
+    /// `ptr` は有効な `AMFContext` を指すこと。呼び出し元の参照の所有権を引き継ぐ。
+    pub(crate) unsafe fn from_raw_with_state(
+        ptr: *mut sys::AMFContext,
+        state: Arc<AmfObjectState>,
+    ) -> Result<Self, Error> {
+        Ok(Self {
+            inner: unsafe { ContextInner::from_raw_with_state(ptr, state)? },
+            vulkan_device: None,
+        })
+    }
+
+    /// AMF が要求する Vulkan デバイス拡張の一覧を返す
+    ///
+    /// Vulkan デバイスを作成する前に呼び出し、返った拡張を有効にしてデバイスを
+    /// 作成する。
+    ///
+    /// AMF の API リファレンスは未初期化の `Context` に対して `AMF_NO_DEVICE` を
+    /// 返すとしているが、AMF SDK のサンプルでは Vulkan を初期化する前に呼び出している。
+    /// また、実機でも初期化する前に呼び出しても正しく値が返されることを確認している。
+    ///
+    /// # Errors
+    ///
+    /// デバイス拡張の取得に失敗した場合にエラーを返す。
+    pub fn vulkan_device_extensions(&self) -> Result<Vec<String>, Error> {
+        self.inner.vulkan_device_extensions()
+    }
+
+    /// 既定の Vulkan デバイスで初期化し、`Context` を返す
+    ///
+    /// # Errors
+    ///
+    /// Vulkan デバイスの初期化に失敗した場合にエラーを返す。
+    pub fn init_vulkan(self) -> Result<Context, Error> {
+        unsafe { self.inner.init_vulkan(std::ptr::null_mut()) }?;
+        Ok(Context {
+            inner: self.inner,
+            vulkan_device: None,
+        })
+    }
+
+    /// 指定した Vulkan デバイスで初期化し、`Context` を返す
+    ///
+    /// # Safety
+    ///
+    /// `device` の 3 つのハンドルは有効であること。`device` は
+    /// [`UninitializedContext::vulkan_device_extensions`] が返す拡張を有効にし、
+    /// AMF が使うコンピュートキュー (コンピュート対応キューファミリ内のインデックス 0)
+    /// を作成した `VkDevice` を指すこと。AMF が要求する feature は公開されていないため、
+    /// AMF SDK の `DeviceVulkan.cpp` と同じ feature を有効にすること。
+    /// ハンドルは、返した `Context` とその `Clone`、およびそれらから取得したすべての
+    /// AMF オブジェクトを破棄するまで有効であること。AMF が所有するデバイスの場合、
+    /// そのデバイスを所有する `Context` も有効であること。
+    ///
+    /// # Errors
+    ///
+    /// AMF が指定した Vulkan デバイスを受け付けない場合にエラーを返す。
+    pub unsafe fn init_vulkan_with_device(
+        mut self,
+        device: VulkanDevice,
+    ) -> Result<Context, Error> {
+        // 実測では、AMF は InitVulkan に渡した AMFVulkanDevice へのポインタを
+        // GetVulkanDevice でそのまま返す。そのため Context が破棄されるまで構造体を
+        // 保持する。Arc を移動してもヒープ上の AMFVulkanDevice のアドレスは変わらない。
+        let storage = Arc::new(device);
+        let ptr = &storage.device as *const sys::AMFVulkanDevice as *mut std::ffi::c_void;
+        self.vulkan_device = Some(storage);
+        unsafe { self.inner.init_vulkan(ptr) }?;
+        Ok(Context {
+            inner: self.inner,
+            vulkan_device: self.vulkan_device,
+        })
+    }
+}
+
+/// `AMFContext1` の参照を所有し、破棄時に `Release` を呼ぶガード
+struct Context1Guard {
+    ptr: *mut sys::AMFContext1,
+    release: unsafe extern "C" fn(*mut sys::AMFContext1) -> sys::amf_long,
+}
+
+impl Drop for Context1Guard {
     fn drop(&mut self) {
-        // 最後の参照が解放されると AMFContext のデストラクタが Terminate に相当する処理を行う。
-        // ドキュメント上、Release の呼び出しはスレッドセーフであるが、
-        // 実測ベースではスレッドセーフではなかったため、ロックを取って解放する。
-        let _guard = self.state.lock();
+        // QueryInterface が増やした参照は、呼び出しの成否にかかわらず解放する。
         unsafe {
-            (self.f.release)(self.ptr);
+            (self.release)(self.ptr);
         }
-        self.state.dec();
     }
 }
 

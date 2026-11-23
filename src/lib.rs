@@ -84,7 +84,7 @@ use std::path::Path;
 use std::ptr;
 use std::sync::{Arc, LazyLock, MutexGuard};
 
-use amf::{AmfObjectState, Component, Context};
+use amf::{AmfObjectState, Component, Context, UninitializedContext};
 use error::require_vtbl_fn;
 use sys::{AMF_DLL_NAME, AMF_FULL_VERSION, AMFFactory, AmfInitFn, AmfQueryVersionFn, amf_uint64};
 
@@ -264,32 +264,44 @@ impl AmfLibrary {
     /// 新しい AMFContext を作成し、既定の Vulkan デバイスで初期化する
     ///
     /// # Errors
-    /// AMF ランタイムを初期化できない場合にエラーを返す。
+    ///
+    /// AMF ランタイムを初期化できない場合、AMFContext の作成に失敗した場合、
+    /// または Vulkan デバイスの初期化に失敗した場合にエラーを返す。
     pub fn create_context(&self) -> Result<Context, Error> {
-        // Context::init_vulkan も state のロックを取得するため、Context を作成したら
-        // ロックを解放してから Vulkan デバイスを初期化する。
-        let context = {
-            let guard = self.state.lock();
-            let inner = self.ensure_inner(&guard)?;
-            let mut context: *mut sys::AMFContext = ptr::null_mut();
-            let result = unsafe {
-                let vtbl = &*(*inner.factory).pVtbl;
-                require_vtbl_fn(vtbl.CreateContext, "AMFFactory::CreateContext")?(
-                    inner.factory,
-                    &mut context,
-                )
-            };
-            AmfError::check(result, "AMFFactory::CreateContext")?;
+        self.create_uninitialized_context()?.init_vulkan()
+    }
 
-            if context.is_null() {
-                return Err(InternalError::new("CreateContext returned null").into());
-            }
-
-            unsafe { Context::from_raw_with_state(context, Arc::clone(&self.state)) }?
+    /// 新しい AMFContext を作成する
+    ///
+    /// 返る `UninitializedContext` は Vulkan 未初期化である。Vulkan デバイスを
+    /// 選択する場合は [`UninitializedContext::vulkan_device_extensions`] で拡張を
+    /// 取得し、[`UninitializedContext::init_vulkan_with_device`] で初期化する。
+    /// 既定のデバイスを使う場合は [`UninitializedContext::init_vulkan`] を呼ぶ。
+    ///
+    /// # Errors
+    ///
+    /// AMF ランタイムを初期化できない場合、または AMFContext の作成に失敗した
+    /// 場合にエラーを返す。
+    pub fn create_uninitialized_context(&self) -> Result<UninitializedContext, Error> {
+        // init_vulkan は state のロックを取得するため、UninitializedContext を
+        // 作成した後にこのロックを解放する。
+        let guard = self.state.lock();
+        let inner = self.ensure_inner(&guard)?;
+        let mut context: *mut sys::AMFContext = ptr::null_mut();
+        let result = unsafe {
+            let vtbl = &*(*inner.factory).pVtbl;
+            require_vtbl_fn(vtbl.CreateContext, "AMFFactory::CreateContext")?(
+                inner.factory,
+                &mut context,
+            )
         };
+        AmfError::check(result, "AMFFactory::CreateContext")?;
 
-        unsafe { context.init_vulkan(ptr::null_mut()) }?;
-        Ok(context)
+        if context.is_null() {
+            return Err(InternalError::new("CreateContext returned null").into());
+        }
+
+        unsafe { UninitializedContext::from_raw_with_state(context, Arc::clone(&self.state)) }
     }
 
     /// AMFComponent を作成する
