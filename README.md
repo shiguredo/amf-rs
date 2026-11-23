@@ -28,15 +28,17 @@ AMF ランタイムライブラリ (libamfrt64.so.1) は AMD GPU ドライバー
 - AMF によるハードウェアデコード (H.264 / H.265 / AV1 / VP9)
 - AMF ランタイムライブラリの実行時動的ロード (ビルド時のリンク不要)
 - Vulkan バックエンドによる GPU 処理
-- エンコード入力フォーマット選択 (AMD Radeon 780M では NV12 / YV12 / I420 / BGRA / ARGB / RGBA / YUY2 / P010 を確認済み。P010 は HEVC と AV1 で利用できる)
+- 複数 GPU 環境での Vulkan デバイス選択
+- エンコード入力フォーマット (NV12 / YV12 / I420 / BGRA / ARGB / RGBA / YUY2 / P010 など)
 - デコード出力は NV12 フォーマット
 - デコーダーの低遅延モード、リオーダーモード、サーフェスプールサイズの指定
-- フレーム単位のエンコードオプション (IDR フレーム強制)
+- フレーム単位のエンコードオプション (IDR / I / P フレームの強制)
 - B フレーム (H.264 / AV1、GPU と AMF が対応している場合)
 - エンコード中の動的プロパティ再設定 (`reconfigure`)
-- CQP / CBR / VBR / LCVBR / QVBR / HQVBR / HQCBR レート制御モード
-- レート制御時の QP 範囲指定 (`QpRange`、コーデック別に指定可能)
+- レート制御モード (CQP / CBR / VBR / LCVBR / QVBR / HQVBR / HQCBR)
+- レート制御時の QP 範囲指定
 - エンコーダーの用途 (`EncoderUsage`) と品質プリセット (`QualityPreset`) の指定
+- エンコーダー / デコーダーの統計値取得
 - ビルド時に GitHub から AMF ヘッダーを自動取得
 
 ## 動作要件
@@ -56,15 +58,6 @@ AMF ランタイムライブラリ (libamfrt64.so.1) は AMD GPU ドライバー
 - Ubuntu 26.04.1 LTS
 - AMF ランタイム 1.5.3.0 (AMF SDK 1.5.2)
 - Vulkan: RADV PHOENIX (Mesa 26.0.8)
-
-この環境で確認したエンコード入力フォーマットは次のとおりです。
-
-| フォーマット | 結果 |
-|---|---|
-| NV12 / YV12 / I420 / BGRA / ARGB / RGBA / YUY2 | 利用できる |
-| P010 | 利用できる (HEVC は `HevcProfile::Main10`、AV1 は `Av1Profile::Main` で確認) |
-| UYVY / AYUV / Y210 / Y410 | 利用できない |
-| P012 / P016 / Y416 | 利用できない |
 
 ## ビルド
 
@@ -90,9 +83,8 @@ DOCS_RS=1 cargo doc --no-deps
 use std::sync::mpsc;
 
 use shiguredo_amf::{
-    AmfLibrary, CodecConfig, EncodeOptions, EncodedFrame, Encoder, EncoderConfig, EncoderUsage,
-    FnEncodeHandler, FrameFormat, H264EncoderConfig, H264Profile, QualityPreset, RateControlMode,
-    ReconfigureParams, frame_type,
+    AmfLibrary, CodecConfig, EncodeOptions, EncodedFrame, Encoder, EncoderConfig,
+    FnEncodeHandler, FrameFormat, H264EncoderConfig, H264Profile, RateControlMode, frame_type,
 };
 
 let context = AmfLibrary::instance().create_context()?;
@@ -110,42 +102,24 @@ let mut config = EncoderConfig::new(
     RateControlMode::Cbr,
 );
 config.target_kbps = Some(5_000);
-config.usage = EncoderUsage::LowLatency;
-config.quality_preset = Some(QualityPreset::Balanced);
 
 // エンコード結果はワーカースレッドからチャネルで受け取る
 let (frame_tx, frame_rx) = mpsc::channel();
 let mut encoder = Encoder::new(
-    context.clone(),
+    context,
     config,
     FnEncodeHandler::new(
-        move |result: Result<EncodedFrame<()>, shiguredo_amf::Error>| match result {
-            Ok(frame) => {
-                let _ = frame_tx.send(frame);
-            }
-            Err(e) => eprintln!("encode error: {e}"),
+        move |result: Result<EncodedFrame<()>, shiguredo_amf::Error>| {
+            let _ = frame_tx.send(result);
         },
     ),
 )?;
 
-// エンコード中に動的プロパティを再設定
-encoder.reconfigure(ReconfigureParams {
-    framerate_num: Some(15),
-    framerate_den: Some(1),
-    target_kbps: Some(3_000),
-    ..ReconfigureParams::default()
-})?;
-
-// Surface を確保してフレームデータをコピーし、エンコードする
+// Surface を確保してフレームデータを書き込み、エンコードする
 let surface = encoder.alloc_surface()?;
-// フレームデータを surface の Y/UV プレーンにコピーする
+// ここでフレームデータを surface の Y/UV プレーンに書き込む
 // ...
-let options = EncodeOptions { frame_type: frame_type::UNKNOWN };
-encoder.encode(surface, options, ())?;
-
-// IDR フレームを強制してエンコード
-let surface = encoder.alloc_surface()?;
-// ...
+// 最初のフレームなので IDR を強制する
 encoder.encode(
     surface,
     EncodeOptions {
@@ -157,43 +131,14 @@ encoder.encode(
 // 残りのフレームをすべて取得する
 encoder.finish()?;
 
-// エンコード済みフレームを確認
-for frame in frame_rx.try_iter() {
+for result in frame_rx.try_iter() {
+    let frame = result?;
     println!("encoded bytes: {}", frame.buffer().get_size());
-    println!("picture type: {:?}", frame.picture_type());
 }
 ```
 
-エンコード結果は `FnEncodeHandler::new` で包んだクロージャに `Result<EncodedFrame<T>, E>` として通知されます。ハンドラーはワーカースレッドで呼ばれるため、結果は `mpsc::channel` の `Sender` でメインスレッドへ送ります。`E` の既定値は `shiguredo_amf::Error` です。`T` には `encode()` に渡したユーザーデータの型を指定します。
-
-`EncoderConfig::b_pic_pattern` に GOP 内の連続 B フレーム数を指定すると、B フレームを有効にできます。AMF の仕様上の値域は H.264 が 0-3、AV1 が 0-127 で、0 は B フレームなしです。HEVC は B フレームを扱わないため指定できません。B フレームを有効にすると、ハンドラーへの通知順は入力順 (提示順) と異なる符号化順になりますが、`encode()` に渡したユーザーデータは対応する入力フレームの出力に付きます。B フレームに対応していない GPU で 1 以上を指定した場合は `Encoder::new` がエラーを返します。
-
-コーデック別設定の `qp_range` 系に `QpRange` を指定すると、レート制御時の QP (AV1 は Q インデックス) の下限と上限を指定できます。
-
-- H.264: `H264EncoderConfig::qp_range` (AMF の MinQP / MaxQP はフレーム種別を分けない 1 組)
-- HEVC: `HevcEncoderConfig::qp_range_i` / `qp_range_p` (I / P フレーム別)
-- AV1: `Av1EncoderConfig::qp_range_intra` / `qp_range_inter` / `qp_range_inter_b` (intra / inter / inter_B (bi-directional inter) フレーム別)
-
-`QpRange` の `min` と `max` はそれぞれ独立して指定でき、`None` の側は AMF の既定値を使います。AMF の仕様上の値域は、H.264 と HEVC が QP の 0-51、AV1 が Q インデックスの 1-255 です。`EncoderConfig::qpi` / `qpp` / `qpb` は CQP の固定 QP、`qp_range` 系はレート制御時の QP の範囲という違いがあります。
-
-`H264EncoderConfig` / `HevcEncoderConfig` / `Av1EncoderConfig` は `Default` を実装しており、`..Default::default()` で未指定のフィールドを既定値にできます。
-
-`Encoder` は入出力の対応付けに `ShiguredoAmfFrameId` プロパティを使います。この名前はライブラリの予約名であり、利用者は入力 `Surface` に設定しないでください。`encode()` は入力 `Surface` の PTS を変更せず、出力 `Buffer` の PTS も設定しません。出力 `Buffer` の PTS は AMF が付けた値になります。
-
-`reconfigure` で変更できる項目は codec ごとに異なります。
-
-- H.264: `framerate_num` / `framerate_den` / `target_kbps` / `max_kbps` / `qpi` / `qpp` / `qpb` / `gop_pic_size`
-- H.265: `framerate_num` / `framerate_den` / `target_kbps` / `max_kbps` / `qpi` / `qpp`
-- AV1: `framerate_num` / `framerate_den` / `target_kbps` / `max_kbps` / `qpi` / `qpp` / `qpb` / `gop_pic_size`
-
-H.265 で `qpb` / `gop_pic_size` を指定するとエラーになります。`framerate_num` と `framerate_den` は必ず同時に指定してください。
-
-`EncodeOptions::frame_type` で強制できるフレームタイプはコーデックによって異なります。
-
-- H.264 / H.265: `IDR` / `I` / `P`
-- AV1: `IDR` / `I`
-
-`B` と `REF`、AV1 の `P`、未定義のビットは無視します。複数指定した場合は `IDR`、`I`、`P` の順に優先して 1 つだけ使用します。先頭フレームと GOP の境界では、エンコーダーが IDR を優先するため `I` と `P` の指定が反映されない場合があります。B フレームを生成するには `EncoderConfig::b_pic_pattern` を指定します。
+エンコード結果はワーカースレッドからハンドラーへ通知されます。`FnEncodeHandler` を使うと
+`mpsc::channel` でメインスレッドへ送れます。
 
 ### デコード
 
@@ -205,20 +150,16 @@ use shiguredo_amf::{
 };
 
 let context = AmfLibrary::instance().create_context()?;
-
 let config = DecoderConfig::new(DecoderCodec::H264);
 
 // デコード結果はワーカースレッドからチャネルで受け取る
 let (frame_tx, frame_rx) = mpsc::channel();
 let mut decoder = Decoder::new(
-    context.clone(),
+    context,
     config,
     FnDecodeHandler::new(
-        move |result: Result<DecodedFrame<()>, shiguredo_amf::Error>| match result {
-            Ok(frame) => {
-                let _ = frame_tx.send(frame);
-            }
-            Err(e) => eprintln!("decode error: {e}"),
+        move |result: Result<DecodedFrame<()>, shiguredo_amf::Error>| {
+            let _ = frame_tx.send(result);
         },
     ),
 )?;
@@ -234,94 +175,52 @@ decoder.decode(buffer, ())?;
 // 残りのフレームをすべて取得する
 decoder.finish()?;
 
-// デコード済みフレームを確認
-for frame in frame_rx.try_iter() {
+for result in frame_rx.try_iter() {
+    let frame = result?;
     let y_plane = frame.surface().get_plane(shiguredo_amf::PlaneType::Y)?;
     println!("decoded: {}x{}", y_plane.get_width(), y_plane.get_height());
 }
 ```
 
 `decode()` には 1 フレーム分のビットストリームを格納した `Buffer` を渡します。
-複数フレームを含むバッファは未対応で、`AMF_REPEAT` が返された場合はエラーになります。
-B フレームを含むストリームでは出力順が入力順と異なりますが、`decode()` に渡した
-`user_data` は対応する出力フレームに付きます。`decode()` は入力 `Buffer` の PTS を
-変更せず、出力 `Surface` の PTS も設定しません。出力 `Surface` の PTS は AMF が
-付けた値になります。入出力の対応付けには `ShiguredoAmfFrameId` プロパティを
-使います。この名前はライブラリの予約名であり、利用者は入力 `Buffer` に
-設定しないでください。
+出力は NV12 のホストメモリです。遅延やサーフェスプールは `DecoderConfig` の
+`low_latency` / `reorder_mode` / `surface_pool_size` で調整できます。
 
-`DecoderConfig` ではデコーダーの遅延とサーフェスプールを調整できます。
-`DecoderConfig::new(codec)` で必須項目だけを指定し、公開フィールドを書き換えて
-残りの項目を指定します。
+API の詳細は [docs.rs](https://docs.rs/shiguredo_amf) を参照してください。
 
-| フィールド | 説明 |
-|-----------|------|
-| `low_latency` | AMF の低遅延デコードを指定する。`None` は AMF の既定値を使う |
-| `reorder_mode` | DPB のリオーダーモード。`None` は AMF の既定値を使う |
-| `surface_pool_size` | デコード用サーフェスプールのサイズ。`0` は AMF が DPB サイズ + 5 を計算する。`None` は AMF の既定値を使う |
+### 動的再設定
 
-`reorder_mode` に `DecoderReorderMode::LowLatency` を指定すると、DPB の遅延が
-0 になります。このモードはフレームの並べ替えを伴わないストリームを前提とし、
-B フレームと P フレームは並べ替えを伴わない場合に限り含められます。並べ替えを
-伴うストリームを投入した場合の出力順は保証されず、提示順の復元も行われません。
-`low_latency` は AMF の `LowLatencyDecode` を設定しますが、出力フレームの順序は
-`reorder_mode` で決まります。
-
-`surface_pool_size` が小さすぎる場合、出力サーフェスが不足して `decode()` が
-エラーになります。`0` を指定すると AMF が DPB サイズ + 5 をプールサイズとして
-計算します。
-
-AMF の DPB サイズは Linux の AMF ランタイム 1.5.3.0 で設定が許可されないため、
-`DecoderConfig` では指定できません。
-
-フレームデータは unsafe な `Plane::as_slice` / `Plane::as_mut_slice` で、ビットストリームは
-unsafe な `Buffer::as_slice` / `Buffer::as_mut_slice` で読み書きします。`Plane` のスライスは
-`hpitch * vpitch` バイトで、各行の先頭は `hpitch` バイト間隔です。
-ホストメモリかつタイル状でないプレーンだけが対象です。`Buffer::set_size` は
-確保済みサイズ以下の範囲でサイズを変更でき、確保済みサイズを超える値はエラーに
-なります。PTS と Duration の単位は 100 ナノ秒です。
-
-### GPU デバイスの選択
-
-`AmfLibrary::create_context()` は既定の Vulkan デバイスで初期化した `Context` を
-返します。複数 GPU を搭載した環境で使用する GPU を選ぶ場合は、
-`AmfLibrary::create_uninitialized_context()` で Vulkan 未初期化の
-`UninitializedContext` を作成し、利用者が Vulkan デバイスを作成してから
-`UninitializedContext::init_vulkan_with_device()` で初期化します。
+`Encoder::reconfigure` で、エンコード中にフレームレートやビットレートを変更できます。
 
 ```rust
-use shiguredo_amf::AmfLibrary;
-use shiguredo_amf::amf::VulkanDevice;
+use shiguredo_amf::ReconfigureParams;
 
-let context = AmfLibrary::instance().create_uninitialized_context()?;
-
-// AMF が要求する Vulkan デバイス拡張を取得する
-let extensions = context.vulkan_device_extensions()?;
-
-// 利用者が Vulkan インスタンスと物理デバイスを選択し、extensions を有効にした
-// VkDevice を作成する (Vulkan の呼び出しは利用者が行う)
-let device = unsafe {
-    VulkanDevice::from_raw(instance, physical_device, vk_device)?
-};
-let context = unsafe {
-    context.init_vulkan_with_device(device)?
-};
+encoder.reconfigure(ReconfigureParams {
+    framerate_num: Some(15),
+    framerate_den: Some(1),
+    target_kbps: Some(3_000),
+    ..ReconfigureParams::default()
+})?;
 ```
 
-`vulkan_device_extensions()` は Vulkan デバイスを作成する前に呼び出せます。
-返った拡張名を `VkDeviceCreateInfo::ppEnabledExtensionNames` に指定してください。
-AMF は既定で、コンピュート対応キューファミリ内のインデックス 0 のキューを使うため、
-そのキューを作成した `VkDevice` を渡してください。インスタンス作成、物理デバイス
-選択、拡張と feature の有効化の手順は
-[AMF SDK の `DeviceVulkan.cpp`](https://github.com/GPUOpen-LibrariesAndSDKs/AMF/blob/v1.5.2/amf/public/samples/CPPSamples/common/DeviceVulkan.cpp)
-を参照してください。
+変更できる項目はコーデックによって異なります。詳細は
+[docs.rs](https://docs.rs/shiguredo_amf) を参照してください。
 
-複数 GPU を使う場合は GPU ごとに `Context` を作成します。`Surface` / `Buffer` は
-同じ `Context` のコンポーネントにしか投入できないため、`Context` をまたいだ
-受け渡しはできません。
+### 統計値
 
-`UninitializedContext::init_vulkan()` を使うと、既定の Vulkan デバイスで
-初期化した `Context` を取得できます。拡張一覧を先に取得したい場合に使います。
+`Encoder::stats()` / `Decoder::stats()` で、処理の進行状況を取得できます。
+
+```rust
+let stats = encoder.stats();
+println!("accepted: {}", stats.total_encode_count.get());
+println!("output: {}", stats.total_output_frame_count.get());
+println!("errors: {}", stats.total_error_count.get());
+println!("bits: {}", stats.total_output_bit_count.get());
+println!("reconfigured: {}", stats.total_reconfigure_count.get());
+println!("in flight: {}", stats.in_flight_frames.get());
+```
+
+デコーダーも `Decoder::stats()` で同じように取得できます。
 
 ### コーデック対応状況の確認
 
@@ -348,29 +247,16 @@ for info in &codecs {
 }
 ```
 
-`supported_codecs()` は AMF ランタイムまたは Vulkan デバイスを初期化できない場合に `Err` を返します。
-個々のコーデックの非対応は `decoding` / `encoding` の `None` で表されます。
+`supported_codecs()` は H.264 / H.265 / AV1 / VP9 の各コーデックについて、次の情報を返します。
+
+- デコード / エンコードの可否
+- アクセラレーション種別
+- エンコードの最大プロファイルと最大レベル
+- B フレーム (フレームリオーダリング) の対応可否
+- 入出力の解像度範囲、対応フォーマット、対応メモリ種別、インターレース対応
+- AMF が返すその他のプロパティ
 
 CLI で確認する場合は [amf-check](#amf-check) を利用してください。
-
-## サンプル
-
-引数のライブラリには [noargs](https://github.com/sile/noargs) を利用しています。
-
-### amf-check
-
-AMF がこの環境で利用できるかを確認する CLI です。
-AMF ランタイムのロード、バージョン照会、コーデック対応状況の表示、エンコーダー / デコーダーの初期化確認を行います。
-
-```bash
-cargo run -p amf-check
-```
-
-エンコーダー初期化時の解像度を指定する場合:
-
-```bash
-cargo run -p amf-check -- --width 1280 --height 720
-```
 
 ## サポートコーデック
 
@@ -391,122 +277,50 @@ cargo run -p amf-check -- --width 1280 --height 720
 | AV1       | `DecoderCodec::Av1` |
 | VP9       | `DecoderCodec::Vp9` |
 
-VP9 はデコードのみに対応します。AMF に VP9 エンコーダーがないため、`CodecConfig` に
-VP9 はなく、`supported_codecs` が返す VP9 の `encoding` は `None` になります。
-
-実機で確認済みの VP9 は Profile 0 (8bit 4:2:0) です。10bit (Profile 2) と
-4:2:2 / 4:4:4 は、出力フォーマットが NV12 固定のため未検証です。
-
-VP9 の superframe は 1 フレームずつ分割して投入してください。不可視フレーム
-(`show_frame=0`) や `show_existing_frame` を含むストリームは、入力と出力の対応付けが
-できないため、`DecodeHandler` にエラーが通知されます。
+VP9 はデコードのみに対応します。
 
 ## サポートフォーマット
 
-### エンコード入力フォーマット (`FrameFormat`)
+エンコード入力フォーマットは `FrameFormat` で指定します。8bit の `Nv12` / `Yv12` /
+`I420` / `Bgra` / `Argb` / `Rgba` / `Yuy2` は利用できます。10bit の `P010` は HEVC では
+`HevcProfile::Main10` が必要で、AV1 は `Av1Profile::Main` で利用できます。
+`Uyvy` / `Ayuv` / `Y210` / `Y410` の利用可否は GPU と AMF の実装に依存し、
+`P012` / `P016` / `Y416` は利用できません。
 
-入力フォーマットのビット深度は `FrameFormat` ごとに決まります。
-H.264 は 8bit 入力のみ、HEVC と AV1 は 8bit と 10bit の入力に対応します。
-HEVC のプロファイルは `HevcProfile` で指定します。
-HEVC の 10bit 入力には `HevcProfile::Main10` が必要です。`HevcProfile::Main` またはプロファイル未指定 (既定の Main) との組み合わせは `Encoder::new` がエラーを返します。
-入力フォーマットとプロファイルの組み合わせを利用できるかは GPU と AMF の実装に依存し、利用できない場合は `Encoder::new` がエラーを返します。
-`HevcProfile::Main10` と 8bit 入力の組み合わせも、AMF が受け付ければ利用できます。
-
-| フォーマット | `FrameFormat` | 説明 | 利用条件 |
-|---|---|---|---|
-| NV12 | `FrameFormat::Nv12` | Semi-Planar YUV 4:2:0 8bit | 利用できる |
-| YV12 | `FrameFormat::Yv12` | Planar YUV 4:2:0 8bit (Y+V+U) | 利用できる |
-| I420 | `FrameFormat::I420` | Planar YUV 4:2:0 8bit (Y+U+V) | 利用できる |
-| BGRA | `FrameFormat::Bgra` | Packed BGRA 8bit | 利用できる |
-| ARGB | `FrameFormat::Argb` | Packed ARGB 8bit | 利用できる |
-| RGBA | `FrameFormat::Rgba` | Packed RGBA 8bit | 利用できる |
-| YUY2 | `FrameFormat::Yuy2` | Packed YUV 4:2:2 8bit | 利用できる |
-| UYVY | `FrameFormat::Uyvy` | Packed YUV 4:2:2 8bit | GPU と AMF の実装に依存する |
-| P010 | `FrameFormat::P010` | Semi-Planar YUV 4:2:0 10bit (16bit 格納、上位 10bit) | GPU と AMF の実装に依存する。HEVC は `HevcProfile::Main10` が必須、AV1 は `Av1Profile::Main` で利用できる |
-| P012 | `FrameFormat::P012` | Semi-Planar YUV 4:2:0 12bit (16bit 格納、上位 12bit) | AMF が 8bit / 10bit 以外を扱えないため、初期化に失敗する |
-| P016 | `FrameFormat::P016` | Semi-Planar YUV 4:2:0 16bit (16bit 格納、全ビット) | AMF が 8bit / 10bit 以外を扱えないため、初期化に失敗する |
-| Y210 | `FrameFormat::Y210` | Packed YUV 4:2:2 10bit (16bit ワードの上位 10bit) | GPU と AMF の実装に依存する |
-| AYUV | `FrameFormat::Ayuv` | Packed YUV 4:4:4 8bit | GPU と AMF の実装に依存する |
-| Y410 | `FrameFormat::Y410` | Packed YUV 4:4:4 10bit (32bit ワード、下位から U (10bit) / Y (10bit) / V (10bit) / A (2bit)) | GPU と AMF の実装に依存する |
-| Y416 | `FrameFormat::Y416` | Packed YUV 4:4:4 16bit (16bit ワード、全ビット) | AMF が 8bit / 10bit 以外を扱えないため、初期化に失敗する |
-
-### デコード出力フォーマット
-
-| フォーマット | 説明 |
-|---|---|
-| NV12 | Semi-Planar YUV 4:2:0 8bit |
+デコード出力は `NV12` だけです。
 
 ## サポートプロファイル
 
-### H.264 (`H264Profile`)
+H.264 は `Baseline` / `Main` / `High` / `ConstrainedBaseline` / `ConstrainedHigh`、
+HEVC は `Main` / `Main10`、AV1 は `Main` に対応します。
+それぞれ `H264Profile` / `HevcProfile` / `Av1Profile` で指定します。
 
-| プロファイル | `H264Profile` |
-|------------|--------------|
-| Baseline   | `H264Profile::Baseline` |
-| Main       | `H264Profile::Main` |
-| High       | `H264Profile::High` |
-| Constrained Baseline | `H264Profile::ConstrainedBaseline` |
-| Constrained High | `H264Profile::ConstrainedHigh` |
+## 主な設定
 
-### H.265 (`HevcProfile`)
+- レート制御: `EncoderConfig::rate_control_mode`
+- QP 範囲: `H264EncoderConfig::qp_range` など
+- 用途と品質: `EncoderConfig::usage` と `EncoderConfig::quality_preset`
+- B フレーム: `EncoderConfig::b_pic_pattern`
+- デコーダーの遅延: `DecoderConfig` の `low_latency` / `reorder_mode` / `surface_pool_size`
 
-| プロファイル | `HevcProfile` |
-|------------|--------------|
-| Main       | `HevcProfile::Main` |
-| Main10     | `HevcProfile::Main10` |
+## サンプル
 
-### AV1 (`Av1Profile`)
+引数のライブラリには [noargs](https://github.com/sile/noargs) を利用しています。
 
-| プロファイル | `Av1Profile` |
-|------------|-------------|
-| Main       | `Av1Profile::Main` |
+### amf-check
 
-## レート制御モード (`RateControlMode`)
+AMF がこの環境で利用できるかを確認する CLI です。
+AMF ランタイムのロード、バージョン照会、コーデック対応状況の表示、エンコーダー / デコーダーの初期化確認を行います。
 
-| モード | `RateControlMode` | 説明 |
-|---|---|---|
-| CQP  | `RateControlMode::Cqp` | 固定 QP |
-| CBR  | `RateControlMode::Cbr` | 固定ビットレート |
-| VBR  | `RateControlMode::Vbr` | ピーク制約付き可変ビットレート |
-| LCVBR | `RateControlMode::LatencyConstrainedVbr` | レイテンシ制約付き可変ビットレート |
-| QVBR | `RateControlMode::QualityVbr` | 品質 VBR |
-| HQVBR | `RateControlMode::HighQualityVbr` | 高品質 VBR |
-| HQCBR | `RateControlMode::HighQualityCbr` | 高品質 CBR |
+```bash
+cargo run -p amf-check
+```
 
-## エンコーダーの用途 (`EncoderUsage`)
+エンコーダー初期化時の解像度を指定する場合:
 
-`EncoderConfig::usage` に指定します。
-
-| 用途 | `EncoderUsage` | 説明 |
-|---|---|---|
-| トランスコーディング | `EncoderUsage::Transcoding` | 変換・編集向け。圧縮効率とスループットを優先する |
-| 超低遅延 | `EncoderUsage::UltraLowLatency` | ゲームストリーミングなど、対話性を優先する用途向け |
-| 低遅延 | `EncoderUsage::LowLatency` | ビデオ会議やリモートデスクトップ向け。画質維持のためビットレートが一時的に超過することがある |
-| カメラ入力 | `EncoderUsage::Webcam` | 低遅延のビデオ会議向け |
-| 高画質 | `EncoderUsage::HighQuality` | 性能より主観画質を優先する |
-| 低遅延かつ高画質 | `EncoderUsage::LowLatencyHighQuality` | 低遅延と高画質の両立を重視する |
-
-既定は `EncoderUsage::Transcoding` です。
-用途は AMF が用意する既定パラメータ一式を選びます。
-`EncoderConfig` の他のフィールドで指定した値は用途の既定より優先されます。
-`rate_control_mode` も常に設定されるため、用途ごとの既定レート制御メソッドより優先されます。
-用途の既定に関係なく、`QueryOutput` のタイムアウトは 0 に設定します。これは出力の回収をブロックさせないためです。
-H.264 / HEVC と AV1 では `EncoderUsage` の enum 値の並びが異なります (AV1 は `UltraLowLatency` と `LowLatency` が逆) が、`shiguredo_amf` 側ではこの enum で抽象化されています。
-
-## 品質プリセット (`QualityPreset`)
-
-`EncoderConfig::quality_preset` に指定します。
-
-| プリセット | `QualityPreset` | 説明 |
-|---|---|---|
-| 速度優先 | `QualityPreset::Speed` | 画質よりエンコード速度を優先する |
-| バランス | `QualityPreset::Balanced` | エンコード速度と画質のバランスを取る |
-| 画質優先 | `QualityPreset::Quality` | エンコード速度より画質を優先する |
-| 高画質 | `QualityPreset::HighQuality` | 最も高い画質を優先する |
-
-`None` のときは用途とコーデックに応じた AMF の既定値を使います。例えば `Webcam` の既定は H.264 が `Speed`、HEVC と AV1 が `Quality` です。`Some` のときは、その既定値より指定した値が優先されます。
-レート制御モードには `EncoderConfig::rate_control_mode` を使います。品質プリセットはそのモードの中でのエンコード速度と画質のバランスを変えます。
-AMF SDK 内部の enum 値は H.264 / HEVC / AV1 で異なりますが、`shiguredo_amf` 側ではこの enum で抽象化されています。
+```bash
+cargo run -p amf-check -- --width 1280 --height 720
+```
 
 ## ライセンス
 

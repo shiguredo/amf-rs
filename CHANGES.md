@@ -21,6 +21,7 @@
   - @melpon
 - [CHANGE] `supported_codecs` の戻り値と `CodecInfo` の能力情報を AMF が返す値に基づく形に変更する
   - `supported_codecs` は `Result<Vec<CodecInfo>, Error>` を返す
+  - AMF ランタイムまたは Vulkan デバイスを初期化できない場合は `Err` を返す
   - `CodecInfo` の `decoding` / `encoding` を `Option` に変更する
   - `DecodingInfo::supported` / `EncodingInfo::supported` を削除する
   - `hardware_accelerated` / `supports_multi_pass` / `profiles` を削除する
@@ -28,7 +29,8 @@
   - `supports_frame_reordering` を `bool` から `Option<bool>` に変更する
   - `DecodingInfo` の `Eq` 実装を削除する
   - `max_profile: Option<VideoProfile>` / `max_level: Option<i64>` を追加する
-  - `AccelerationType` / `SurfaceFormat` / `MemoryType` / `SurfaceFormatCapability` / `MemoryTypeCapability` / `IoCapabilities` / `Property` / `Value` を追加する
+  - `DecodingInfo` / `EncodingInfo` に `input` / `output` (`IoCapabilities`) を追加する
+  - `AccelerationType` / `SurfaceFormat` / `MemoryType` / `SurfaceFormatCapability` / `MemoryTypeCapability` / `IoCapabilities` / `Property` / `Value` / `VideoProfile` を追加する
   - `properties` に AMF が返した全プロパティを追加する
   - @melpon
 - [CHANGE] `amf::Plane` の寿命を取得元の `Surface` に縛るように変更する
@@ -41,9 +43,11 @@
   - @voluntas
 - [CHANGE] `amf::Context` 周りの整理
   - `Context::init_vulkan` を削除し、`AmfLibrary::create_context` で既定の Vulkan デバイスで初期化した `amf::Context` を作成できるようにする
-  - `from_raw` / `from_raw_acquired` を非公開にする
-  - `terminate` / `into_raw` を削除する
-  - `PartialEq` / `Eq` を実装する
+  - `Context` の `from_raw` / `from_raw_acquired` を非公開にする
+  - `Surface` / `Buffer` / `PropertyStorage` の `from_raw` / `from_raw_acquired` が `Context` を受け取るように変更する
+  - `Component` の `from_raw` / `from_raw_acquired` を非公開にする
+  - `Context::terminate` / `Context::into_raw` を削除する
+  - `Context` に `PartialEq` / `Eq` を実装する
   - `Encoder::new` / `Decoder::new` が `Context` を受け取るように変更する
   - `amf` の各オブジェクトにコンテキストを取得する `context` 関数を追加する
   - @melpon
@@ -52,19 +56,21 @@
   - `ReconfigureParams` の `qpb` / `gop_pic_size` は `Encoder::reconfigure` がエラーを返す
   - @melpon
 - [CHANGE] `amf` モジュールのフレームデータ API から `ffi` の型を排除する
-  - `Surface::get_plane` が `PlaneType` を、`Surface::convert` / `Context::alloc_surface` / `Context::alloc_buffer` が `MemoryType` を、`Context::alloc_surface` / `Component::init` が `SurfaceFormat` を受け取るように変更する
+  - `Surface::get_plane` が `PlaneType` を、`Surface::convert` / `Context::alloc_surface` /
+    `Context::alloc_buffer` が `MemoryType` を、`Context::alloc_surface` /
+    `Component::init` が `SurfaceFormat` を受け取るように変更する
   - @melpon
 - [CHANGE] `amf::Buffer::get_property` を削除する
   - プロパティの取得には `amf::Buffer::property_storage` から `amf::PropertyStorage::get_property` を使う
   - @melpon
-- [CHANGE] `Encoder` が出力 `Buffer` の PTS を設定する挙動を削除する
-  - 出力 `Buffer` の PTS は AMF が付けた値のままになる
+- [CHANGE] `Encoder::encode` が入力 `Surface` の PTS を設定する挙動を削除する
+  - 入力 `Surface` の PTS は変更せず、出力 `Buffer` の PTS も設定しない。出力 `Buffer` の PTS は AMF が付けた値になる
   - 時刻が必要な場合は `user_data` などで利用者が管理する
   - @melpon
 - [CHANGE] `EncoderConfig` に `b_pic_pattern` を追加し、B フレームを有効にできるようにする
   - `EncoderConfig` の公開フィールドを追加するため、構造体リテラルでの構築はコンパイルエラーになる
   - AMF の仕様上の値域は H.264 が 0-3、AV1 が 0-127 で、`0` は B フレームなし
-  - B フレームに対応していない GPU で 1 以上を指定した場合と、B フレームを扱わない HEVC で指定した場合は `Encoder::new` がエラーを返す
+  - B フレームに対応していないと AMF が報告した GPU で 1 以上を指定した場合と、B フレームを扱わない HEVC で指定した場合は `Encoder::new` がエラーを返す
   - `AMF_NEED_MORE_INPUT` を入力の受理として扱う
   - 入力フレームに一意な値を設定して入出力を対応付け、入力順と出力順が異なっても `user_data` を対応するフレームへ付ける
   - @melpon
@@ -75,13 +81,11 @@
   - 標準エラーから `Error` への `From` を実装し、`Error::source()` で内側の標準エラーを取得できるようにする
   - `Display` の形式を変更し、AMF のエラーは操作名とステータスを 1 回だけ表示する。Rust の関数名はメッセージに含めない
   - @melpon
-- [CHANGE] `Decoder` が入力 `Buffer` の PTS を変更し、出力 `Surface` へ引き継ぐ挙動を削除する
-  - 入力 `Buffer` の PTS は変更せず、出力 `Surface` の PTS も設定しない。出力 `Surface` の PTS は AMF が付けた値になる
-  - 入出力の対応付けには `ShiguredoAmfFrameId` プロパティを使う。この名前はライブラリの予約名になる
-  - @melpon
-- [CHANGE] `Decoder::finish()` が残りの出力を回収できなかった場合に `Err` を返すように変更する
-  - `Drain` の失敗時や、`AMF_EOF` の待機中の終端エラーで `Ok` を返していたのを `Err` にする
-  - `Encoder::finish()` / `Decoder::finish()` がエラーを返した後の操作は `Drop` 以外を保証しない
+- [CHANGE] `Encoder::finish()` / `Decoder::finish()` が入力の受理後は `AMF_EOF` まで出力を回収してから戻るように変更する
+  - `Drain` が `AMF_INPUT_FULL` を返した場合は出力を回収しながら再試行する
+  - 5 秒のタイムアウトを削除し、ワーカーの完了まで待つ
+  - `finish` 済みの場合、または残りの出力を回収できなかった場合は `Err` を返す
+  - `finish()` がエラーを返した後の操作は `Drop` 以外を保証しない
   - @melpon
 - [CHANGE] `Encoder` / `Decoder` を `finish` せずに drop した場合の挙動を変更する
   - drop の処理中に、すでに `encode()` / `decode()` が成功したフレームの出力が通知されることがある
@@ -158,14 +162,15 @@
   - `DecoderCodec::Vp9` を追加する
   - `VideoCodecType::Vp9` を追加し、`supported_codecs` に含める
   - @melpon
+- [ADD] `Encoder::context` / `Decoder::context` を追加する
+  - @melpon
 - [FIX] `Decoder::decode` の `user_data` が B フレームを含むストリームで誤ったフレームに付く問題を修正する
   - 入力 `Buffer` に一意な frame ID を設定し、出力 `Surface` の frame ID で `user_data` を引き当てる
-  - 入力 `Buffer` の PTS を対応付けに使わず、変更もしない
-  - `finish()` を呼び出した後に `decode()` を呼ぶとエラーを返す
-  - `finish()` はワーカーの完了まで待つ
-  - 複数フレームを含むバッファは `AMF_REPEAT` を検出してエラーを返す
   - @melpon
-- [FIX] `amf` モジュールで `Clone` したハンドル経由のメソッド呼び出しがデータ競合する問題を修正し、コンポーネントに投入するオブジェクトが共有されていないことを確認する
+- [FIX] `amf` モジュールで `Clone` したハンドル経由のメソッド呼び出しがデータ競合する問題を修正する
+  - `amf` の各ハンドルの操作をオブジェクトごとのロックで直列化し、`Sync` を実装する
+  - @melpon
+- [FIX] `Encoder::encode` / `Decoder::decode` が、他のハンドルと共有されている `Surface` / `Buffer` と、自分と異なる `Context` のオブジェクトを拒否するようにする
   - @melpon
 - [FIX] `AmfLibrary` / `amf::Context` / `Component::init` の AMF 呼び出しがデータ競合し、複数スレッドから Encoder / Decoder を並列に初期化した際に SIGSEGV する問題を修正する
   - @melpon
@@ -176,10 +181,9 @@
   - @melpon
 - [FIX] AV1 エンコーダーで `Av1Profile` を指定してもプロファイルが設定されない問題を修正する
   - @melpon
-- [FIX] `QueryOutput` の終端エラーが通知されず、`finish()` が待ち続ける、またはタイムアウトする問題を修正する
+- [FIX] `QueryOutput` の終端エラーがハンドラーへ通知されない問題を修正する
   - `QueryOutput` の終端エラーをハンドラーへ通知し、ワーカーを終了する
-  - エンコーダーの `finish()` で、対応する入力がない出力と、出力が得られなかった入力を通知する
-  - エンコーダーの `finish()` の 5 秒タイムアウトを削除し、ワーカーの完了まで待つ
+  - 対応する入力がない出力と、出力が得られなかった入力をハンドラーへ `Err` として通知する
   - @melpon
 - [FIX] `EncodeOptions::frame_type` で指定した `I` / `P` が無視される問題を修正する
   - `IDR` / `I` / `P` を `IDR`、`I`、`P` の順に優先して AMF の強制ピクチャタイプに対応付ける
@@ -192,53 +196,44 @@
   - `SWITCH` / `SHOW_EXISTING` と未知の値は `Unknown` にする
   - @melpon
 - [FIX] `finish` 後の操作を拒否し、`Drop` の後始末を明確にする
-  - `Encoder::encode()` / `Encoder::reconfigure()` / `Encoder::finish()` は `finish` 済みの場合に AMF を呼ばずにエラーを返す
-  - `Encoder::finish()` / `Decoder::finish()` はワーカーの終了を join まで待つ
+  - `Encoder::encode()` / `Encoder::reconfigure()` / `Encoder::finish()` / `Decoder::decode()` / `Decoder::finish()` は `finish` 済みの場合に AMF を呼ばずにエラーを返す
   - `Drop` ではハンドラーの panic と `Component::terminate` の失敗を `tracing::error!` で記録する
   - @melpon
-- [FIX] `AmfLibrary::create_context` が `AMFContext1` の `InitVulkan` を取得できない場合に参照を解放しない問題を修正する
+- [FIX] `AMFContext1` の `InitVulkan` を取得できない場合に `AMFContext1` の参照を解放しない問題を修正する
+  - `QueryInterface` で取得した `AMFContext1` は `InitVulkan` の成否にかかわらず解放する
   - @melpon
 - [FIX] 解像度が変化するストリームでもデコードを継続できるようにする
   - 解像度の変化を検出したら、保留中の出力を通知したあと新しい解像度でデコーダーを作り直し、変化を検出したフレームを再投入する
   - @melpon
-- [FIX] デコーダーが出力 GPU サーフェスを Host メモリへ変換せずに保持し、出力サーフェスの枯渇でデコードが停止する問題を修正する
-  - 出力を取得した直後に Host メモリへ変換し、GPU サーフェスをデコーダーの出力プールへ返す
-  - エンコーダーの出力の扱いは変えない
-  - @melpon
 
 ### misc
 
+- [ADD] AMF ランタイムとコーデック対応状況を確認する `examples/amf-check` を追加する
+  - @voluntas
 - [UPDATE] レート制御メソッドの設定に bindgen の enum を使うようにする
   - H.264 / HEVC / AV1 のレート制御メソッドをコーデック別の enum へ変換して設定する
   - @melpon
-- [UPDATE] `ffi` の `AMF_SURFACE_FORMAT` / `AMF_MEMORY_TYPE` / `AMF_VARIANT_TYPE` を newtype enum に変更する
+- [UPDATE] `ffi` の `AMF_SURFACE_FORMAT` / `AMF_MEMORY_TYPE` / `AMF_DATA_TYPE` / `AMF_VARIANT_TYPE` を newtype enum に変更する
   - @melpon
 - [UPDATE] shiguredo-rust と AGENTS.md の規約に合わせて lint 抑制・`.unwrap()`・ログ出力・コメントを整理する
   - `#[allow]` を `#[expect]` に置き換え、bindgen の生成コードを専用モジュールに閉じ込める
   - `log` を `tracing` に置き換え、毎フレーム実行されるログを `trace` に下げる
   - `.unwrap()` を `.expect("MESSAGE")` に置き換え、英語のコメントを日本語にする
   - @melpon
-- [ADD] AMF ランタイムとコーデック対応状況を確認する `examples/amf-check` を追加する
-  - @voluntas
 - [UPDATE] CI / Release の GitHub Actions ランナーに Ubuntu 26.04 を追加する
   - @voluntas
 - [UPDATE] `prek.toml` を shiguredo-rust 規約に合わせて整備する (builtin フック拡充、tombi、`cargo test` の pre-push 限定)
   - @voluntas
 - [UPDATE] `rust-toolchain.toml` のツールチェインを MSRV の 1.95 に固定し、CI と devcontainer のツールチェインも 1.95 に統一する
   - @voluntas
-- [UPDATE] `examples/amf-check` の `supported_codecs` 呼び出しを 1 回にまとめる
-  - Vulkan デバイスの初期化とコーデックのプローブの重複をなくす
-  - @melpon
 - [UPDATE] Windows / macOS 向けの未使用の分岐を削除する
   - @melpon
-
 - [UPDATE] encode / decode のワーカー実装を共通化する
   - コマンド処理、`QueryOutput` のポーリング、frame ID による入出力の対応付け、終了処理、`Drop` を `src/worker.rs` にまとめる
   - `QueryOutput` が返す出力は共通の `Data` 型で保持し、ハンドラーへの通知時に最終的なフレーム型へ変換する
   - 入力の frame ID の発行、入力プロパティへの設定、`SubmitInput` の呼び出しも共通化する
   - コマンドを 1 つ処理した後にも `QueryOutput` を回収する
-  - `SubmitInput` のリトライ対象を `AMF_INPUT_FULL` と `AMF_DECODER_NO_FREE_SURFACES` に共通化し、エンコーダーの `AMF_REPEAT` はリトライせずエラーにする
-  - `finish` はエンコーダー・デコーダーとも `AMF_EOF` まで出力を回収する
+  - `SubmitInput` のリトライ対象を `AMF_INPUT_FULL` と `AMF_DECODER_NO_FREE_SURFACES` に共通化し、`AMF_REPEAT` はリトライせずエラーにする
   - @melpon
 
 ## 2026.3.0
