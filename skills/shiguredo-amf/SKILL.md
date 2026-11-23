@@ -169,17 +169,24 @@ Vulkan デバイスを選択する場合は `AmfLibrary::create_uninitialized_co
 `UninitializedContext` を作成し、`UninitializedContext::vulkan_device_extensions()` で
 拡張を取得してから `UninitializedContext::init_vulkan_with_device(amf::VulkanDevice)` で
 初期化する。`VulkanDevice` は `VkInstance` / `VkPhysicalDevice` /
-`VkDevice` の 3 つのハンドルを保持する。3 つのハンドルは `Context` とそこから
-作成したハンドルをすべて破棄するまで有効にしておく。`Context::vulkan_device()` は
-AMF が使用しているハンドルを返す。取得元の `Context` から取得したハンドルを
-別の `Context` に渡す場合は、取得元の `Context` を後に破棄する。
+`VkDevice` の 3 つのハンドルを保持する。3 つのハンドルは、そのハンドルを使用する
+すべての `Context` と、そこから取得したすべての AMF オブジェクトを破棄するまで
+有効にしておく。`Context::vulkan_device()` は AMF が使用しているハンドルを返す。
+取得元の `Context` から取得したハンドルを別の `Context` に渡す場合は、取得元の
+`Context` を、そのハンドルを使用するすべての `Context` と AMF オブジェクトより後に
+破棄する。
 
 `UninitializedContext::vulkan_device_extensions()` は AMF が要求する Vulkan デバイス拡張の
-一覧を返し、Vulkan デバイスを作成する前に呼び出せる。AMF はコンピュート対応の
-キューファミリのインデックス 0 のキューを使うため、そのキューを作成した
-`VkDevice` を渡す。Vulkan インスタンスの作成、物理デバイスの選択、拡張と feature の
-有効化は利用者が行う。AMF は利用者が渡した Vulkan デバイスを破棄しないため、
-`Context` を破棄した後に利用者が Vulkan のハンドルを破棄する。
+一覧を返し、Vulkan デバイスを作成する前に呼び出せる。AMF SDK のサンプルと実機では
+初期化前でも取得できるが、AMF の API リファレンスは未初期化の `Context` に対して
+`AMF_NO_DEVICE` を返すとしている。AMF が未初期化の `Context` を受け付けない場合は
+`Error::Amf` を返す。AMF は既定で、コンピュート対応キューファミリ内のインデックス 0 の
+キューを使うため、そのキューを作成した `VkDevice` を渡す。Vulkan インスタンスの作成、
+物理デバイスの選択、拡張と feature の有効化は利用者が行う。AMF は渡された Vulkan
+デバイスの所有権を変更しない。既定の Vulkan デバイスは AMF が所有し、利用者は
+破棄しない。`VulkanDevice::from_raw` は所有権を変更せず、渡されたハンドルの所有者の
+ままである。利用者が所有するデバイスは、それを使用するすべての `Context` と AMF
+オブジェクトを破棄した後に利用者が破棄する。
 
 `Surface` / `Buffer` / `Plane` / `PropertyStorage` / `Component` は `Clone` 実装で `Acquire` を呼び、
 `Drop` 実装で `Release` を呼ぶ。`Surface` / `Buffer` / `PropertyStorage` は
@@ -480,13 +487,13 @@ let extensions = context.vulkan_device_extensions()?;
 
 // 利用者が Vulkan インスタンスと物理デバイスを選択し、extensions を有効にした
 // VkDevice を作成する (Vulkan の呼び出しは利用者が行う)
-let device = unsafe { VulkanDevice::from_raw(instance, physical_device, vk_device) };
+let device = unsafe { VulkanDevice::from_raw(instance, physical_device, vk_device)? };
 let context = unsafe { context.init_vulkan_with_device(device)? };
 ```
 
-`vulkan_device_extensions()` は Vulkan デバイスを作成する前に呼び出せる。返った拡張名を `VkDeviceCreateInfo::ppEnabledExtensionNames` に指定する。AMF はコンピュート対応のキューファミリのインデックス 0 のキューを使うため、そのキューを作成した `VkDevice` を渡す。インスタンス作成、物理デバイス選択、拡張と feature の有効化の手順は AMF SDK の `DeviceVulkan.cpp` を参照する。
+`vulkan_device_extensions()` は Vulkan デバイスを作成する前に呼び出せる。AMF SDK のサンプルと実機では初期化前でも取得できるが、AMF の API リファレンスは未初期化の `Context` に対して `AMF_NO_DEVICE` を返すとしている。AMF が未初期化の `Context` を受け付けない場合は `Error::Amf` を返す。返った拡張名を `VkDeviceCreateInfo::ppEnabledExtensionNames` に指定する。AMF は既定で、コンピュート対応キューファミリ内のインデックス 0 のキューを使うため、そのキューを作成した `VkDevice` を渡す。インスタンス作成、物理デバイス選択、拡張と feature の有効化の手順は AMF SDK の `DeviceVulkan.cpp` を参照する。
 
-`Context::vulkan_device()` は `Context` が使用している Vulkan デバイスのハンドルを返す。既定の `Context` から取得したハンドルを別の `Context` に渡す場合、取得元の `Context` を新しい `Context` より後に破棄する。ハンドルは取得元の `Context` が生きている間だけ有効である。複数 GPU を使う場合は GPU ごとに `Context` を作成する。
+`Context::vulkan_device()` は `Context` が使用している Vulkan デバイスのハンドルを返す。ハンドルの寿命と破棄責任は「AMF オブジェクトラッパー」の Vulkan デバイスの節を参照する。複数 GPU を使う場合は GPU ごとに `Context` を作成する。
 
 `UninitializedContext::init_vulkan()` を使うと、既定の Vulkan デバイスで初期化した `Context` を取得できる。拡張一覧を先に取得したい場合に使う。
 

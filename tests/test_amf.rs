@@ -1033,9 +1033,9 @@ fn test_init_vulkan_with_device_encodes() {
     drop(source_context);
 }
 
-/// null の Vulkan ハンドルを指定した UninitializedContext の初期化が拒否されることを確認する
+/// null の Vulkan ハンドルを指定した VulkanDevice の作成が拒否されることを確認する
 #[test]
-fn test_init_vulkan_with_null_device_is_rejected() {
+fn test_from_raw_with_null_handles_is_rejected() {
     let source_context = helpers::create_context();
     let device = source_context
         .vulkan_device()
@@ -1044,16 +1044,13 @@ fn test_init_vulkan_with_null_device_is_rejected() {
 
     // 3 つのハンドルのいずれかが null である場合と、すべて null である場合を確認する
     let cases = [
-        unsafe { VulkanDevice::from_raw(null, device.physical_device(), device.device()) },
-        unsafe { VulkanDevice::from_raw(device.instance(), null, device.device()) },
-        unsafe { VulkanDevice::from_raw(device.instance(), device.physical_device(), null) },
-        unsafe { VulkanDevice::from_raw(null, null, null) },
+        (null, device.physical_device(), device.device()),
+        (device.instance(), null, device.device()),
+        (device.instance(), device.physical_device(), null),
+        (null, null, null),
     ];
-    for (index, case) in cases.into_iter().enumerate() {
-        let context = AmfLibrary::instance()
-            .create_uninitialized_context()
-            .expect("Context の作成に失敗");
-        let error = unsafe { context.init_vulkan_with_device(case) }
+    for (index, (instance, physical_device, device_handle)) in cases.into_iter().enumerate() {
+        let error = unsafe { VulkanDevice::from_raw(instance, physical_device, device_handle) }
             .expect_err("null の Vulkan ハンドルが受理された");
         assert!(
             matches!(&error, Error::InvalidArgument(_)),

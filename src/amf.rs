@@ -1457,28 +1457,37 @@ impl Drop for Data {
 /// AMF に渡す Vulkan デバイスのハンドル一式
 ///
 /// `VkInstance`、`VkPhysicalDevice`、`VkDevice` の 3 つのハンドルを保持する。
-/// この型は Vulkan のオブジェクトを所有しない。ハンドルの有効性は利用者が保証する。
+/// 3 つのハンドルはすべて非 `null` である。
+/// この型は Vulkan のオブジェクトを所有せず、所有権を変更しない。
 #[derive(Debug, Clone, Copy)]
 pub struct VulkanDevice {
     device: sys::AMFVulkanDevice,
 }
 
 impl VulkanDevice {
-    /// 渡された 3 つのハンドルをそのまま保持する。`null` も保持できる。
+    /// 渡された 3 つのハンドルをそのまま保持する。
     ///
     /// # Safety
     ///
-    /// `null` 以外のハンドルは有効であること。`instance` は有効な `VkInstance` を
-    /// 指し、`physical_device` はそのインスタンスから取得した `VkPhysicalDevice`、
-    /// `device` はその `physical_device` から作成した `VkDevice` を指すこと。
+    /// `instance` は有効な `VkInstance` を指し、
+    /// `physical_device` はそのインスタンスから取得した有効な `VkPhysicalDevice`、
+    /// `device` はその `physical_device` から作成した有効な `VkDevice` を指すこと。
+    ///
+    /// # Errors
+    ///
+    /// `null` を含むハンドルが渡された場合に `Error::InvalidArgument` を返す。
     pub unsafe fn from_raw(
         instance: *mut std::ffi::c_void,
         physical_device: *mut std::ffi::c_void,
         device: *mut std::ffi::c_void,
-    ) -> Self {
+    ) -> Result<Self, Error> {
+        if instance.is_null() || physical_device.is_null() || device.is_null() {
+            return Err(InvalidArgumentError::new("Vulkan device handles must not be null").into());
+        }
+
         // AMF は cbSizeof を構造体のサイズとして参照し、pNext を拡張チェーンと
         // して参照する。拡張を使わないため pNext は null にする。
-        Self {
+        Ok(Self {
             device: sys::AMFVulkanDevice {
                 cbSizeof: std::mem::size_of::<sys::AMFVulkanDevice>(),
                 pNext: std::ptr::null_mut(),
@@ -1486,7 +1495,7 @@ impl VulkanDevice {
                 hPhysicalDevice: physical_device.cast(),
                 hDevice: device.cast(),
             },
-        }
+        })
     }
 
     /// `VkInstance` ハンドルを返す
@@ -1506,7 +1515,7 @@ impl VulkanDevice {
 }
 
 // SAFETY: `VulkanDevice` は Vulkan のハンドル値を保持するだけで、それ自体は
-// Vulkan の操作を行わない。ハンドルの有効性は利用者が保証する。
+// Vulkan の操作を行わない。ハンドルの有効性は取得経路に従う。
 unsafe impl Send for VulkanDevice {}
 unsafe impl Sync for VulkanDevice {}
 
@@ -1628,6 +1637,12 @@ impl ContextInner {
         // SAFETY: AMF は Vulkan で初期化した Context に対して、初期化に使った
         // AMFVulkanDevice を指すポインタを返す。
         let device = unsafe { &*(device as *const sys::AMFVulkanDevice) };
+        if device.hInstance.is_null()
+            || device.hPhysicalDevice.is_null()
+            || device.hDevice.is_null()
+        {
+            return Err(InternalError::new("GetVulkanDevice returned null handles").into());
+        }
         Ok(VulkanDevice { device: *device })
     }
 
@@ -1811,10 +1826,10 @@ impl Context {
         unsafe { Buffer::from_raw_with_acquire(buffer, false, AmfObjectState::new(), self.clone()) }
     }
 
-    /// 初期化に使用した Vulkan デバイスを返す
+    /// 初期化に使用した Vulkan デバイスを返す。
     ///
-    /// 返るハンドルを AMF の操作に使用できるのは、この `Context` が生きている間だけである。
-    /// `Context` を Clone した場合、すべての Clone が破棄されるまで使用できる。
+    /// 返すハンドルは Vulkan デバイスを所有しないため、Vulkan デバイスが破棄された場合
+    /// このハンドルも無効になる。
     ///
     /// # Errors
     ///
@@ -1879,8 +1894,12 @@ impl UninitializedContext {
 
     /// AMF が要求する Vulkan デバイス拡張の一覧を返す
     ///
-    /// Vulkan を初期化する前に呼び出せる。Vulkan デバイスを作成する前に呼び出し、
-    /// 返った拡張を有効にしてデバイスを作成する。
+    /// Vulkan デバイスを作成する前に呼び出し、返った拡張を有効にしてデバイスを
+    /// 作成する。
+    ///
+    /// AMF の API リファレンスは未初期化の `Context` に対して `AMF_NO_DEVICE` を
+    /// 返すとしているが、AMF SDK のサンプルでは Vulkan を初期化する前に呼び出している。
+    /// また、実機でも初期化する前に呼び出しても正しく値が返されることを確認している。
     ///
     /// # Errors
     ///
@@ -1906,24 +1925,22 @@ impl UninitializedContext {
     ///
     /// # Safety
     ///
-    /// `device` のハンドルが、返した `Context` とその `Clone`、およびそれらから
-    /// 取得したすべての AMF オブジェクトを破棄するまで有効であること。
+    /// `device` の 3 つのハンドルは有効であること。`device` は
+    /// [`UninitializedContext::vulkan_device_extensions`] が返す拡張を有効にし、
+    /// AMF が使うコンピュートキュー (コンピュート対応キューファミリ内のインデックス 0)
+    /// を作成した `VkDevice` を指すこと。AMF が要求する feature は公開されていないため、
+    /// AMF SDK の `DeviceVulkan.cpp` と同じ feature を有効にすること。
+    /// ハンドルは、返した `Context` とその `Clone`、およびそれらから取得したすべての
+    /// AMF オブジェクトを破棄するまで有効であること。AMF が所有するデバイスの場合、
+    /// そのデバイスを所有する `Context` も有効であること。
     ///
     /// # Errors
     ///
-    /// `device` のいずれかのハンドルが `null` の場合、または AMF が指定した
-    /// Vulkan デバイスを受け付けない場合にエラーを返す。
+    /// AMF が指定した Vulkan デバイスを受け付けない場合にエラーを返す。
     pub unsafe fn init_vulkan_with_device(
         mut self,
         device: VulkanDevice,
     ) -> Result<Context, Error> {
-        if device.instance().is_null()
-            || device.physical_device().is_null()
-            || device.device().is_null()
-        {
-            return Err(InvalidArgumentError::new("Vulkan device handles must not be null").into());
-        }
-
         // 実測では、AMF は InitVulkan に渡した AMFVulkanDevice へのポインタを
         // GetVulkanDevice でそのまま返す。そのため Context が破棄されるまで構造体を
         // 保持する。Arc を移動してもヒープ上の AMFVulkanDevice のアドレスは変わらない。
