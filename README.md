@@ -137,8 +137,13 @@ for result in frame_rx.try_iter() {
 }
 ```
 
-エンコード結果はワーカースレッドからハンドラーへ通知されます。`FnEncodeHandler` を使うと
-`mpsc::channel` でメインスレッドへ送れます。
+エンコード結果はワーカースレッドからハンドラーへ通知されます。`FnEncodeHandler` は
+クロージャをハンドラーにするラッパーで、上の例ではクロージャの中で `mpsc::channel` を
+使って結果をメインスレッドへ送っています。
+
+ビットレートやレート制御、用途、品質プリセット、B フレームは `EncoderConfig` の
+`target_kbps` / `rate_control_mode` / `usage` / `quality_preset` / `b_pic_pattern` で
+設定できます。
 
 ### デコード
 
