@@ -4,14 +4,104 @@
 //! Clone/Drop で `Acquire`/`Release` による参照カウント管理を自動化する。
 //! vtable の関数ポインタは初期化時にすべて取り出して構造体メンバーに保持するため、
 //! メソッド呼び出しのたびに vtable 検証は行われない。
+//!
+//! ## 生ポインタ
+//!
+//! `as_ptr` が返すポインタは、そのハンドルが生存する間のみ有効である。
+//! `into_raw` は所有権を放棄して生ポインタを返し、`Release` は呼び出し元が行う。
+//! 所有権を放棄したハンドルの `Drop` は `Release` を呼ばない。`into_raw` は
+//! ハンドルが保持していた `Context` も手放すため、生ポインタを利用する間は
+//! 呼び出し元が `Context` の Clone を保持すること。
+//! `as_ptr` / `into_raw` / `get_native` が返す生ポインタ経由の AMF 呼び出しや
+//! メモリアクセスは、呼び出し元の責任である。
+//!
+//! `from_raw` は参照カウントを増やさず、呼び出し元が持つ参照の所有権を引き継ぐ。
+//! `from_raw_acquired` は `Acquire` を呼んで参照カウントを 1 増やし、独立した参照を
+//! 持つハンドルを作成する。公開 `from_raw` / `from_raw_acquired` は新しいハンドル状態を
+//! 作るため、既存のハンドルとハンドル数を共有しない。既存のハンドルがある場合は
+//! 使ってはならない。
+//!
+//! ## フレームデータ
+//!
+//! `Buffer` / `Plane` の内容は unsafe な `as_slice` / `as_mut_slice` でバイトスライスとして
+//! 読み書きできる。対象はホストメモリのオブジェクトに限る。`Plane` のスライスは
+//! `hpitch * vpitch` バイトで、各行の先頭は `hpitch` バイト間隔になる。
+//! スライスが有効な間は、同じ AMF オブジェクトへのアクセスを他のハンドルから行わないこと。
+//! また、返される範囲のメモリが初期化済みであることを呼び出し側が保証すること。
+//!
+//! ## コンポーネントへの投入
+//!
+//! コンポーネントに投入する `Surface` / `Buffer` には、投入前にそのオブジェクトを
+//! 指す他のハンドルが存在してはならない。AMF コンポーネントは投入したオブジェクトを
+//! 解放するまで排他アクセスするため、他のハンドルからアクセスするとデータ競合になる。
 
-use std::ptr;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex, MutexGuard};
 
-use crate::error::{Error, require_vtbl_fn};
+use crate::error::{
+    AmfError, Error, InternalError, InvalidArgumentError, InvalidStateError, require_vtbl_fn,
+};
 use crate::sys;
+use crate::types::{DataType, MemoryType, PlaneType, SurfaceFormat};
+
+// SAFETY: 各型の `Send` / `Sync` の根拠。
+// `AMFComponent` は thread-safe と明記されている (AMF API Reference §2.6.1)。
+// `AMFPropertyStorage` (§2.2.14.1)、`AMFData` (§2.3.1)、`AMFSurface` (§2.3.3.1) は
+// thread-safe ではなく、`AMFPlane` (§2.3.3.3) と `AMFContext` (§2.4.1) には記述がない。
+// そのためスレッドセーフでない操作は共有ロックで直列化する。
+// 参照カウント操作 (`Acquire` / `Release`) は Clone / Drop で行い、共有ロックしない。
+// AMF Wiki の "Guide for Video CODEC Encoder App Developers" §4.2 "AMF Interfaces" に
+// "The default implementation of AMFInterface is thread-safe." と明記されている。
+// ただし `Context` は除く。詳細は `Context` の Drop 実装に記載している。
+
+/// 同じ AMF オブジェクトを指すハンドルで共有する状態
+#[derive(Debug)]
+pub(crate) struct AmfObjectState {
+    /// AMF オブジェクトのスレッドセーフでない操作を直列化する Mutex
+    ///
+    /// AMF のインターフェースはほとんどがスレッドセーフではない。同じオブジェクトへの
+    /// 同時操作はデータ競合になるため、同じオブジェクトを指すハンドル間でこのロックを
+    /// 共有し、操作を 1 つずつ実行する。
+    mutex: Mutex<()>,
+    /// この状態を共有するハンドルの数
+    handles: AtomicUsize,
+}
+
+impl AmfObjectState {
+    /// ハンドル数 0 の新しい状態を作成する
+    pub(crate) fn new() -> Arc<Self> {
+        Arc::new(Self {
+            mutex: Mutex::new(()),
+            handles: AtomicUsize::new(0),
+        })
+    }
+
+    /// 共有ロックを取得する
+    ///
+    /// # Panics
+    /// ロックがポイズンされている場合にパニックする。
+    pub(crate) fn lock(&self) -> MutexGuard<'_, ()> {
+        self.mutex.lock().expect("AMF object lock is poisoned")
+    }
+
+    /// ハンドル数を増やす
+    fn inc(&self) {
+        self.handles.fetch_add(1, Ordering::SeqCst);
+    }
+
+    /// ハンドル数を減らす
+    fn dec(&self) {
+        self.handles.fetch_sub(1, Ordering::SeqCst);
+    }
+
+    /// この状態が複数のハンドルで共有されているかを返す
+    fn is_shared(&self) -> bool {
+        self.handles.load(Ordering::SeqCst) > 1
+    }
+}
 
 // ---------------------------------------------------------------------------
-// PropertyStorage
+// PropertyStorage のラッパー
 // ---------------------------------------------------------------------------
 
 #[derive(Clone, Copy)]
@@ -23,61 +113,98 @@ struct PropertyStorageFuncs {
         *const sys::wchar_t,
         sys::AMFVariantStruct,
     ) -> sys::AMF_RESULT,
+    get_property: unsafe extern "C" fn(
+        *mut sys::AMFPropertyStorage,
+        *const sys::wchar_t,
+        *mut sys::AMFVariantStruct,
+    ) -> sys::AMF_RESULT,
 }
 
 /// `AMFPropertyStorage` の RAII ラッパー
-///
-/// `Surface` や `Component` から `property_storage()` で取得する。
-/// 取得時に `Acquire` が呼ばれ、`Drop` 時に `Release` が呼ばれる。
 pub struct PropertyStorage {
     ptr: *mut sys::AMFPropertyStorage,
     f: PropertyStorageFuncs,
+    state: Arc<AmfObjectState>,
+    context: Context,
 }
 
 unsafe impl Send for PropertyStorage {}
+unsafe impl Sync for PropertyStorage {}
+
+impl std::fmt::Debug for PropertyStorage {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PropertyStorage")
+            .field("ptr", &format_args!("{:p}", self.ptr))
+            .finish()
+    }
+}
 
 impl PropertyStorage {
+    /// ハンドルを作成する
+    ///
+    /// # Safety
+    /// `ptr` は有効な `AMFPropertyStorage` を指すこと。
     unsafe fn from_raw_with_acquire(
         ptr: *mut sys::AMFPropertyStorage,
         acquire: bool,
+        state: Arc<AmfObjectState>,
+        context: Context,
     ) -> Result<Self, Error> {
         let vtbl = unsafe { &*(*ptr).pVtbl };
         let f = PropertyStorageFuncs {
             acquire: require_vtbl_fn(vtbl.Acquire, "AMFPropertyStorage::Acquire")?,
             release: require_vtbl_fn(vtbl.Release, "AMFPropertyStorage::Release")?,
             set_property: require_vtbl_fn(vtbl.SetProperty, "AMFPropertyStorage::SetProperty")?,
+            get_property: require_vtbl_fn(vtbl.GetProperty, "AMFPropertyStorage::GetProperty")?,
         };
         if acquire {
             unsafe { (f.acquire)(ptr) };
         }
-        Ok(Self { ptr, f })
+        state.inc();
+        Ok(Self {
+            ptr,
+            f,
+            state,
+            context,
+        })
     }
 
     /// 生ポインタから PropertyStorage を作成する (Acquire なし)
     ///
     /// # Safety
-    /// `ptr` は有効な AMFPropertyStorage を指すこと。
-    pub unsafe fn from_raw(ptr: *mut sys::AMFPropertyStorage) -> Result<Self, Error> {
-        unsafe { Self::from_raw_with_acquire(ptr, false) }
+    /// `ptr` は `context` に属する有効な `AMFPropertyStorage` を指すこと。
+    pub unsafe fn from_raw(
+        ptr: *mut sys::AMFPropertyStorage,
+        context: Context,
+    ) -> Result<Self, Error> {
+        unsafe { Self::from_raw_with_acquire(ptr, false, AmfObjectState::new(), context) }
     }
 
     /// 生ポインタから Acquire 付きで PropertyStorage を作成する
     ///
     /// # Safety
-    /// `ptr` は有効な AMFPropertyStorage を指すこと。
-    pub unsafe fn from_raw_acquired(ptr: *mut sys::AMFPropertyStorage) -> Result<Self, Error> {
-        unsafe { Self::from_raw_with_acquire(ptr, true) }
+    /// `ptr` は `context` に属する有効な `AMFPropertyStorage` を指すこと。
+    pub unsafe fn from_raw_acquired(
+        ptr: *mut sys::AMFPropertyStorage,
+        context: Context,
+    ) -> Result<Self, Error> {
+        unsafe { Self::from_raw_with_acquire(ptr, true, AmfObjectState::new(), context) }
     }
 
-    /// 生ポインタを返す
+    /// このハンドルが保持する `Context` を返す
+    pub fn context(&self) -> Context {
+        self.context.clone()
+    }
+
+    /// 生ポインタを返す。
     pub fn as_ptr(&self) -> *mut sys::AMFPropertyStorage {
         self.ptr
     }
 
-    /// 所有権を放棄して生ポインタを返す (Release は呼ばない)
-    pub fn into_raw(self) -> *mut sys::AMFPropertyStorage {
+    /// 所有権を放棄して生ポインタを返す (Release は呼ばない)。
+    pub fn into_raw(mut self) -> *mut sys::AMFPropertyStorage {
         let ptr = self.ptr;
-        std::mem::forget(self);
+        self.ptr = std::ptr::null_mut();
         ptr
     }
 
@@ -90,289 +217,60 @@ impl PropertyStorage {
         name: *const sys::wchar_t,
         value: sys::AMFVariantStruct,
     ) -> sys::AMF_RESULT {
+        let _guard = self.state.lock();
         unsafe { (self.f.set_property)(self.ptr, name, value) }
     }
 
     /// Int64 プロパティを設定する
-    pub fn set_property_int64(&self, name: &str, value: sys::amf_int64) -> Result<(), Error> {
+    ///
+    /// # Errors
+    ///
+    /// AMF が値を受け付けない場合にエラーを返す。
+    pub fn set_property_int64(&self, name: &str, value: i64) -> Result<(), Error> {
         let name_w = sys::to_wstring(name);
         let var = sys::AMFVariantStruct::from_int64(value);
         let result = unsafe { self.set_property(name_w.as_ptr(), var) };
-        Error::check(result, format!("SetProperty({name})"))
+        AmfError::check(result, format!("AMFPropertyStorage::SetProperty({name:?})"))?;
+        Ok(())
+    }
+
+    /// Bool プロパティを設定する
+    ///
+    /// # Errors
+    ///
+    /// AMF が値を受け付けない場合にエラーを返す。
+    pub fn set_property_bool(&self, name: &str, value: bool) -> Result<(), Error> {
+        let name_w = sys::to_wstring(name);
+        let var = sys::AMFVariantStruct::from_bool(value);
+        let result = unsafe { self.set_property(name_w.as_ptr(), var) };
+        AmfError::check(result, format!("AMFPropertyStorage::SetProperty({name:?})"))?;
+        Ok(())
     }
 
     /// Size プロパティを設定する
-    pub fn set_property_size(
-        &self,
-        name: &str,
-        width: sys::amf_int32,
-        height: sys::amf_int32,
-    ) -> Result<(), Error> {
+    ///
+    /// # Errors
+    ///
+    /// AMF が値を受け付けない場合にエラーを返す。
+    pub fn set_property_size(&self, name: &str, width: i32, height: i32) -> Result<(), Error> {
         let name_w = sys::to_wstring(name);
         let var = sys::AMFVariantStruct::from_size(width, height);
         let result = unsafe { self.set_property(name_w.as_ptr(), var) };
-        Error::check(result, format!("SetProperty({name})"))
+        AmfError::check(result, format!("AMFPropertyStorage::SetProperty({name:?})"))?;
+        Ok(())
     }
 
     /// Rate プロパティを設定する
+    ///
+    /// # Errors
+    ///
+    /// AMF が値を受け付けない場合にエラーを返す。
     pub fn set_property_rate(&self, name: &str, num: u32, den: u32) -> Result<(), Error> {
         let name_w = sys::to_wstring(name);
         let var = sys::AMFVariantStruct::from_rate(num, den);
         let result = unsafe { self.set_property(name_w.as_ptr(), var) };
-        Error::check(result, format!("SetProperty({name})"))
-    }
-}
-
-impl Clone for PropertyStorage {
-    fn clone(&self) -> Self {
-        unsafe {
-            (self.f.acquire)(self.ptr);
-        }
-        Self {
-            ptr: self.ptr,
-            f: self.f,
-        }
-    }
-}
-
-impl Drop for PropertyStorage {
-    fn drop(&mut self) {
-        unsafe {
-            (self.f.release)(self.ptr);
-        }
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Surface
-// ---------------------------------------------------------------------------
-
-#[derive(Debug, Clone, Copy)]
-struct SurfaceFuncs {
-    acquire: unsafe extern "C" fn(*mut sys::AMFSurface) -> sys::amf_long,
-    release: unsafe extern "C" fn(*mut sys::AMFSurface) -> sys::amf_long,
-    set_pts: unsafe extern "C" fn(*mut sys::AMFSurface, sys::amf_pts),
-    set_duration: unsafe extern "C" fn(*mut sys::AMFSurface, sys::amf_pts),
-    get_plane:
-        unsafe extern "C" fn(*mut sys::AMFSurface, sys::AMF_PLANE_TYPE) -> *mut sys::AMFPlane,
-    get_plane_at: unsafe extern "C" fn(*mut sys::AMFSurface, sys::amf_size) -> *mut sys::AMFPlane,
-    convert: unsafe extern "C" fn(*mut sys::AMFSurface, sys::AMF_MEMORY_TYPE) -> sys::AMF_RESULT,
-}
-
-/// `AMFSurface` の RAII ラッパー
-#[derive(Debug)]
-pub struct Surface {
-    ptr: *mut sys::AMFSurface,
-    f: SurfaceFuncs,
-}
-
-unsafe impl Send for Surface {}
-
-impl Surface {
-    unsafe fn from_raw_with_acquire(
-        ptr: *mut sys::AMFSurface,
-        acquire: bool,
-    ) -> Result<Self, Error> {
-        let vtbl = unsafe { &*(*ptr).pVtbl };
-        let f = SurfaceFuncs {
-            acquire: require_vtbl_fn(vtbl.Acquire, "AMFSurface::Acquire")?,
-            release: require_vtbl_fn(vtbl.Release, "AMFSurface::Release")?,
-            set_pts: require_vtbl_fn(vtbl.SetPts, "AMFSurface::SetPts")?,
-            set_duration: require_vtbl_fn(vtbl.SetDuration, "AMFSurface::SetDuration")?,
-            get_plane: require_vtbl_fn(vtbl.GetPlane, "AMFSurface::GetPlane")?,
-            get_plane_at: require_vtbl_fn(vtbl.GetPlaneAt, "AMFSurface::GetPlaneAt")?,
-            convert: require_vtbl_fn(vtbl.Convert, "AMFSurface::Convert")?,
-        };
-        if acquire {
-            unsafe { (f.acquire)(ptr) };
-        }
-        Ok(Self { ptr, f })
-    }
-
-    /// 生ポインタから Surface を作成する (Acquire なし)
-    ///
-    /// # Safety
-    /// `ptr` は有効な `AMFSurface` を指すこと。
-    pub unsafe fn from_raw(ptr: *mut sys::AMFSurface) -> Result<Self, Error> {
-        unsafe { Self::from_raw_with_acquire(ptr, false) }
-    }
-
-    /// 生ポインタから Acquire 付きで Surface を作成する
-    ///
-    /// # Safety
-    /// `ptr` は有効な `AMFSurface` を指すこと。
-    pub unsafe fn from_raw_acquired(ptr: *mut sys::AMFSurface) -> Result<Self, Error> {
-        unsafe { Self::from_raw_with_acquire(ptr, true) }
-    }
-
-    /// 生ポインタを返す
-    pub fn as_ptr(&self) -> *mut sys::AMFSurface {
-        self.ptr
-    }
-
-    /// 所有権を放棄して生ポインタを返す (Release は呼ばない)
-    pub fn into_raw(self) -> *mut sys::AMFSurface {
-        let ptr = self.ptr;
-        std::mem::forget(self);
-        ptr
-    }
-
-    /// PTS を設定する
-    pub fn set_pts(&self, pts: sys::amf_pts) {
-        unsafe { (self.f.set_pts)(self.ptr, pts) }
-    }
-
-    /// Duration を設定する
-    pub fn set_duration(&self, duration: sys::amf_pts) {
-        unsafe { (self.f.set_duration)(self.ptr, duration) }
-    }
-
-    /// 指定プレーンを取得する
-    pub fn get_plane(&self, plane_type: sys::AMF_PLANE_TYPE) -> Result<Plane, Error> {
-        let plane = unsafe { (self.f.get_plane)(self.ptr, plane_type) };
-        if plane.is_null() {
-            return Err(Error::new_custom("Surface::get_plane", "plane is null"));
-        }
-        unsafe { Plane::from_raw_acquired(plane) }
-    }
-
-    /// インデックスでプレーンを取得する
-    pub fn get_plane_at(&self, index: sys::amf_size) -> Result<Plane, Error> {
-        let plane = unsafe { (self.f.get_plane_at)(self.ptr, index) };
-        if plane.is_null() {
-            return Err(Error::new_custom("Surface::get_plane_at", "plane is null"));
-        }
-        unsafe { Plane::from_raw_acquired(plane) }
-    }
-
-    /// GPU → Host メモリ変換
-    pub fn convert(&self, type_: sys::AMF_MEMORY_TYPE) -> sys::AMF_RESULT {
-        unsafe { (self.f.convert)(self.ptr, type_) }
-    }
-
-    /// AMFPropertyStorage としてアクセスする
-    ///
-    /// 戻り値の `PropertyStorage` が `Drop` されるまで参照カウントが増える。
-    pub fn property_storage(&self) -> Result<PropertyStorage, Error> {
-        unsafe { PropertyStorage::from_raw_acquired(self.ptr as *mut sys::AMFPropertyStorage) }
-    }
-}
-
-impl Clone for Surface {
-    fn clone(&self) -> Self {
-        unsafe {
-            (self.f.acquire)(self.ptr);
-        }
-        Self {
-            ptr: self.ptr,
-            f: self.f,
-        }
-    }
-}
-
-impl Drop for Surface {
-    fn drop(&mut self) {
-        unsafe {
-            (self.f.release)(self.ptr);
-        }
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Buffer
-// ---------------------------------------------------------------------------
-
-#[derive(Debug, Clone, Copy)]
-struct BufferFuncs {
-    acquire: unsafe extern "C" fn(*mut sys::AMFBuffer) -> sys::amf_long,
-    release: unsafe extern "C" fn(*mut sys::AMFBuffer) -> sys::amf_long,
-    get_native: unsafe extern "C" fn(*mut sys::AMFBuffer) -> *mut std::ffi::c_void,
-    get_size: unsafe extern "C" fn(*mut sys::AMFBuffer) -> sys::amf_size,
-    get_pts: unsafe extern "C" fn(*mut sys::AMFBuffer) -> sys::amf_pts,
-    get_duration: unsafe extern "C" fn(*mut sys::AMFBuffer) -> sys::amf_pts,
-    get_property: unsafe extern "C" fn(
-        *mut sys::AMFBuffer,
-        *const sys::wchar_t,
-        *mut sys::AMFVariantStruct,
-    ) -> sys::AMF_RESULT,
-}
-
-/// `AMFBuffer` の RAII ラッパー
-#[derive(Debug)]
-pub struct Buffer {
-    ptr: *mut sys::AMFBuffer,
-    f: BufferFuncs,
-}
-
-unsafe impl Send for Buffer {}
-
-impl Buffer {
-    unsafe fn from_raw_with_acquire(
-        ptr: *mut sys::AMFBuffer,
-        acquire: bool,
-    ) -> Result<Self, Error> {
-        let vtbl = unsafe { &*(*ptr).pVtbl };
-        let f = BufferFuncs {
-            acquire: require_vtbl_fn(vtbl.Acquire, "AMFBuffer::Acquire")?,
-            release: require_vtbl_fn(vtbl.Release, "AMFBuffer::Release")?,
-            get_native: require_vtbl_fn(vtbl.GetNative, "AMFBuffer::GetNative")?,
-            get_size: require_vtbl_fn(vtbl.GetSize, "AMFBuffer::GetSize")?,
-            get_pts: require_vtbl_fn(vtbl.GetPts, "AMFBuffer::GetPts")?,
-            get_duration: require_vtbl_fn(vtbl.GetDuration, "AMFBuffer::GetDuration")?,
-            get_property: require_vtbl_fn(vtbl.GetProperty, "AMFBuffer::GetProperty")?,
-        };
-        if acquire {
-            unsafe { (f.acquire)(ptr) };
-        }
-        Ok(Self { ptr, f })
-    }
-
-    /// 生ポインタから Buffer を作成する (Acquire なし)
-    ///
-    /// # Safety
-    /// `ptr` は有効な `AMFBuffer` を指すこと。
-    pub unsafe fn from_raw(ptr: *mut sys::AMFBuffer) -> Result<Self, Error> {
-        unsafe { Self::from_raw_with_acquire(ptr, false) }
-    }
-
-    /// 生ポインタから Acquire 付きで Buffer を作成する
-    ///
-    /// # Safety
-    /// `ptr` は有効な `AMFBuffer` を指すこと。
-    pub unsafe fn from_raw_acquired(ptr: *mut sys::AMFBuffer) -> Result<Self, Error> {
-        unsafe { Self::from_raw_with_acquire(ptr, true) }
-    }
-
-    /// 生ポインタを返す
-    pub fn as_ptr(&self) -> *mut sys::AMFBuffer {
-        self.ptr
-    }
-
-    /// 所有権を放棄して生ポインタを返す (Release は呼ばない)
-    pub fn into_raw(self) -> *mut sys::AMFBuffer {
-        let ptr = self.ptr;
-        std::mem::forget(self);
-        ptr
-    }
-
-    /// バッファのネイティブポインタを取得する
-    pub fn get_native(&self) -> *mut std::ffi::c_void {
-        unsafe { (self.f.get_native)(self.ptr) }
-    }
-
-    /// バッファサイズを取得する
-    pub fn get_size(&self) -> sys::amf_size {
-        unsafe { (self.f.get_size)(self.ptr) }
-    }
-
-    /// PTS を取得する
-    pub fn get_pts(&self) -> sys::amf_pts {
-        unsafe { (self.f.get_pts)(self.ptr) }
-    }
-
-    /// Duration を取得する
-    pub fn get_duration(&self) -> sys::amf_pts {
-        unsafe { (self.f.get_duration)(self.ptr) }
+        AmfError::check(result, format!("AMFPropertyStorage::SetProperty({name:?})"))?;
+        Ok(())
     }
 
     /// プロパティを取得する
@@ -385,7 +283,644 @@ impl Buffer {
         name: *const sys::wchar_t,
         p_value: *mut sys::AMFVariantStruct,
     ) -> sys::AMF_RESULT {
+        let _guard = self.state.lock();
         unsafe { (self.f.get_property)(self.ptr, name, p_value) }
+    }
+
+    /// Int64 プロパティを取得する
+    ///
+    /// # Errors
+    ///
+    /// プロパティを取得できない場合、または値が Int64 でない場合にエラーを返す。
+    pub fn get_property_int64(&self, name: &str) -> Result<i64, Error> {
+        let name_w = sys::to_wstring(name);
+        let mut value = Variant::empty();
+        let result = unsafe { self.get_property(name_w.as_ptr(), value.as_ptr()) };
+        AmfError::check(result, format!("AMFPropertyStorage::GetProperty({name:?})"))?;
+        value.as_int64().ok_or_else(|| {
+            InternalError::new(format!("property {name:?} is not an Int64 value")).into()
+        })
+    }
+
+    /// Size プロパティを取得する
+    ///
+    /// 幅と高さの組を返す。
+    ///
+    /// # Errors
+    ///
+    /// プロパティを取得できない場合、または値が Size でない場合にエラーを返す。
+    pub fn get_property_size(&self, name: &str) -> Result<(i32, i32), Error> {
+        let name_w = sys::to_wstring(name);
+        let mut value = Variant::empty();
+        let result = unsafe { self.get_property(name_w.as_ptr(), value.as_ptr()) };
+        AmfError::check(result, format!("AMFPropertyStorage::GetProperty({name:?})"))?;
+        value.as_size().ok_or_else(|| {
+            InternalError::new(format!("property {name:?} is not a Size value")).into()
+        })
+    }
+}
+
+impl Clone for PropertyStorage {
+    fn clone(&self) -> Self {
+        unsafe {
+            (self.f.acquire)(self.ptr);
+        }
+        self.state.inc();
+        Self {
+            ptr: self.ptr,
+            f: self.f,
+            state: Arc::clone(&self.state),
+            context: self.context.clone(),
+        }
+    }
+}
+
+impl Drop for PropertyStorage {
+    fn drop(&mut self) {
+        self.state.dec();
+        if self.ptr.is_null() {
+            return;
+        }
+        unsafe {
+            (self.f.release)(self.ptr);
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Surface のラッパー
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Copy)]
+struct SurfaceFuncs {
+    acquire: unsafe extern "C" fn(*mut sys::AMFSurface) -> sys::amf_long,
+    release: unsafe extern "C" fn(*mut sys::AMFSurface) -> sys::amf_long,
+    set_pts: unsafe extern "C" fn(*mut sys::AMFSurface, sys::amf_pts),
+    get_pts: unsafe extern "C" fn(*mut sys::AMFSurface) -> sys::amf_pts,
+    set_duration: unsafe extern "C" fn(*mut sys::AMFSurface, sys::amf_pts),
+    get_plane:
+        unsafe extern "C" fn(*mut sys::AMFSurface, sys::AMF_PLANE_TYPE) -> *mut sys::AMFPlane,
+    get_plane_at: unsafe extern "C" fn(*mut sys::AMFSurface, sys::amf_size) -> *mut sys::AMFPlane,
+    get_memory_type: unsafe extern "C" fn(*mut sys::AMFSurface) -> sys::AMF_MEMORY_TYPE,
+    convert: unsafe extern "C" fn(*mut sys::AMFSurface, sys::AMF_MEMORY_TYPE) -> sys::AMF_RESULT,
+}
+
+/// `AMFSurface` の RAII ラッパー
+#[derive(Debug)]
+pub struct Surface {
+    ptr: *mut sys::AMFSurface,
+    f: SurfaceFuncs,
+    state: Arc<AmfObjectState>,
+    /// 生存している Plane ハンドルの数
+    planes: Arc<AtomicUsize>,
+    context: Context,
+}
+
+unsafe impl Send for Surface {}
+unsafe impl Sync for Surface {}
+
+impl Surface {
+    /// ハンドルを作成する
+    ///
+    /// # Safety
+    /// `ptr` は有効な `AMFSurface` を指すこと。
+    unsafe fn from_raw_with_acquire(
+        ptr: *mut sys::AMFSurface,
+        acquire: bool,
+        state: Arc<AmfObjectState>,
+        planes: Arc<AtomicUsize>,
+        context: Context,
+    ) -> Result<Self, Error> {
+        let vtbl = unsafe { &*(*ptr).pVtbl };
+        let f = SurfaceFuncs {
+            acquire: require_vtbl_fn(vtbl.Acquire, "AMFSurface::Acquire")?,
+            release: require_vtbl_fn(vtbl.Release, "AMFSurface::Release")?,
+            set_pts: require_vtbl_fn(vtbl.SetPts, "AMFSurface::SetPts")?,
+            get_pts: require_vtbl_fn(vtbl.GetPts, "AMFSurface::GetPts")?,
+            set_duration: require_vtbl_fn(vtbl.SetDuration, "AMFSurface::SetDuration")?,
+            get_plane: require_vtbl_fn(vtbl.GetPlane, "AMFSurface::GetPlane")?,
+            get_plane_at: require_vtbl_fn(vtbl.GetPlaneAt, "AMFSurface::GetPlaneAt")?,
+            get_memory_type: require_vtbl_fn(vtbl.GetMemoryType, "AMFSurface::GetMemoryType")?,
+            convert: require_vtbl_fn(vtbl.Convert, "AMFData::Convert")?,
+        };
+        if acquire {
+            unsafe { (f.acquire)(ptr) };
+        }
+        state.inc();
+        Ok(Self {
+            ptr,
+            f,
+            state,
+            planes,
+            context,
+        })
+    }
+
+    /// 生ポインタから Surface を作成する (Acquire なし)
+    ///
+    /// # Safety
+    /// `ptr` は `context` から取得した有効な `AMFSurface` を指すこと。
+    pub unsafe fn from_raw(ptr: *mut sys::AMFSurface, context: Context) -> Result<Self, Error> {
+        unsafe {
+            Self::from_raw_with_acquire(
+                ptr,
+                false,
+                AmfObjectState::new(),
+                Arc::new(AtomicUsize::new(0)),
+                context,
+            )
+        }
+    }
+
+    /// 生ポインタから Acquire 付きで Surface を作成する
+    ///
+    /// # Safety
+    /// `ptr` は `context` から取得した有効な `AMFSurface` を指すこと。
+    pub unsafe fn from_raw_acquired(
+        ptr: *mut sys::AMFSurface,
+        context: Context,
+    ) -> Result<Self, Error> {
+        unsafe {
+            Self::from_raw_with_acquire(
+                ptr,
+                true,
+                AmfObjectState::new(),
+                Arc::new(AtomicUsize::new(0)),
+                context,
+            )
+        }
+    }
+
+    /// このハンドルが他のハンドルと共有されているかを返す
+    pub(crate) fn is_shared(&self) -> bool {
+        self.state.is_shared()
+    }
+
+    /// 生存している Plane ハンドルの数を増やす
+    fn inc_plane(&self) {
+        self.planes.fetch_add(1, Ordering::SeqCst);
+    }
+
+    /// 生存している Plane ハンドルの数を減らす
+    fn dec_plane(&self) {
+        self.planes.fetch_sub(1, Ordering::SeqCst);
+    }
+
+    /// 生存している Plane ハンドルがあるかを返す
+    fn has_planes(&self) -> bool {
+        self.planes.load(Ordering::SeqCst) > 0
+    }
+
+    /// このハンドルが保持する `Context` を返す
+    pub fn context(&self) -> Context {
+        self.context.clone()
+    }
+
+    /// 生ポインタを返す。
+    pub fn as_ptr(&self) -> *mut sys::AMFSurface {
+        self.ptr
+    }
+
+    /// 所有権を放棄して生ポインタを返す (Release は呼ばない)。
+    pub fn into_raw(mut self) -> *mut sys::AMFSurface {
+        let ptr = self.ptr;
+        self.ptr = std::ptr::null_mut();
+        ptr
+    }
+
+    /// 参照カウントを増やした `Data` を返す
+    ///
+    /// # Errors
+    ///
+    /// `Data` の作成に失敗した場合にエラーを返す。
+    pub fn data(&self) -> Result<Data, Error> {
+        unsafe {
+            Data::from_raw_with_acquire(
+                self.ptr as *mut sys::AMFData,
+                true,
+                Arc::clone(&self.state),
+                Arc::clone(&self.planes),
+                self.context.clone(),
+            )
+        }
+    }
+
+    /// 所有権を `Data` に移す
+    ///
+    /// 元の `Surface` は消費される。
+    ///
+    /// # Errors
+    ///
+    /// `Data` の作成に失敗した場合にエラーを返す。
+    pub fn into_data(self) -> Result<Data, Error> {
+        let state = Arc::clone(&self.state);
+        let planes = Arc::clone(&self.planes);
+        let context = self.context.clone();
+        let ptr = self.into_raw();
+        unsafe {
+            Data::from_raw_with_acquire(ptr as *mut sys::AMFData, false, state, planes, context)
+        }
+    }
+
+    /// PTS (100 ナノ秒単位のタイムスタンプ) を設定する
+    pub fn set_pts(&self, pts: i64) {
+        let _guard = self.state.lock();
+        unsafe { (self.f.set_pts)(self.ptr, pts) }
+    }
+
+    /// PTS (100 ナノ秒単位のタイムスタンプ) を取得する
+    pub fn get_pts(&self) -> i64 {
+        let _guard = self.state.lock();
+        unsafe { (self.f.get_pts)(self.ptr) }
+    }
+
+    /// このサーフェスのメモリ種別を返す
+    pub fn get_memory_type(&self) -> MemoryType {
+        let _guard = self.state.lock();
+        let memory_type = unsafe { (self.f.get_memory_type)(self.ptr) };
+        MemoryType::from_amf(memory_type)
+    }
+
+    /// Duration (100 ナノ秒単位) を設定する
+    pub fn set_duration(&self, duration: i64) {
+        let _guard = self.state.lock();
+        unsafe { (self.f.set_duration)(self.ptr, duration) }
+    }
+
+    /// 指定プレーンを取得する
+    ///
+    /// # Errors
+    /// 指定したプレーンを取得できない場合にエラーを返す。
+    pub fn get_plane(&self, plane_type: PlaneType) -> Result<Plane<'_>, Error> {
+        let _guard = self.state.lock();
+        let plane = unsafe { (self.f.get_plane)(self.ptr, plane_type.to_amf()) };
+        if plane.is_null() {
+            return Err(InvalidArgumentError::new(format!(
+                "the surface does not have the {plane_type:?} plane"
+            ))
+            .into());
+        }
+        unsafe { Plane::from_raw_with_acquire(plane, true, self) }
+    }
+
+    /// インデックスでプレーンを取得する
+    ///
+    /// # Errors
+    /// `index` に対応するプレーンを取得できない場合にエラーを返す。
+    pub fn get_plane_at(&self, index: usize) -> Result<Plane<'_>, Error> {
+        let _guard = self.state.lock();
+        let plane = unsafe { (self.f.get_plane_at)(self.ptr, index) };
+        if plane.is_null() {
+            return Err(
+                InvalidArgumentError::new(format!("plane index {index} is out of range")).into(),
+            );
+        }
+        unsafe { Plane::from_raw_with_acquire(plane, true, self) }
+    }
+
+    /// メモリ種別を変換する
+    ///
+    /// # Errors
+    /// [`Plane`] が生存している場合、または AMF の変換に失敗した場合にエラーを返す。
+    pub fn convert(&self, memory_type: MemoryType) -> Result<(), Error> {
+        let _guard = self.state.lock();
+        if self.has_planes() {
+            return Err(
+                InvalidStateError::new("planes are alive; drop planes before converting").into(),
+            );
+        }
+        AmfError::check(
+            unsafe { (self.f.convert)(self.ptr, memory_type.to_amf()) },
+            "AMFData::Convert",
+        )?;
+        Ok(())
+    }
+
+    /// AMFPropertyStorage としてアクセスする
+    pub fn property_storage(&self) -> Result<PropertyStorage, Error> {
+        unsafe {
+            PropertyStorage::from_raw_with_acquire(
+                self.ptr as *mut sys::AMFPropertyStorage,
+                true,
+                Arc::clone(&self.state),
+                self.context.clone(),
+            )
+        }
+    }
+}
+
+impl Clone for Surface {
+    fn clone(&self) -> Self {
+        unsafe {
+            (self.f.acquire)(self.ptr);
+        }
+        self.state.inc();
+        Self {
+            ptr: self.ptr,
+            f: self.f,
+            state: Arc::clone(&self.state),
+            planes: Arc::clone(&self.planes),
+            context: self.context.clone(),
+        }
+    }
+}
+
+impl Drop for Surface {
+    fn drop(&mut self) {
+        self.state.dec();
+        if self.ptr.is_null() {
+            return;
+        }
+        unsafe {
+            (self.f.release)(self.ptr);
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Buffer のラッパー
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Copy)]
+struct BufferFuncs {
+    acquire: unsafe extern "C" fn(*mut sys::AMFBuffer) -> sys::amf_long,
+    release: unsafe extern "C" fn(*mut sys::AMFBuffer) -> sys::amf_long,
+    get_native: unsafe extern "C" fn(*mut sys::AMFBuffer) -> *mut std::ffi::c_void,
+    get_size: unsafe extern "C" fn(*mut sys::AMFBuffer) -> sys::amf_size,
+    set_size: unsafe extern "C" fn(*mut sys::AMFBuffer, sys::amf_size) -> sys::AMF_RESULT,
+    set_pts: unsafe extern "C" fn(*mut sys::AMFBuffer, sys::amf_pts),
+    get_pts: unsafe extern "C" fn(*mut sys::AMFBuffer) -> sys::amf_pts,
+    get_duration: unsafe extern "C" fn(*mut sys::AMFBuffer) -> sys::amf_pts,
+    get_memory_type: unsafe extern "C" fn(*mut sys::AMFBuffer) -> sys::AMF_MEMORY_TYPE,
+}
+
+/// `AMFBuffer` の RAII ラッパー
+#[derive(Debug)]
+pub struct Buffer {
+    ptr: *mut sys::AMFBuffer,
+    f: BufferFuncs,
+    state: Arc<AmfObjectState>,
+    context: Context,
+}
+
+unsafe impl Send for Buffer {}
+unsafe impl Sync for Buffer {}
+
+impl Buffer {
+    /// ハンドルを作成する
+    ///
+    /// # Safety
+    /// `ptr` は有効な `AMFBuffer` を指すこと。
+    unsafe fn from_raw_with_acquire(
+        ptr: *mut sys::AMFBuffer,
+        acquire: bool,
+        state: Arc<AmfObjectState>,
+        context: Context,
+    ) -> Result<Self, Error> {
+        let vtbl = unsafe { &*(*ptr).pVtbl };
+        let f = BufferFuncs {
+            acquire: require_vtbl_fn(vtbl.Acquire, "AMFBuffer::Acquire")?,
+            release: require_vtbl_fn(vtbl.Release, "AMFBuffer::Release")?,
+            get_native: require_vtbl_fn(vtbl.GetNative, "AMFBuffer::GetNative")?,
+            get_size: require_vtbl_fn(vtbl.GetSize, "AMFBuffer::GetSize")?,
+            set_size: require_vtbl_fn(vtbl.SetSize, "AMFBuffer::SetSize")?,
+            set_pts: require_vtbl_fn(vtbl.SetPts, "AMFBuffer::SetPts")?,
+            get_pts: require_vtbl_fn(vtbl.GetPts, "AMFBuffer::GetPts")?,
+            get_duration: require_vtbl_fn(vtbl.GetDuration, "AMFBuffer::GetDuration")?,
+            get_memory_type: require_vtbl_fn(vtbl.GetMemoryType, "AMFBuffer::GetMemoryType")?,
+        };
+        if acquire {
+            unsafe { (f.acquire)(ptr) };
+        }
+        state.inc();
+        Ok(Self {
+            ptr,
+            f,
+            state,
+            context,
+        })
+    }
+
+    /// 生ポインタから Buffer を作成する (Acquire なし)
+    ///
+    /// # Safety
+    /// `ptr` は `context` から取得した有効な `AMFBuffer` を指すこと。
+    pub unsafe fn from_raw(ptr: *mut sys::AMFBuffer, context: Context) -> Result<Self, Error> {
+        unsafe { Self::from_raw_with_acquire(ptr, false, AmfObjectState::new(), context) }
+    }
+
+    /// 生ポインタから Acquire 付きで Buffer を作成する
+    ///
+    /// # Safety
+    /// `ptr` は `context` から取得した有効な `AMFBuffer` を指すこと。
+    pub unsafe fn from_raw_acquired(
+        ptr: *mut sys::AMFBuffer,
+        context: Context,
+    ) -> Result<Self, Error> {
+        unsafe { Self::from_raw_with_acquire(ptr, true, AmfObjectState::new(), context) }
+    }
+
+    /// このハンドルが他のハンドルと共有されているかを返す
+    pub(crate) fn is_shared(&self) -> bool {
+        self.state.is_shared()
+    }
+
+    /// このハンドルが保持する `Context` を返す
+    pub fn context(&self) -> Context {
+        self.context.clone()
+    }
+
+    /// 生ポインタを返す。
+    pub fn as_ptr(&self) -> *mut sys::AMFBuffer {
+        self.ptr
+    }
+
+    /// 所有権を放棄して生ポインタを返す (Release は呼ばない)。
+    pub fn into_raw(mut self) -> *mut sys::AMFBuffer {
+        let ptr = self.ptr;
+        self.ptr = std::ptr::null_mut();
+        ptr
+    }
+
+    /// 参照カウントを増やした `Data` を返す
+    ///
+    /// # Errors
+    ///
+    /// `Data` の作成に失敗した場合にエラーを返す。
+    pub fn data(&self) -> Result<Data, Error> {
+        unsafe {
+            Data::from_raw_with_acquire(
+                self.ptr as *mut sys::AMFData,
+                true,
+                Arc::clone(&self.state),
+                Arc::new(AtomicUsize::new(0)),
+                self.context.clone(),
+            )
+        }
+    }
+
+    /// 所有権を `Data` に移す
+    ///
+    /// 元の `Buffer` は消費される。
+    ///
+    /// # Errors
+    ///
+    /// `Data` の作成に失敗した場合にエラーを返す。
+    pub fn into_data(self) -> Result<Data, Error> {
+        let state = Arc::clone(&self.state);
+        let context = self.context.clone();
+        let ptr = self.into_raw();
+        unsafe {
+            Data::from_raw_with_acquire(
+                ptr as *mut sys::AMFData,
+                false,
+                state,
+                Arc::new(AtomicUsize::new(0)),
+                context,
+            )
+        }
+    }
+
+    /// バッファのネイティブポインタを返す
+    ///
+    /// 返されるポインタはこのハンドルが生存している間だけ有効である。
+    /// ポインタ経由の読み書きは呼び出し元の責任であり、Rust のスライスとして
+    /// 扱う場合は [`Buffer::as_slice`] / [`Buffer::as_mut_slice`] を使う。
+    pub fn get_native(&self) -> *mut std::ffi::c_void {
+        let _guard = self.state.lock();
+        unsafe { (self.f.get_native)(self.ptr) }
+    }
+
+    /// バッファのサイズ (バイト数) を返す
+    pub fn get_size(&self) -> usize {
+        let _guard = self.state.lock();
+        unsafe { (self.f.get_size)(self.ptr) }
+    }
+
+    /// このバッファのメモリ種別を返す
+    pub fn get_memory_type(&self) -> MemoryType {
+        let _guard = self.state.lock();
+        let memory_type = unsafe { (self.f.get_memory_type)(self.ptr) };
+        MemoryType::from_amf(memory_type)
+    }
+
+    /// バッファのサイズ (バイト数) を設定する
+    ///
+    /// 設定できる最大サイズは確保済みのサイズである。[`Buffer::get_size`] は
+    /// 最後に設定に成功したサイズを返す。
+    ///
+    /// # Errors
+    /// 指定したサイズを設定できない場合にエラーを返す。
+    pub fn set_size(&self, size: usize) -> Result<(), Error> {
+        let _guard = self.state.lock();
+        AmfError::check(
+            unsafe { (self.f.set_size)(self.ptr, size) },
+            "AMFBuffer::SetSize",
+        )?;
+        Ok(())
+    }
+
+    /// バッファがホストメモリにあることを確認する
+    fn check_host_memory(&self) -> Result<(), Error> {
+        let memory_type = unsafe { (self.f.get_memory_type)(self.ptr) };
+        if memory_type != sys::AMF_MEMORY_TYPE::AMF_MEMORY_HOST {
+            return Err(InvalidStateError::new("buffer is not in host memory").into());
+        }
+        Ok(())
+    }
+
+    /// ホストメモリのバッファの内容をバイトスライスとして返す
+    ///
+    /// 返されるスライスの長さは [`Buffer::get_size`] が返すサイズと同じである。
+    /// サイズが 0 の場合は空のスライスを返す。
+    ///
+    /// # Safety
+    ///
+    /// 次の条件をすべて満たすこと。
+    ///
+    /// - 返される範囲のメモリが初期化済みであること
+    /// - このスライスが有効な間、同じ AMF オブジェクトへのアクセスを
+    ///   他のハンドルから行わないこと
+    /// - このスライスが有効な間、同じ AMF オブジェクトのサイズ変更や解放を
+    ///   行わないこと
+    ///
+    /// # Errors
+    /// バッファの内容を Rust のスライスとして扱えない場合にエラーを返す。
+    pub unsafe fn as_slice(&self) -> Result<&[u8], Error> {
+        let _guard = self.state.lock();
+        self.check_host_memory()?;
+        let ptr = unsafe { (self.f.get_native)(self.ptr) } as *const u8;
+        let size = unsafe { (self.f.get_size)(self.ptr) };
+        if size == 0 {
+            return Ok(&[]);
+        }
+        validate_slice_ptr(ptr)?;
+        validate_slice_len(size)?;
+        // SAFETY: ptr は null でなく、size はスライスの長さとして有効な範囲にあり、
+        // バッファは self が生きている間有効である。
+        Ok(unsafe { std::slice::from_raw_parts(ptr, size) })
+    }
+
+    /// ホストメモリのバッファの内容を書き込み用のバイトスライスとして返す
+    ///
+    /// 返されるスライスの長さは [`Buffer::get_size`] が返すサイズと同じである。
+    /// サイズが 0 の場合は空のスライスを返す。
+    ///
+    /// # Safety
+    ///
+    /// 次の条件をすべて満たすこと。
+    ///
+    /// - 返される範囲のメモリが初期化済みであること
+    /// - このスライスが有効な間、同じメモリを指す他の参照やハンドルが
+    ///   存在しないこと
+    /// - このスライスが有効な間、同じ AMF オブジェクトへのアクセスや
+    ///   サイズ変更、解放を行わないこと
+    ///
+    /// # Errors
+    /// バッファの内容を Rust のスライスとして扱えない場合にエラーを返す。
+    pub unsafe fn as_mut_slice(&mut self) -> Result<&mut [u8], Error> {
+        let _guard = self.state.lock();
+        self.check_host_memory()?;
+        let ptr = unsafe { (self.f.get_native)(self.ptr) } as *mut u8;
+        let size = unsafe { (self.f.get_size)(self.ptr) };
+        if size == 0 {
+            return Ok(&mut []);
+        }
+        validate_slice_ptr(ptr)?;
+        validate_slice_len(size)?;
+        // SAFETY: ptr は null でなく、size はスライスの長さとして有効な範囲にあり、
+        // バッファは self が生きている間有効である。
+        Ok(unsafe { std::slice::from_raw_parts_mut(ptr, size) })
+    }
+
+    /// PTS (100 ナノ秒単位のタイムスタンプ) を設定する
+    pub fn set_pts(&self, pts: i64) {
+        let _guard = self.state.lock();
+        unsafe { (self.f.set_pts)(self.ptr, pts) }
+    }
+
+    /// PTS (100 ナノ秒単位のタイムスタンプ) を取得する
+    pub fn get_pts(&self) -> i64 {
+        let _guard = self.state.lock();
+        unsafe { (self.f.get_pts)(self.ptr) }
+    }
+
+    /// Duration (100 ナノ秒単位) を取得する
+    pub fn get_duration(&self) -> i64 {
+        let _guard = self.state.lock();
+        unsafe { (self.f.get_duration)(self.ptr) }
+    }
+
+    /// AMFPropertyStorage としてアクセスする
+    pub fn property_storage(&self) -> Result<PropertyStorage, Error> {
+        unsafe {
+            PropertyStorage::from_raw_with_acquire(
+                self.ptr as *mut sys::AMFPropertyStorage,
+                true,
+                Arc::clone(&self.state),
+                self.context.clone(),
+            )
+        }
     }
 }
 
@@ -394,15 +929,22 @@ impl Clone for Buffer {
         unsafe {
             (self.f.acquire)(self.ptr);
         }
+        self.state.inc();
         Self {
             ptr: self.ptr,
             f: self.f,
+            state: Arc::clone(&self.state),
+            context: self.context.clone(),
         }
     }
 }
 
 impl Drop for Buffer {
     fn drop(&mut self) {
+        self.state.dec();
+        if self.ptr.is_null() {
+            return;
+        }
         unsafe {
             (self.f.release)(self.ptr);
         }
@@ -410,10 +952,10 @@ impl Drop for Buffer {
 }
 
 // ---------------------------------------------------------------------------
-// Plane
+// Plane のラッパー
 // ---------------------------------------------------------------------------
 
-#[derive(Clone, Copy)]
+#[derive(Debug, Clone, Copy)]
 struct PlaneFuncs {
     acquire: unsafe extern "C" fn(*mut sys::AMFPlane) -> sys::amf_long,
     release: unsafe extern "C" fn(*mut sys::AMFPlane) -> sys::amf_long,
@@ -422,21 +964,36 @@ struct PlaneFuncs {
     get_vpitch: unsafe extern "C" fn(*mut sys::AMFPlane) -> sys::amf_int32,
     get_width: unsafe extern "C" fn(*mut sys::AMFPlane) -> sys::amf_int32,
     get_height: unsafe extern "C" fn(*mut sys::AMFPlane) -> sys::amf_int32,
+    is_tiled: unsafe extern "C" fn(*mut sys::AMFPlane) -> sys::amf_bool,
 }
 
 /// `AMFPlane` の RAII ラッパー
-///
-/// `Surface` から `get_plane()` / `get_plane_at()` で取得する。
-/// 取得時に `Acquire` が呼ばれ、`Drop` 時に `Release` が呼ばれる。
-pub struct Plane {
+#[derive(Debug)]
+pub struct Plane<'a> {
     ptr: *mut sys::AMFPlane,
     f: PlaneFuncs,
+    // Surface.h の GetPlanesCount / GetPlaneAt / GetPlane の
+    // "do not store planes outside. should be used together with Surface" に従い、
+    // Plane の寿命を Surface に縛る。
+    /// 取得元の `Surface`
+    surface: &'a Surface,
 }
 
-unsafe impl Send for Plane {}
+// SAFETY: プレーンの情報を取得するメソッドは `Surface` と共有するロックで直列化され、
+// 参照カウント操作は AMFInterface が thread-safe であるため、複数スレッドから使える。
+unsafe impl<'a> Send for Plane<'a> {}
+unsafe impl<'a> Sync for Plane<'a> {}
 
-impl Plane {
-    unsafe fn from_raw_with_acquire(ptr: *mut sys::AMFPlane, acquire: bool) -> Result<Self, Error> {
+impl<'a> Plane<'a> {
+    /// ハンドルを作成する
+    ///
+    /// # Safety
+    /// `ptr` は null でなく、`surface` が持つ有効な `AMFPlane` を指すこと。
+    unsafe fn from_raw_with_acquire(
+        ptr: *mut sys::AMFPlane,
+        acquire: bool,
+        surface: &'a Surface,
+    ) -> Result<Self, Error> {
         let vtbl = unsafe { &*(*ptr).pVtbl };
         let f = PlaneFuncs {
             acquire: require_vtbl_fn(vtbl.Acquire, "AMFPlane::Acquire")?,
@@ -446,96 +1003,555 @@ impl Plane {
             get_vpitch: require_vtbl_fn(vtbl.GetVPitch, "AMFPlane::GetVPitch")?,
             get_width: require_vtbl_fn(vtbl.GetWidth, "AMFPlane::GetWidth")?,
             get_height: require_vtbl_fn(vtbl.GetHeight, "AMFPlane::GetHeight")?,
+            is_tiled: require_vtbl_fn(vtbl.IsTiled, "AMFPlane::IsTiled")?,
         };
         if acquire {
             unsafe { (f.acquire)(ptr) };
         }
-        Ok(Self { ptr, f })
+        surface.state.inc();
+        surface.inc_plane();
+        Ok(Self { ptr, f, surface })
     }
 
     /// 生ポインタから Plane を作成する (Acquire なし)
     ///
     /// # Safety
-    /// `ptr` は有効な `AMFPlane` を指すこと。
-    pub unsafe fn from_raw(ptr: *mut sys::AMFPlane) -> Result<Self, Error> {
-        unsafe { Self::from_raw_with_acquire(ptr, false) }
+    /// `ptr` は `surface` が持つ有効な `AMFPlane` を指すこと。`ptr` は null であってはならない。
+    /// 同じ参照を二重に所有しないこと (`from_raw` を同じ参照に対して複数回呼ばないこと)。
+    /// `as_ptr` が返した借用ポインタを渡してはならない。`surface` の `convert` と並行して
+    /// 呼ばないこと。
+    ///
+    /// # Errors
+    /// `ptr` から `Plane` を作成できない場合にエラーを返す。
+    pub unsafe fn from_raw(ptr: *mut sys::AMFPlane, surface: &'a Surface) -> Result<Self, Error> {
+        unsafe { Self::from_raw_with_acquire(ptr, false, surface) }
     }
 
     /// 生ポインタから Acquire 付きで Plane を作成する
     ///
     /// # Safety
-    /// `ptr` は有効な `AMFPlane` を指すこと。
-    pub unsafe fn from_raw_acquired(ptr: *mut sys::AMFPlane) -> Result<Self, Error> {
-        unsafe { Self::from_raw_with_acquire(ptr, true) }
+    /// `ptr` は `surface` が持つ有効な `AMFPlane` を指すこと。`ptr` は null であってはならない。
+    /// 新たに `Acquire` するため、既存のハンドルと並存してよい。`surface` の `convert` と
+    /// 並行して呼ばないこと。
+    ///
+    /// # Errors
+    /// `ptr` から `Plane` を作成できない場合にエラーを返す。
+    pub unsafe fn from_raw_acquired(
+        ptr: *mut sys::AMFPlane,
+        surface: &'a Surface,
+    ) -> Result<Self, Error> {
+        unsafe { Self::from_raw_with_acquire(ptr, true, surface) }
     }
 
-    /// 生ポインタを返す
+    /// 取得元の `Surface` が保持する `Context` を返す
+    pub fn context(&self) -> Context {
+        self.surface.context()
+    }
+
+    /// 生ポインタを返す。
     pub fn as_ptr(&self) -> *mut sys::AMFPlane {
         self.ptr
     }
 
-    /// 所有権を放棄して生ポインタを返す (Release は呼ばない)
-    pub fn into_raw(self) -> *mut sys::AMFPlane {
+    /// 所有権を放棄して生ポインタを返す (Release は呼ばない)。
+    ///
+    /// 返した生ポインタを利用する間は、取得元の `Surface` を破棄せず、
+    /// `Surface::convert` も呼ばないこと。
+    pub fn into_raw(mut self) -> *mut sys::AMFPlane {
         let ptr = self.ptr;
-        std::mem::forget(self);
+        self.ptr = std::ptr::null_mut();
         ptr
     }
 
-    /// プレーンのネイティブポインタを取得する
+    /// プレーンのネイティブポインタを返す
+    ///
+    /// 返されるポインタは取得元の `Surface` が生存している間だけ有効である。
+    /// ポインタ経由の読み書きは呼び出し元の責任であり、Rust のスライスとして
+    /// 扱う場合は [`Plane::as_slice`] / [`Plane::as_mut_slice`] を使う。
     pub fn get_native(&self) -> *mut std::ffi::c_void {
+        let _guard = self.surface.state.lock();
         unsafe { (self.f.get_native)(self.ptr) }
     }
 
-    /// 水平ピッチを取得する
-    pub fn get_hpitch(&self) -> sys::amf_int32 {
+    /// 水平ピッチ (行あたりのバイト数) を取得する
+    ///
+    /// 行の先頭から次の行の先頭までのバイト数であり、幅 (画素数) とは異なる。
+    pub fn get_hpitch(&self) -> i32 {
+        let _guard = self.surface.state.lock();
         unsafe { (self.f.get_hpitch)(self.ptr) }
     }
 
-    /// 垂直ピッチを取得する
-    pub fn get_vpitch(&self) -> sys::amf_int32 {
+    /// 垂直ピッチ (行数) を取得する
+    pub fn get_vpitch(&self) -> i32 {
+        let _guard = self.surface.state.lock();
         unsafe { (self.f.get_vpitch)(self.ptr) }
     }
 
     /// 幅を取得する
-    pub fn get_width(&self) -> sys::amf_int32 {
+    ///
+    /// crop region の幅をピクセル単位で返す。crop region が未設定の場合は、
+    /// サーフェスの幅とピクセルフォーマットに基づく。
+    pub fn get_width(&self) -> i32 {
+        let _guard = self.surface.state.lock();
         unsafe { (self.f.get_width)(self.ptr) }
     }
 
     /// 高さを取得する
-    pub fn get_height(&self) -> sys::amf_int32 {
+    ///
+    /// crop region の高さをピクセル単位で返す。crop region が未設定の場合は、
+    /// サーフェスの高さとピクセルフォーマットに基づく。
+    pub fn get_height(&self) -> i32 {
+        let _guard = self.surface.state.lock();
         unsafe { (self.f.get_height)(self.ptr) }
+    }
+
+    /// 物理メモリがタイル状に並んでいるかを返す
+    ///
+    /// `true` の場合、メモリは連続したスキャンラインとしてアクセスできない。
+    /// タイル状のプレーンは [`Plane::as_slice`] / [`Plane::as_mut_slice`] の
+    /// 対象にならない。
+    pub fn is_tiled(&self) -> bool {
+        let _guard = self.surface.state.lock();
+        unsafe { (self.f.is_tiled)(self.ptr) != 0 }
+    }
+
+    /// 取得元の `Surface` がホストメモリにあることを確認する
+    fn check_host_memory(&self) -> Result<(), Error> {
+        let memory_type = unsafe { (self.surface.f.get_memory_type)(self.surface.ptr) };
+        if memory_type != sys::AMF_MEMORY_TYPE::AMF_MEMORY_HOST {
+            return Err(InvalidStateError::new("surface is not in host memory").into());
+        }
+        Ok(())
+    }
+
+    /// ホストメモリにあり、タイル状でないプレーンのメモリをバイトスライスとして返す
+    ///
+    /// 返されるスライスの長さは `get_hpitch() * get_vpitch()` バイトである。
+    /// 各行の先頭は [`Plane::get_hpitch`] バイト間隔で並び、幅方向の有効な
+    /// バイト数は [`Plane::get_width`] とピクセルフォーマットから決まる。
+    ///
+    /// # Safety
+    ///
+    /// 次の条件をすべて満たすこと。
+    ///
+    /// - 返される範囲のメモリが初期化済みであること
+    /// - このスライスが有効な間、取得元の `Surface` やプレーンへのアクセスを
+    ///   他のハンドルから行わないこと
+    /// - このスライスが有効な間、取得元の `Surface` の変換や解放を行わないこと
+    ///
+    /// # Errors
+    /// プレーンの内容を Rust のスライスとして扱えない場合にエラーを返す。
+    pub unsafe fn as_slice(&self) -> Result<&[u8], Error> {
+        let _guard = self.surface.state.lock();
+        self.check_host_memory()?;
+        let ptr = unsafe { (self.f.get_native)(self.ptr) } as *const u8;
+        let hpitch = unsafe { (self.f.get_hpitch)(self.ptr) };
+        let vpitch = unsafe { (self.f.get_vpitch)(self.ptr) };
+        let is_tiled = unsafe { (self.f.is_tiled)(self.ptr) } != 0;
+        let size = plane_slice_len(is_tiled, hpitch, vpitch)?;
+        validate_slice_ptr(ptr)?;
+        // SAFETY: ptr は null でなく、size は hpitch と vpitch から計算した
+        // スライスの長さとして有効な範囲にあり、プレーンは Surface が生きている間有効である。
+        Ok(unsafe { std::slice::from_raw_parts(ptr, size) })
+    }
+
+    /// ホストメモリにあり、タイル状でないプレーンのメモリを書き込み用のバイトスライスとして返す
+    ///
+    /// 返されるスライスの長さは `get_hpitch() * get_vpitch()` バイトである。
+    /// 各行の先頭は [`Plane::get_hpitch`] バイト間隔で並び、幅方向の有効な
+    /// バイト数は [`Plane::get_width`] とピクセルフォーマットから決まる。
+    ///
+    /// # Safety
+    ///
+    /// 次の条件をすべて満たすこと。
+    ///
+    /// - 返される範囲のメモリが初期化済みであること
+    /// - このスライスが有効な間、同じメモリを指す他の参照やハンドルが
+    ///   存在しないこと
+    /// - このスライスが有効な間、取得元の `Surface` やプレーンへのアクセス、
+    ///   変換、解放を行わないこと
+    ///
+    /// # Errors
+    /// プレーンの内容を Rust のスライスとして扱えない場合にエラーを返す。
+    pub unsafe fn as_mut_slice(&mut self) -> Result<&mut [u8], Error> {
+        let _guard = self.surface.state.lock();
+        self.check_host_memory()?;
+        let ptr = unsafe { (self.f.get_native)(self.ptr) } as *mut u8;
+        let hpitch = unsafe { (self.f.get_hpitch)(self.ptr) };
+        let vpitch = unsafe { (self.f.get_vpitch)(self.ptr) };
+        let is_tiled = unsafe { (self.f.is_tiled)(self.ptr) } != 0;
+        let size = plane_slice_len(is_tiled, hpitch, vpitch)?;
+        validate_slice_ptr(ptr)?;
+        // SAFETY: ptr は null でなく、size は hpitch と vpitch から計算した
+        // スライスの長さとして有効な範囲にあり、プレーンは Surface が生きている間有効である。
+        Ok(unsafe { std::slice::from_raw_parts_mut(ptr, size) })
     }
 }
 
-impl Clone for Plane {
+impl Clone for Plane<'_> {
     fn clone(&self) -> Self {
         unsafe {
             (self.f.acquire)(self.ptr);
         }
+        self.surface.state.inc();
+        self.surface.inc_plane();
         Self {
             ptr: self.ptr,
             f: self.f,
+            surface: self.surface,
         }
     }
 }
 
-impl Drop for Plane {
+impl Drop for Plane<'_> {
     fn drop(&mut self) {
-        unsafe {
-            (self.f.release)(self.ptr);
+        self.surface.state.dec();
+        if !self.ptr.is_null() {
+            unsafe {
+                (self.f.release)(self.ptr);
+            }
         }
+        // release より先に dec_plane すると、release の完了前に convert が Plane 数 0 を
+        // 観測して AMF Convert を実行しうるため、release 後に減らす。
+        self.surface.dec_plane();
+    }
+}
+
+/// スライスの生成に使うポインタが null でないことを検証する
+fn validate_slice_ptr(ptr: *const u8) -> Result<(), Error> {
+    if ptr.is_null() {
+        return Err(InternalError::new("native pointer is null").into());
+    }
+    Ok(())
+}
+
+/// スライスの長さが Rust のスライスの不変条件を満たすことを検証する
+fn validate_slice_len(len: usize) -> Result<(), Error> {
+    if len > isize::MAX as usize {
+        return Err(InternalError::new("slice length exceeds isize::MAX").into());
+    }
+    Ok(())
+}
+
+/// プレーンのレイアウトを検証し、スライスの長さを計算する
+fn plane_slice_len(is_tiled: bool, hpitch: i32, vpitch: i32) -> Result<usize, Error> {
+    if is_tiled {
+        return Err(InvalidStateError::new("plane is tiled").into());
+    }
+    let Ok(hpitch) = usize::try_from(hpitch) else {
+        return Err(InternalError::new("hpitch is negative").into());
+    };
+    let Ok(vpitch) = usize::try_from(vpitch) else {
+        return Err(InternalError::new("vpitch is negative").into());
+    };
+    checked_mul_len(hpitch, vpitch)
+}
+
+/// 2 つの長さの積をスライスの長さとして計算する
+fn checked_mul_len(a: usize, b: usize) -> Result<usize, Error> {
+    let len = a
+        .checked_mul(b)
+        .ok_or_else(|| InternalError::new("plane size overflows usize"))?;
+    validate_slice_len(len)?;
+    Ok(len)
+}
+
+// ---------------------------------------------------------------------------
+// Data のラッパー
+// ---------------------------------------------------------------------------
+
+/// `AMFData` の RAII ハンドル
+///
+/// AMFData の所有権と参照カウントを管理し、`Drop` で参照カウントを解放する。
+pub struct Data {
+    /// 所有している AMFData
+    ptr: *mut sys::AMFData,
+    f: DataFuncs,
+    state: Arc<AmfObjectState>,
+    /// このデータが保持する Plane 数カウンタ
+    planes: Arc<AtomicUsize>,
+    context: Context,
+}
+
+#[derive(Clone, Copy)]
+struct DataFuncs {
+    acquire: unsafe extern "C" fn(*mut sys::AMFData) -> sys::amf_long,
+    release: unsafe extern "C" fn(*mut sys::AMFData) -> sys::amf_long,
+    get_data_type: unsafe extern "C" fn(*mut sys::AMFData) -> sys::AMF_DATA_TYPE,
+}
+
+impl std::fmt::Debug for Data {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Data")
+            .field("ptr", &format_args!("{:p}", self.ptr))
+            .finish()
+    }
+}
+
+// SAFETY:
+// AMFData の参照カウント操作は AMFInterface が thread-safe であり、それ以外の
+// AMFData 操作は AmfObjectState の共有ロックで直列化する。
+unsafe impl Send for Data {}
+unsafe impl Sync for Data {}
+
+impl Data {
+    /// 生ポインタから `Data` を作成する (Acquire なし)
+    ///
+    /// # Safety
+    ///
+    /// `ptr` は `context` から取得した有効な `AMFData` を指すこと。`ptr` を指す
+    /// 他のハンドルが存在しないこと。
+    pub unsafe fn from_raw(ptr: *mut sys::AMFData, context: Context) -> Result<Self, Error> {
+        unsafe {
+            Self::from_raw_with_acquire(
+                ptr,
+                false,
+                AmfObjectState::new(),
+                Arc::new(AtomicUsize::new(0)),
+                context,
+            )
+        }
+    }
+
+    /// 生ポインタから Acquire 付きで `Data` を作成する
+    ///
+    /// # Safety
+    ///
+    /// `ptr` は `context` から取得した有効な `AMFData` を指すこと。`ptr` を指す
+    /// 他のハンドルと同時に使わないこと。
+    pub unsafe fn from_raw_acquired(
+        ptr: *mut sys::AMFData,
+        context: Context,
+    ) -> Result<Self, Error> {
+        unsafe {
+            Self::from_raw_with_acquire(
+                ptr,
+                true,
+                AmfObjectState::new(),
+                Arc::new(AtomicUsize::new(0)),
+                context,
+            )
+        }
+    }
+
+    /// 生ポインタから `Data` を作成する
+    unsafe fn from_raw_with_acquire(
+        ptr: *mut sys::AMFData,
+        acquire: bool,
+        state: Arc<AmfObjectState>,
+        planes: Arc<AtomicUsize>,
+        context: Context,
+    ) -> Result<Self, Error> {
+        let vtbl = unsafe { &*(*ptr).pVtbl };
+        let f = DataFuncs {
+            acquire: require_vtbl_fn(vtbl.Acquire, "AMFData::Acquire")?,
+            release: require_vtbl_fn(vtbl.Release, "AMFData::Release")?,
+            get_data_type: require_vtbl_fn(vtbl.GetDataType, "AMFData::GetDataType")?,
+        };
+
+        if acquire {
+            unsafe { (f.acquire)(ptr) };
+        }
+        state.inc();
+        Ok(Self {
+            ptr,
+            f,
+            state,
+            planes,
+            context,
+        })
+    }
+
+    /// このハンドルが保持する `Context` を返す
+    pub fn context(&self) -> Context {
+        self.context.clone()
+    }
+
+    /// 生ポインタを返す
+    pub fn as_ptr(&self) -> *mut sys::AMFData {
+        self.ptr
+    }
+
+    /// 所有権を放棄して生ポインタを返す (Release は呼ばない)
+    pub fn into_raw(mut self) -> *mut sys::AMFData {
+        let ptr = self.ptr;
+        self.ptr = std::ptr::null_mut();
+        ptr
+    }
+
+    /// このデータの種別を返す
+    pub fn get_data_type(&self) -> DataType {
+        let _guard = self.state.lock();
+        let data_type = unsafe { (self.f.get_data_type)(self.ptr) };
+        DataType::from_amf(data_type)
+    }
+
+    /// このデータが保持するプロパティストレージを返す
+    pub fn property_storage(&self) -> Result<PropertyStorage, Error> {
+        unsafe {
+            PropertyStorage::from_raw_with_acquire(
+                self.ptr as *mut sys::AMFPropertyStorage,
+                true,
+                Arc::clone(&self.state),
+                self.context.clone(),
+            )
+        }
+    }
+
+    /// 参照カウントを増やした `Buffer` を返す
+    ///
+    /// # Errors
+    ///
+    /// `Buffer` 以外のデータの場合、または `Buffer` の構築に失敗した場合に
+    /// エラーを返す。
+    pub fn to_buffer(&self) -> Result<Buffer, Error> {
+        let data_type = self.get_data_type();
+        if data_type != DataType::Buffer {
+            return Err(InvalidStateError::new(format!(
+                "expected an AMFBuffer, but got {data_type:?}"
+            ))
+            .into());
+        }
+
+        unsafe {
+            Buffer::from_raw_with_acquire(
+                self.ptr as *mut sys::AMFBuffer,
+                true,
+                Arc::clone(&self.state),
+                self.context.clone(),
+            )
+        }
+    }
+
+    /// 参照カウントを増やした `Surface` を返す
+    ///
+    /// # Errors
+    ///
+    /// `Surface` 以外のデータの場合、または `Surface` の構築に失敗した場合に
+    /// エラーを返す。
+    pub fn to_surface(&self) -> Result<Surface, Error> {
+        let data_type = self.get_data_type();
+        if data_type != DataType::Surface {
+            return Err(InvalidStateError::new(format!(
+                "expected an AMFSurface, but got {data_type:?}"
+            ))
+            .into());
+        }
+
+        let planes = Arc::clone(&self.planes);
+        unsafe {
+            Surface::from_raw_with_acquire(
+                self.ptr as *mut sys::AMFSurface,
+                true,
+                Arc::clone(&self.state),
+                planes,
+                self.context.clone(),
+            )
+        }
+    }
+}
+
+impl Clone for Data {
+    fn clone(&self) -> Self {
+        unsafe { (self.f.acquire)(self.ptr) };
+        self.state.inc();
+        Self {
+            ptr: self.ptr,
+            f: self.f,
+            state: Arc::clone(&self.state),
+            planes: self.planes.clone(),
+            context: self.context.clone(),
+        }
+    }
+}
+
+impl Drop for Data {
+    fn drop(&mut self) {
+        self.state.dec();
+        if self.ptr.is_null() {
+            return;
+        }
+        unsafe { (self.f.release)(self.ptr) };
     }
 }
 
 // ---------------------------------------------------------------------------
-// Context
+// Vulkan デバイスのハンドル
+// ---------------------------------------------------------------------------
+
+/// AMF に渡す Vulkan デバイスのハンドル一式
+///
+/// `VkInstance`、`VkPhysicalDevice`、`VkDevice` の 3 つのハンドルを保持する。
+/// 3 つのハンドルはすべて非 `null` である。
+/// この型は Vulkan のオブジェクトを所有せず、所有権を変更しない。
+#[derive(Debug, Clone, Copy)]
+pub struct VulkanDevice {
+    device: sys::AMFVulkanDevice,
+}
+
+impl VulkanDevice {
+    /// 渡された 3 つのハンドルをそのまま保持する。
+    ///
+    /// # Safety
+    ///
+    /// `instance` は有効な `VkInstance` を指し、
+    /// `physical_device` はそのインスタンスから取得した有効な `VkPhysicalDevice`、
+    /// `device` はその `physical_device` から作成した有効な `VkDevice` を指すこと。
+    ///
+    /// # Errors
+    ///
+    /// `null` を含むハンドルが渡された場合に `Error::InvalidArgument` を返す。
+    pub unsafe fn from_raw(
+        instance: *mut std::ffi::c_void,
+        physical_device: *mut std::ffi::c_void,
+        device: *mut std::ffi::c_void,
+    ) -> Result<Self, Error> {
+        if instance.is_null() || physical_device.is_null() || device.is_null() {
+            return Err(InvalidArgumentError::new("Vulkan device handles must not be null").into());
+        }
+
+        // AMF は cbSizeof を構造体のサイズとして参照し、pNext を拡張チェーンと
+        // して参照する。拡張を使わないため pNext は null にする。
+        Ok(Self {
+            device: sys::AMFVulkanDevice {
+                cbSizeof: std::mem::size_of::<sys::AMFVulkanDevice>(),
+                pNext: std::ptr::null_mut(),
+                hInstance: instance.cast(),
+                hPhysicalDevice: physical_device.cast(),
+                hDevice: device.cast(),
+            },
+        })
+    }
+
+    /// `VkInstance` ハンドルを返す
+    pub fn instance(&self) -> *mut std::ffi::c_void {
+        self.device.hInstance.cast()
+    }
+
+    /// `VkPhysicalDevice` ハンドルを返す
+    pub fn physical_device(&self) -> *mut std::ffi::c_void {
+        self.device.hPhysicalDevice.cast()
+    }
+
+    /// `VkDevice` ハンドルを返す
+    pub fn device(&self) -> *mut std::ffi::c_void {
+        self.device.hDevice.cast()
+    }
+}
+
+// SAFETY: `VulkanDevice` は Vulkan のハンドル値を保持するだけで、それ自体は
+// Vulkan の操作を行わない。ハンドルの有効性は取得経路に従う。
+unsafe impl Send for VulkanDevice {}
+unsafe impl Sync for VulkanDevice {}
+
+// ---------------------------------------------------------------------------
+// Context のラッパー
 // ---------------------------------------------------------------------------
 
 #[derive(Clone, Copy)]
 struct ContextFuncs {
     acquire: unsafe extern "C" fn(*mut sys::AMFContext) -> sys::amf_long,
     release: unsafe extern "C" fn(*mut sys::AMFContext) -> sys::amf_long,
-    terminate: unsafe extern "C" fn(*mut sys::AMFContext) -> sys::AMF_RESULT,
     alloc_surface: unsafe extern "C" fn(
         *mut sys::AMFContext,
         sys::AMF_MEMORY_TYPE,
@@ -557,172 +1573,430 @@ struct ContextFuncs {
     ) -> sys::AMF_RESULT,
 }
 
-/// `AMFContext` の RAII ラッパー
-pub struct Context {
+// `AMFContext` の所有権と、AMF 呼び出しを直列化する状態を保持する。
+// `UninitializedContext` と `Context` が共有し、解放処理を 1 箇所にまとめる。
+struct ContextInner {
     ptr: *mut sys::AMFContext,
     f: ContextFuncs,
+    state: Arc<AmfObjectState>,
 }
 
-unsafe impl Send for Context {}
-
-impl Context {
-    unsafe fn from_raw_with_acquire(
+impl ContextInner {
+    /// `AMFContext` の所有権を引き継ぎ、vtable と共有状態を保持した内部型を作成する。
+    ///
+    /// # Safety
+    /// `ptr` は有効な `AMFContext` を指すこと。呼び出し元の参照の所有権を引き継ぐ。
+    unsafe fn from_raw_with_state(
         ptr: *mut sys::AMFContext,
-        acquire: bool,
+        state: Arc<AmfObjectState>,
     ) -> Result<Self, Error> {
         let vtbl = unsafe { &*(*ptr).pVtbl };
         let f = ContextFuncs {
             acquire: require_vtbl_fn(vtbl.Acquire, "AMFContext::Acquire")?,
             release: require_vtbl_fn(vtbl.Release, "AMFContext::Release")?,
-            terminate: require_vtbl_fn(vtbl.Terminate, "AMFContext::Terminate")?,
             alloc_surface: require_vtbl_fn(vtbl.AllocSurface, "AMFContext::AllocSurface")?,
             alloc_buffer: require_vtbl_fn(vtbl.AllocBuffer, "AMFContext::AllocBuffer")?,
             query_interface: require_vtbl_fn(vtbl.QueryInterface, "AMFContext::QueryInterface")?,
         };
-        if acquire {
-            unsafe { (f.acquire)(ptr) };
-        }
-        Ok(Self { ptr, f })
+        state.inc();
+        Ok(Self { ptr, f, state })
     }
 
-    /// 生ポインタから Context を作成する (Acquire なし)
-    ///
-    /// # Safety
-    /// `ptr` は有効な `AMFContext` を指すこと。
-    pub unsafe fn from_raw(ptr: *mut sys::AMFContext) -> Result<Self, Error> {
-        unsafe { Self::from_raw_with_acquire(ptr, false) }
-    }
-
-    /// 生ポインタから Acquire 付きで Context を作成する
-    ///
-    /// # Safety
-    /// `ptr` は有効な `AMFContext` を指すこと。
-    pub unsafe fn from_raw_acquired(ptr: *mut sys::AMFContext) -> Result<Self, Error> {
-        unsafe { Self::from_raw_with_acquire(ptr, true) }
-    }
-
-    /// 生ポインタを返す
-    pub fn as_ptr(&self) -> *mut sys::AMFContext {
+    fn as_ptr(&self) -> *mut sys::AMFContext {
         self.ptr
     }
 
-    /// 所有権を放棄して生ポインタを返す (Release は呼ばない)
-    pub fn into_raw(self) -> *mut sys::AMFContext {
-        let ptr = self.ptr;
-        std::mem::forget(self);
-        ptr
-    }
-
-    /// コンテキストを終了する
-    pub fn terminate(&self) -> sys::AMF_RESULT {
-        unsafe { (self.f.terminate)(self.ptr) }
-    }
-
-    /// Surface を確保する
-    pub fn alloc_surface(
-        &self,
-        type_: sys::AMF_MEMORY_TYPE,
-        format: sys::AMF_SURFACE_FORMAT,
-        width: sys::amf_int32,
-        height: sys::amf_int32,
-    ) -> Result<Surface, Error> {
-        let mut surface: *mut sys::AMFSurface = ptr::null_mut();
-        let result =
-            unsafe { (self.f.alloc_surface)(self.ptr, type_, format, width, height, &mut surface) };
-        Error::check(result, "AMFContext::AllocSurface")?;
-
-        if surface.is_null() {
-            return Err(Error::new_custom(
-                "Context::alloc_surface",
-                "AllocSurface returned null",
-            ));
-        }
-
-        unsafe { Surface::from_raw(surface) }
-    }
-
-    /// Buffer を確保する
-    pub fn alloc_buffer(
-        &self,
-        type_: sys::AMF_MEMORY_TYPE,
-        size: sys::amf_size,
-    ) -> Result<Buffer, Error> {
-        let mut buffer: *mut sys::AMFBuffer = ptr::null_mut();
-        let result = unsafe { (self.f.alloc_buffer)(self.ptr, type_, size, &mut buffer) };
-        Error::check(result, "AMFContext::AllocBuffer")?;
-
-        if buffer.is_null() {
-            return Err(Error::new_custom(
-                "Context::alloc_buffer",
-                "AllocBuffer returned null",
-            ));
-        }
-
-        unsafe { Buffer::from_raw(buffer) }
-    }
-
-    /// QueryInterface で AMFContext1 を取得し Vulkan デバイスを初期化する
+    /// `AMFContext1` への参照を取得する
     ///
-    /// `device` が `null` の場合はデフォルトデバイスが使用される。
-    ///
-    /// # Safety
-    /// `device` は有効な Vulkan デバイスを指すこと。
-    pub unsafe fn init_vulkan(&self, device: *mut std::ffi::c_void) -> Result<(), Error> {
-        let mut context1_ptr: *mut std::ffi::c_void = ptr::null_mut();
+    /// 返すガードが生きている間、`AMFContext1` の参照を保持する。
+    /// 呼び出し元は `self.state` のロックを保持すること。
+    fn context1(&self) -> Result<Context1Guard, Error> {
+        let mut context1_ptr: *mut std::ffi::c_void = std::ptr::null_mut();
         let result = unsafe {
             (self.f.query_interface)(self.ptr, &sys::IID_AMF_CONTEXT1, &mut context1_ptr)
         };
-        Error::check(result, "AMFContext::QueryInterface(AMFContext1)")?;
+        AmfError::check(result, "AMFContext::QueryInterface(AMFContext1)")?;
 
         if context1_ptr.is_null() {
-            return Err(Error::new_custom(
-                "Context::init_vulkan",
-                "QueryInterface returned null for AMFContext1",
-            ));
+            return Err(InternalError::new("QueryInterface returned null for AMFContext1").into());
         }
 
-        let context1 = context1_ptr as *mut sys::AMFContext1;
+        let ptr = context1_ptr as *mut sys::AMFContext1;
+        let vtbl = unsafe { &*(*ptr).pVtbl };
+        let release = require_vtbl_fn(vtbl.Release, "AMFContext1::Release")?;
+        // 呼び出し元が続けて vtable を取得する。その取得に失敗して早期に戻る場合も、
+        // ガードの破棄で QueryInterface が増やした参照を解放する。
+        Ok(Context1Guard { ptr, release })
+    }
 
-        let result = unsafe {
-            let vtbl = &*(*context1).pVtbl;
-            let init_vulkan = require_vtbl_fn(vtbl.InitVulkan, "AMFContext1::InitVulkan")?;
-            let release = vtbl.Release;
+    /// Vulkan デバイスで初期化する
+    ///
+    /// `device` が `null` の場合は既定の Vulkan デバイスを使用する。
+    ///
+    /// # Safety
+    /// `device` が `null` でない場合、有効な `AMFVulkanDevice` を指し、
+    /// `Context` を破棄するまで有効であること。
+    unsafe fn init_vulkan(&self, device: *mut std::ffi::c_void) -> Result<(), Error> {
+        let _guard = self.state.lock();
+        let context1 = self.context1()?;
+        // SAFETY: context1 は有効な AMFContext1 を指している。
+        let vtbl = unsafe { &*(*context1.ptr).pVtbl };
+        let init_vulkan = require_vtbl_fn(vtbl.InitVulkan, "AMFContext1::InitVulkan")?;
+        let result = unsafe { init_vulkan(context1.ptr, device) };
+        AmfError::check(result, "AMFContext1::InitVulkan")?;
+        Ok(())
+    }
 
-            let r = init_vulkan(context1, device);
+    fn vulkan_device(&self) -> Result<VulkanDevice, Error> {
+        let _guard = self.state.lock();
+        let context1 = self.context1()?;
+        // SAFETY: context1 は有効な AMFContext1 を指している。
+        let vtbl = unsafe { &*(*context1.ptr).pVtbl };
+        let get_vulkan_device =
+            require_vtbl_fn(vtbl.GetVulkanDevice, "AMFContext1::GetVulkanDevice")?;
+        let device = unsafe { get_vulkan_device(context1.ptr) };
+        if device.is_null() {
+            return Err(InternalError::new("GetVulkanDevice returned null").into());
+        }
 
-            if let Some(release) = release {
-                release(context1);
+        // SAFETY: AMF は Vulkan で初期化した Context に対して、初期化に使った
+        // AMFVulkanDevice を指すポインタを返す。
+        let device = unsafe { &*(device as *const sys::AMFVulkanDevice) };
+        if device.hInstance.is_null()
+            || device.hPhysicalDevice.is_null()
+            || device.hDevice.is_null()
+        {
+            return Err(InternalError::new("GetVulkanDevice returned null handles").into());
+        }
+        Ok(VulkanDevice { device: *device })
+    }
+
+    /// AMF が要求する Vulkan デバイス拡張の一覧を返す
+    ///
+    /// # Errors
+    ///
+    /// デバイス拡張の取得に失敗した場合にエラーを返す。
+    fn vulkan_device_extensions(&self) -> Result<Vec<String>, Error> {
+        let _guard = self.state.lock();
+        let context1 = self.context1()?;
+        // SAFETY: context1 は有効な AMFContext1 を指している。
+        let vtbl = unsafe { &*(*context1.ptr).pVtbl };
+        let get_extensions = require_vtbl_fn(
+            vtbl.GetVulkanDeviceExtensions,
+            "AMFContext1::GetVulkanDeviceExtensions",
+        )?;
+
+        // AMF は拡張の個数と名前を別々の呼び出しで返すため、2 回呼び出す。
+        let mut count: sys::amf_size = 0;
+        let result = unsafe { get_extensions(context1.ptr, &mut count, std::ptr::null_mut()) };
+        AmfError::check(result, "AMFContext1::GetVulkanDeviceExtensions")?;
+
+        let mut names: Vec<*const std::ffi::c_char> = vec![std::ptr::null(); count];
+        if count > 0 {
+            let result = unsafe { get_extensions(context1.ptr, &mut count, names.as_mut_ptr()) };
+            AmfError::check(result, "AMFContext1::GetVulkanDeviceExtensions")?;
+            names.truncate(count);
+        }
+
+        let mut extensions = Vec::new();
+        for name in names {
+            if name.is_null() {
+                return Err(InternalError::new(
+                    "GetVulkanDeviceExtensions returned a null extension name",
+                )
+                .into());
             }
+            // SAFETY: AMF は拡張名を NUL 終端した C 文字列で返す。
+            let name = unsafe { std::ffi::CStr::from_ptr(name) };
+            let name = name.to_str().map_err(|error| {
+                InternalError::with_source("Vulkan extension name is not valid UTF-8", error)
+            })?;
+            extensions.push(name.to_owned());
+        }
+        Ok(extensions)
+    }
+}
 
-            r
+impl Clone for ContextInner {
+    fn clone(&self) -> Self {
+        // AMFContext は AMFInterface の参照カウントで管理されている。
+        unsafe {
+            (self.f.acquire)(self.ptr);
+        }
+        self.state.inc();
+        Self {
+            ptr: self.ptr,
+            f: self.f,
+            state: Arc::clone(&self.state),
+        }
+    }
+}
+
+impl Drop for ContextInner {
+    fn drop(&mut self) {
+        // 最後の参照が解放されると AMFContext のデストラクタが Terminate に相当する処理を行う。
+        // ドキュメント上、Release の呼び出しはスレッドセーフであるが、
+        // 実測ベースではスレッドセーフではなかったため、ロックを取って解放する。
+        let _guard = self.state.lock();
+        unsafe {
+            (self.f.release)(self.ptr);
+        }
+        self.state.dec();
+    }
+}
+
+/// Vulkan で初期化済みの `AMFContext` を共有するハンドル
+///
+/// `Clone` は同じ `AMFContext` を指すハンドルを返す。
+/// 最後のハンドルが破棄されると `AMFContext` は破棄される。
+///
+/// 同じ `AMFContext` を指すハンドル同士は等しいと判定される。
+pub struct Context {
+    inner: ContextInner,
+    /// 利用者が指定した Vulkan デバイス
+    ///
+    /// 既定の Vulkan デバイスで初期化した場合は `None` になる。
+    vulkan_device: Option<Arc<VulkanDevice>>,
+}
+
+// SAFETY: `AMFContext` の生ポインタを保持するが、AMF 呼び出しは state のロックで
+// 直列化する。参照カウント操作は AMFInterface の仕様に従う。
+unsafe impl Send for Context {}
+unsafe impl Sync for Context {}
+
+impl std::fmt::Debug for Context {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Context")
+            .field("ptr", &format_args!("{:p}", self.inner.as_ptr()))
+            .finish()
+    }
+}
+
+impl PartialEq for Context {
+    fn eq(&self, other: &Self) -> bool {
+        self.inner.as_ptr() == other.inner.as_ptr()
+    }
+}
+
+impl Eq for Context {}
+
+impl Context {
+    /// このハンドルが指す `AMFContext` の生ポインタを返す。
+    pub fn as_ptr(&self) -> *mut sys::AMFContext {
+        self.inner.as_ptr()
+    }
+
+    /// Surface を確保する
+    ///
+    /// # Errors
+    /// Surface を確保できない場合にエラーを返す。
+    pub fn alloc_surface(
+        &self,
+        memory_type: MemoryType,
+        format: SurfaceFormat,
+        width: i32,
+        height: i32,
+    ) -> Result<Surface, Error> {
+        let surface = {
+            let _guard = self.inner.state.lock();
+            let mut surface: *mut sys::AMFSurface = std::ptr::null_mut();
+            let result = unsafe {
+                (self.inner.f.alloc_surface)(
+                    self.inner.ptr,
+                    memory_type.to_amf(),
+                    format.to_amf(),
+                    width,
+                    height,
+                    &mut surface,
+                )
+            };
+            AmfError::check(result, "AMFContext::AllocSurface")?;
+
+            if surface.is_null() {
+                return Err(InternalError::new("AllocSurface returned null").into());
+            }
+            surface
         };
 
-        Error::check(result, "AMFContext1::InitVulkan")
+        unsafe {
+            Surface::from_raw_with_acquire(
+                surface,
+                false,
+                AmfObjectState::new(),
+                Arc::new(AtomicUsize::new(0)),
+                self.clone(),
+            )
+        }
+    }
+
+    /// Buffer を確保する
+    ///
+    /// # Errors
+    /// Buffer を確保できない場合にエラーを返す。
+    pub fn alloc_buffer(&self, memory_type: MemoryType, size: usize) -> Result<Buffer, Error> {
+        let buffer = {
+            let _guard = self.inner.state.lock();
+            let mut buffer: *mut sys::AMFBuffer = std::ptr::null_mut();
+            let result = unsafe {
+                (self.inner.f.alloc_buffer)(self.inner.ptr, memory_type.to_amf(), size, &mut buffer)
+            };
+            AmfError::check(result, "AMFContext::AllocBuffer")?;
+
+            if buffer.is_null() {
+                return Err(InternalError::new("AllocBuffer returned null").into());
+            }
+            buffer
+        };
+
+        unsafe { Buffer::from_raw_with_acquire(buffer, false, AmfObjectState::new(), self.clone()) }
+    }
+
+    /// 初期化に使用した Vulkan デバイスを返す。
+    ///
+    /// 返すハンドルは Vulkan デバイスを所有しないため、Vulkan デバイスが破棄された場合
+    /// このハンドルも無効になる。
+    ///
+    /// # Errors
+    ///
+    /// Vulkan デバイスを取得できない場合にエラーを返す。
+    pub fn vulkan_device(&self) -> Result<VulkanDevice, Error> {
+        // 利用者が指定したデバイスは AMF がそのまま保持するため、渡した値を返す。
+        if let Some(device) = &self.vulkan_device {
+            return Ok(**device);
+        }
+        self.inner.vulkan_device()
     }
 }
 
 impl Clone for Context {
     fn clone(&self) -> Self {
-        unsafe {
-            (self.f.acquire)(self.ptr);
-        }
         Self {
-            ptr: self.ptr,
-            f: self.f,
+            inner: self.inner.clone(),
+            vulkan_device: self.vulkan_device.clone(),
         }
     }
 }
 
-impl Drop for Context {
+/// Vulkan 未初期化の `AMFContext` を保持するハンドル
+///
+/// [`UninitializedContext::init_vulkan`] または
+/// [`UninitializedContext::init_vulkan_with_device`] で初期化し、`Context` を返す。
+pub struct UninitializedContext {
+    // 初期化に失敗した場合は、AMF が AMFVulkanDevice へのポインタを保持している
+    // 可能性があるため、inner を先に破棄して AMFContext を解放してから
+    // vulkan_device を破棄する。
+    inner: ContextInner,
+    /// 初期化に使用する Vulkan デバイス
+    vulkan_device: Option<Arc<VulkanDevice>>,
+}
+
+// SAFETY: `AMFContext` の生ポインタを保持するが、AMF 呼び出しは state のロックで
+// 直列化され、初期化は self を消費する。
+unsafe impl Send for UninitializedContext {}
+
+impl std::fmt::Debug for UninitializedContext {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("UninitializedContext")
+            .field("ptr", &format_args!("{:p}", self.inner.as_ptr()))
+            .finish()
+    }
+}
+
+impl UninitializedContext {
+    /// `AMFContext` の所有権を引き継ぎ、Vulkan 未初期化の `UninitializedContext` を作成する。
+    ///
+    /// # Safety
+    /// `ptr` は有効な `AMFContext` を指すこと。呼び出し元の参照の所有権を引き継ぐ。
+    pub(crate) unsafe fn from_raw_with_state(
+        ptr: *mut sys::AMFContext,
+        state: Arc<AmfObjectState>,
+    ) -> Result<Self, Error> {
+        Ok(Self {
+            inner: unsafe { ContextInner::from_raw_with_state(ptr, state)? },
+            vulkan_device: None,
+        })
+    }
+
+    /// AMF が要求する Vulkan デバイス拡張の一覧を返す
+    ///
+    /// Vulkan デバイスを作成する前に呼び出し、返った拡張を有効にしてデバイスを
+    /// 作成する。
+    ///
+    /// AMF の API リファレンスは未初期化の `Context` に対して `AMF_NO_DEVICE` を
+    /// 返すとしているが、AMF SDK のサンプルでは Vulkan を初期化する前に呼び出している。
+    /// また、実機でも初期化する前に呼び出しても正しく値が返されることを確認している。
+    ///
+    /// # Errors
+    ///
+    /// デバイス拡張の取得に失敗した場合にエラーを返す。
+    pub fn vulkan_device_extensions(&self) -> Result<Vec<String>, Error> {
+        self.inner.vulkan_device_extensions()
+    }
+
+    /// 既定の Vulkan デバイスで初期化し、`Context` を返す
+    ///
+    /// # Errors
+    ///
+    /// Vulkan デバイスの初期化に失敗した場合にエラーを返す。
+    pub fn init_vulkan(self) -> Result<Context, Error> {
+        unsafe { self.inner.init_vulkan(std::ptr::null_mut()) }?;
+        Ok(Context {
+            inner: self.inner,
+            vulkan_device: None,
+        })
+    }
+
+    /// 指定した Vulkan デバイスで初期化し、`Context` を返す
+    ///
+    /// # Safety
+    ///
+    /// `device` の 3 つのハンドルは有効であること。`device` は
+    /// [`UninitializedContext::vulkan_device_extensions`] が返す拡張を有効にし、
+    /// AMF が使うコンピュートキュー (コンピュート対応キューファミリ内のインデックス 0)
+    /// を作成した `VkDevice` を指すこと。AMF が要求する feature は公開されていないため、
+    /// AMF SDK の `DeviceVulkan.cpp` と同じ feature を有効にすること。
+    /// ハンドルは、返した `Context` とその `Clone`、およびそれらから取得したすべての
+    /// AMF オブジェクトを破棄するまで有効であること。AMF が所有するデバイスの場合、
+    /// そのデバイスを所有する `Context` も有効であること。
+    ///
+    /// # Errors
+    ///
+    /// AMF が指定した Vulkan デバイスを受け付けない場合にエラーを返す。
+    pub unsafe fn init_vulkan_with_device(
+        mut self,
+        device: VulkanDevice,
+    ) -> Result<Context, Error> {
+        // 実測では、AMF は InitVulkan に渡した AMFVulkanDevice へのポインタを
+        // GetVulkanDevice でそのまま返す。そのため Context が破棄されるまで構造体を
+        // 保持する。Arc を移動してもヒープ上の AMFVulkanDevice のアドレスは変わらない。
+        let storage = Arc::new(device);
+        let ptr = &storage.device as *const sys::AMFVulkanDevice as *mut std::ffi::c_void;
+        self.vulkan_device = Some(storage);
+        unsafe { self.inner.init_vulkan(ptr) }?;
+        Ok(Context {
+            inner: self.inner,
+            vulkan_device: self.vulkan_device,
+        })
+    }
+}
+
+/// `AMFContext1` の参照を所有し、破棄時に `Release` を呼ぶガード
+struct Context1Guard {
+    ptr: *mut sys::AMFContext1,
+    release: unsafe extern "C" fn(*mut sys::AMFContext1) -> sys::amf_long,
+}
+
+impl Drop for Context1Guard {
     fn drop(&mut self) {
+        // QueryInterface が増やした参照は、呼び出しの成否にかかわらず解放する。
         unsafe {
-            (self.f.release)(self.ptr);
+            (self.release)(self.ptr);
         }
     }
 }
 
 // ---------------------------------------------------------------------------
-// Component
+// Component のラッパー
 // ---------------------------------------------------------------------------
 
 #[derive(Clone, Copy)]
@@ -748,24 +2022,51 @@ struct ComponentFuncs {
     query_output:
         unsafe extern "C" fn(*mut sys::AMFComponent, *mut *mut sys::AMFData) -> sys::AMF_RESULT,
     get_context: unsafe extern "C" fn(*mut sys::AMFComponent) -> *mut sys::AMFContext,
+    get_caps:
+        unsafe extern "C" fn(*mut sys::AMFComponent, *mut *mut sys::AMFCaps) -> sys::AMF_RESULT,
 }
 
 /// `AMFComponent` の RAII ラッパー
 ///
-/// AMFComponent はスレッドセーフであると AMF ドキュメントに記載されているため、
-/// `Send` を実装する。
+/// # スレッド安全性について
+///
+/// `AMFComponent` は、ドキュメント上はスレッドセーフと記載されているが、実際はスレッドセーフではない。
+/// 少なくとも `AMFComponent::Init()` および `AMFComponent::ReInit()` では、グローバルなオブジェクトをロック無しで触れている。
+/// そのため [Component] はプロセス全体で共有のロックを保持し、[Component::init()] および [Component::re_init()] で
+/// グローバルなロックをすることでスレッド安全性を確保している。
 pub struct Component {
     ptr: *mut sys::AMFComponent,
     f: ComponentFuncs,
+    /// コンポーネント固有の状態
+    state: Arc<AmfObjectState>,
+    /// プロセス全体で共有する状態
+    process_state: Arc<AmfObjectState>,
+    context: Context,
 }
 
 unsafe impl Send for Component {}
+unsafe impl Sync for Component {}
+
+impl std::fmt::Debug for Component {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Component")
+            .field("ptr", &format_args!("{:p}", self.ptr))
+            .finish()
+    }
+}
 
 impl Component {
+    /// ハンドルを作成する
+    ///
+    /// # Safety
+    /// `ptr` は有効な `AMFComponent` を指すこと。
     unsafe fn from_raw_with_acquire(
         ptr: *mut sys::AMFComponent,
         acquire: bool,
+        process_state: Arc<AmfObjectState>,
+        context: Context,
     ) -> Result<Self, Error> {
+        let state = AmfObjectState::new();
         let vtbl = unsafe { &*(*ptr).pVtbl };
         let f = ComponentFuncs {
             acquire: require_vtbl_fn(vtbl.Acquire, "AMFComponent::Acquire")?,
@@ -778,53 +2079,61 @@ impl Component {
             submit_input: require_vtbl_fn(vtbl.SubmitInput, "AMFComponent::SubmitInput")?,
             query_output: require_vtbl_fn(vtbl.QueryOutput, "AMFComponent::QueryOutput")?,
             get_context: require_vtbl_fn(vtbl.GetContext, "AMFComponent::GetContext")?,
+            get_caps: require_vtbl_fn(vtbl.GetCaps, "AMFComponent::GetCaps")?,
         };
         if acquire {
             unsafe { (f.acquire)(ptr) };
         }
-        Ok(Self { ptr, f })
+        state.inc();
+        process_state.inc();
+        Ok(Self {
+            ptr,
+            f,
+            state,
+            process_state,
+            context,
+        })
     }
 
-    /// 生ポインタから Component を作成する (Acquire なし)
+    /// プロセス全体の状態と Context を指定して生ポインタから Component を作成する
     ///
     /// # Safety
-    /// `ptr` は有効な `AMFComponent` を指すこと。
-    pub unsafe fn from_raw(ptr: *mut sys::AMFComponent) -> Result<Self, Error> {
-        unsafe { Self::from_raw_with_acquire(ptr, false) }
+    /// `ptr` は有効な `AMFComponent` を指すこと。`context` は `ptr` のコンポーネントを
+    /// 作成した `Context` であること。
+    pub(crate) unsafe fn from_raw_with_state(
+        ptr: *mut sys::AMFComponent,
+        process_state: Arc<AmfObjectState>,
+        context: Context,
+    ) -> Result<Self, Error> {
+        unsafe { Self::from_raw_with_acquire(ptr, false, process_state, context) }
     }
 
-    /// 生ポインタから Acquire 付きで Component を作成する
-    ///
-    /// # Safety
-    /// `ptr` は有効な `AMFComponent` を指すこと。
-    pub unsafe fn from_raw_acquired(ptr: *mut sys::AMFComponent) -> Result<Self, Error> {
-        unsafe { Self::from_raw_with_acquire(ptr, true) }
+    /// このコンポーネントが保持する `Context` を返す
+    pub fn context(&self) -> Context {
+        self.context.clone()
     }
 
-    /// 生ポインタを返す
+    /// 生ポインタを返す。
     pub fn as_ptr(&self) -> *mut sys::AMFComponent {
         self.ptr
     }
 
-    /// 所有権を放棄して生ポインタを返す (Release は呼ばない)
-    pub fn into_raw(self) -> *mut sys::AMFComponent {
+    /// 所有権を放棄して生ポインタを返す (Release は呼ばない)。
+    pub fn into_raw(mut self) -> *mut sys::AMFComponent {
         let ptr = self.ptr;
-        std::mem::forget(self);
+        self.ptr = std::ptr::null_mut();
         ptr
     }
 
     /// コンポーネントを初期化する
-    pub fn init(
-        &self,
-        format: sys::AMF_SURFACE_FORMAT,
-        width: sys::amf_int32,
-        height: sys::amf_int32,
-    ) -> sys::AMF_RESULT {
-        unsafe { (self.f.init)(self.ptr, format, width, height) }
+    pub fn init(&self, format: SurfaceFormat, width: i32, height: i32) -> sys::AMF_RESULT {
+        let _guard = self.process_state.lock();
+        unsafe { (self.f.init)(self.ptr, format.to_amf(), width, height) }
     }
 
     /// コンポーネントを再初期化する (解像度変更)
-    pub fn re_init(&self, width: sys::amf_int32, height: sys::amf_int32) -> sys::AMF_RESULT {
+    pub fn re_init(&self, width: i32, height: i32) -> sys::AMF_RESULT {
+        let _guard = self.process_state.lock();
         unsafe { (self.f.re_init)(self.ptr, width, height) }
     }
 
@@ -846,7 +2155,8 @@ impl Component {
     /// データを入力する
     ///
     /// # Safety
-    /// `data` は有効な AMFData を指すこと。
+    /// `data` は有効な AMFData を指すこと。`data` を指す他のハンドルが存在しないこと、
+    /// およびコンポーネントが解放するまでアクセスしないことを呼び出し元が保証すること。
     pub unsafe fn submit_input(&self, data: *mut sys::AMFData) -> sys::AMF_RESULT {
         unsafe { (self.f.submit_input)(self.ptr, data) }
     }
@@ -854,7 +2164,9 @@ impl Component {
     /// 出力データを問い合わせる
     ///
     /// # Safety
-    /// `pp_data` は有効な `*mut *mut AMFData` を指すこと。
+    /// `pp_data` は有効な `*mut *mut AMFData` を指すこと。`*pp_data` が非 null に
+    /// なった場合、AMF の参照カウントモデルに従い、呼び出し元がその参照を
+    /// `Release` すること。
     pub unsafe fn query_output(&self, pp_data: *mut *mut sys::AMFData) -> sys::AMF_RESULT {
         unsafe { (self.f.query_output)(self.ptr, pp_data) }
     }
@@ -865,10 +2177,29 @@ impl Component {
     }
 
     /// AMFPropertyStorage としてアクセスする
-    ///
-    /// 戻り値の `PropertyStorage` が `Drop` されるまで参照カウントが増える。
     pub fn property_storage(&self) -> Result<PropertyStorage, Error> {
-        unsafe { PropertyStorage::from_raw_acquired(self.ptr as *mut sys::AMFPropertyStorage) }
+        unsafe {
+            PropertyStorage::from_raw_with_acquire(
+                self.ptr as *mut sys::AMFPropertyStorage,
+                true,
+                Arc::clone(&self.state),
+                self.context.clone(),
+            )
+        }
+    }
+
+    /// コンポーネントの能力情報を取得する
+    ///
+    /// `GetCaps` を利用できない場合はエラーを返す。
+    pub(crate) fn get_caps(&self) -> Result<Caps, Error> {
+        let _guard = self.process_state.lock();
+        let mut caps: *mut sys::AMFCaps = std::ptr::null_mut();
+        let result = unsafe { (self.f.get_caps)(self.ptr, &mut caps) };
+        AmfError::check(result, "AMFComponent::GetCaps")?;
+        if caps.is_null() {
+            return Err(InternalError::new("GetCaps returned null").into());
+        }
+        unsafe { Caps::from_raw(caps) }
     }
 }
 
@@ -877,17 +2208,952 @@ impl Clone for Component {
         unsafe {
             (self.f.acquire)(self.ptr);
         }
+        self.state.inc();
+        self.process_state.inc();
         Self {
             ptr: self.ptr,
             f: self.f,
+            state: Arc::clone(&self.state),
+            process_state: Arc::clone(&self.process_state),
+            context: self.context.clone(),
         }
     }
 }
 
 impl Drop for Component {
     fn drop(&mut self) {
+        self.state.dec();
+        self.process_state.dec();
+        if self.ptr.is_null() {
+            return;
+        }
         unsafe {
             (self.f.release)(self.ptr);
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// AMFCaps / AMFIOCaps のラッパー
+// ---------------------------------------------------------------------------
+
+unsafe extern "C" {
+    fn free(ptr: *mut std::ffi::c_void);
+}
+
+#[derive(Clone, Copy)]
+struct CapsFuncs {
+    release: unsafe extern "C" fn(*mut sys::AMFCaps) -> sys::amf_long,
+    get_acceleration_type: unsafe extern "C" fn(*mut sys::AMFCaps) -> sys::AMF_ACCELERATION_TYPE,
+    get_input_caps:
+        unsafe extern "C" fn(*mut sys::AMFCaps, *mut *mut sys::AMFIOCaps) -> sys::AMF_RESULT,
+    get_output_caps:
+        unsafe extern "C" fn(*mut sys::AMFCaps, *mut *mut sys::AMFIOCaps) -> sys::AMF_RESULT,
+    get_property_count: unsafe extern "C" fn(*mut sys::AMFCaps) -> sys::amf_size,
+    get_property_at: unsafe extern "C" fn(
+        *mut sys::AMFCaps,
+        sys::amf_size,
+        *mut sys::wchar_t,
+        sys::amf_size,
+        *mut sys::AMFVariantStruct,
+    ) -> sys::AMF_RESULT,
+    get_property: unsafe extern "C" fn(
+        *mut sys::AMFCaps,
+        *const sys::wchar_t,
+        *mut sys::AMFVariantStruct,
+    ) -> sys::AMF_RESULT,
+}
+
+/// `AMFCaps` の RAII ラッパー
+pub(crate) struct Caps {
+    ptr: *mut sys::AMFCaps,
+    f: CapsFuncs,
+}
+
+impl Caps {
+    /// 生ポインタから `Caps` を作成する
+    ///
+    /// # Safety
+    /// `ptr` は有効な `AMFCaps` を指し、呼び出し元が参照を所有していること。
+    unsafe fn from_raw(ptr: *mut sys::AMFCaps) -> Result<Self, Error> {
+        let vtbl = unsafe { &*(*ptr).pVtbl };
+        let release = require_vtbl_fn(vtbl.Release, "AMFCaps::Release")?;
+        let funcs = (|| {
+            Ok(CapsFuncs {
+                release,
+                get_acceleration_type: require_vtbl_fn(
+                    vtbl.GetAccelerationType,
+                    "AMFCaps::GetAccelerationType",
+                )?,
+                get_input_caps: require_vtbl_fn(vtbl.GetInputCaps, "AMFCaps::GetInputCaps")?,
+                get_output_caps: require_vtbl_fn(vtbl.GetOutputCaps, "AMFCaps::GetOutputCaps")?,
+                get_property_count: require_vtbl_fn(
+                    vtbl.GetPropertyCount,
+                    "AMFCaps::GetPropertyCount",
+                )?,
+                get_property_at: require_vtbl_fn(vtbl.GetPropertyAt, "AMFCaps::GetPropertyAt")?,
+                get_property: require_vtbl_fn(vtbl.GetProperty, "AMFCaps::GetProperty")?,
+            })
+        })();
+        match funcs {
+            Ok(f) => Ok(Self { ptr, f }),
+            Err(e) => {
+                unsafe { release(ptr) };
+                Err(e)
+            }
+        }
+    }
+
+    /// AMF が報告するアクセラレーション種別を返す
+    pub(crate) fn get_acceleration_type(&self) -> sys::AMF_ACCELERATION_TYPE {
+        unsafe { (self.f.get_acceleration_type)(self.ptr) }
+    }
+
+    /// 入力の能力情報を返す
+    pub(crate) fn get_input_caps(&self) -> Result<IoCaps, Error> {
+        let mut io_caps: *mut sys::AMFIOCaps = std::ptr::null_mut();
+        let result = unsafe { (self.f.get_input_caps)(self.ptr, &mut io_caps) };
+        AmfError::check(result, "AMFCaps::GetInputCaps")?;
+        if io_caps.is_null() {
+            return Err(InternalError::new("GetInputCaps returned null").into());
+        }
+        unsafe { IoCaps::from_raw(io_caps) }
+    }
+
+    /// 出力の能力情報を返す
+    pub(crate) fn get_output_caps(&self) -> Result<IoCaps, Error> {
+        let mut io_caps: *mut sys::AMFIOCaps = std::ptr::null_mut();
+        let result = unsafe { (self.f.get_output_caps)(self.ptr, &mut io_caps) };
+        AmfError::check(result, "AMFCaps::GetOutputCaps")?;
+        if io_caps.is_null() {
+            return Err(InternalError::new("GetOutputCaps returned null").into());
+        }
+        unsafe { IoCaps::from_raw(io_caps) }
+    }
+
+    /// プロパティ数を返す
+    pub(crate) fn get_property_count(&self) -> sys::amf_size {
+        unsafe { (self.f.get_property_count)(self.ptr) }
+    }
+
+    /// インデックスでプロパティを取得する
+    ///
+    /// プロパティ名が 256 文字以上の場合はエラーを返す。
+    /// 返した `Variant` は AMF がコピーした値であり、`Drop` で解放される。
+    pub(crate) fn get_property_at(&self, index: sys::amf_size) -> Result<(String, Variant), Error> {
+        const MAX_NAME_LEN: usize = 255;
+        let mut name = vec![0 as sys::wchar_t; MAX_NAME_LEN + 1];
+        let mut value = Variant::empty();
+        let result = unsafe {
+            (self.f.get_property_at)(
+                self.ptr,
+                index,
+                name.as_mut_ptr(),
+                name.len(),
+                value.as_ptr(),
+            )
+        };
+        AmfError::check(result, "AMFCaps::GetPropertyAt")?;
+        let name = sys::from_wstring(&name);
+        if name.chars().count() >= MAX_NAME_LEN {
+            return Err(InternalError::new("property name is too long").into());
+        }
+        Ok((name, value))
+    }
+
+    /// 名前でプロパティを取得する
+    ///
+    /// プロパティが存在しない場合は `None` を返す。
+    pub(crate) fn get_property(&self, name: &str) -> Option<Variant> {
+        let mut value = Variant::empty();
+        let name_w = sys::to_wstring(name);
+        let result = unsafe { (self.f.get_property)(self.ptr, name_w.as_ptr(), value.as_ptr()) };
+        if result != sys::AMF_RESULT::AMF_OK {
+            return None;
+        }
+        Some(value)
+    }
+}
+
+impl Drop for Caps {
+    fn drop(&mut self) {
+        unsafe {
+            (self.f.release)(self.ptr);
+        }
+    }
+}
+
+/// `AMFVariantStruct` の RAII ラッパー
+pub(crate) struct Variant {
+    value: sys::AMFVariantStruct,
+}
+
+impl Variant {
+    /// 空の variant を作成する
+    fn empty() -> Self {
+        Self {
+            value: sys::AMFVariantStruct::empty(),
+        }
+    }
+
+    /// 書き込み用のポインタを返す
+    fn as_ptr(&mut self) -> *mut sys::AMFVariantStruct {
+        &mut self.value
+    }
+
+    /// 読み取り用の参照を返す
+    pub(crate) fn as_ref(&self) -> &sys::AMFVariantStruct {
+        &self.value
+    }
+
+    /// Int64 の値を返す
+    ///
+    /// variant の型が Int64 でない場合は `None` を返す。
+    pub(crate) fn as_int64(&self) -> Option<sys::amf_int64> {
+        if self.value.type_ != sys::AMF_VARIANT_TYPE::AMF_VARIANT_INT64 {
+            return None;
+        }
+        Some(unsafe { self.value.__bindgen_anon_1.int64Value })
+    }
+
+    /// Bool の値を返す
+    ///
+    /// variant の型が Bool でない場合は `None` を返す。
+    pub(crate) fn as_bool(&self) -> Option<bool> {
+        if self.value.type_ != sys::AMF_VARIANT_TYPE::AMF_VARIANT_BOOL {
+            return None;
+        }
+        Some(unsafe { self.value.__bindgen_anon_1.boolValue != 0 })
+    }
+
+    /// Size の値を幅と高さの組で返す
+    ///
+    /// variant の型が Size でない場合は `None` を返す。
+    pub(crate) fn as_size(&self) -> Option<(sys::amf_int32, sys::amf_int32)> {
+        if self.value.type_ != sys::AMF_VARIANT_TYPE::AMF_VARIANT_SIZE {
+            return None;
+        }
+        let size = unsafe { self.value.__bindgen_anon_1.sizeValue };
+        Some((size.width, size.height))
+    }
+}
+
+impl Drop for Variant {
+    fn drop(&mut self) {
+        unsafe {
+            release_variant(&mut self.value);
+        }
+    }
+}
+
+/// `AMFVariantStruct` が保持する AMF 側の参照を解放する
+unsafe fn release_variant(value: &mut sys::AMFVariantStruct) {
+    // AMF は variant の文字列を libc の malloc で確保するため free で解放する。
+    // インターフェースは AMFInterface::Release で参照カウントを減らす。
+    if value.type_ == sys::AMF_VARIANT_TYPE::AMF_VARIANT_STRING {
+        let ptr = unsafe { value.__bindgen_anon_1.stringValue };
+        if !ptr.is_null() {
+            unsafe { free(ptr.cast()) };
+        }
+    } else if value.type_ == sys::AMF_VARIANT_TYPE::AMF_VARIANT_WSTRING {
+        let ptr = unsafe { value.__bindgen_anon_1.wstringValue };
+        if !ptr.is_null() {
+            unsafe { free(ptr.cast()) };
+        }
+    } else if value.type_ == sys::AMF_VARIANT_TYPE::AMF_VARIANT_INTERFACE {
+        let interface = unsafe { value.__bindgen_anon_1.pInterface };
+        if !interface.is_null() {
+            let vtbl = unsafe { &*(*interface).pVtbl };
+            if let Some(release) = vtbl.Release {
+                unsafe { release(interface) };
+            }
+        }
+    }
+    value.type_ = sys::AMF_VARIANT_TYPE::AMF_VARIANT_EMPTY;
+}
+
+#[derive(Clone, Copy)]
+struct IoCapsFuncs {
+    release: unsafe extern "C" fn(*mut sys::AMFIOCaps) -> sys::amf_long,
+    get_width_range:
+        unsafe extern "C" fn(*mut sys::AMFIOCaps, *mut sys::amf_int32, *mut sys::amf_int32),
+    get_height_range:
+        unsafe extern "C" fn(*mut sys::AMFIOCaps, *mut sys::amf_int32, *mut sys::amf_int32),
+    get_vert_align: unsafe extern "C" fn(*mut sys::AMFIOCaps) -> sys::amf_int32,
+    get_num_of_formats: unsafe extern "C" fn(*mut sys::AMFIOCaps) -> sys::amf_int32,
+    get_format_at: unsafe extern "C" fn(
+        *mut sys::AMFIOCaps,
+        sys::amf_int32,
+        *mut sys::AMF_SURFACE_FORMAT,
+        *mut sys::amf_bool,
+    ) -> sys::AMF_RESULT,
+    get_num_of_memory_types: unsafe extern "C" fn(*mut sys::AMFIOCaps) -> sys::amf_int32,
+    get_memory_type_at: unsafe extern "C" fn(
+        *mut sys::AMFIOCaps,
+        sys::amf_int32,
+        *mut sys::AMF_MEMORY_TYPE,
+        *mut sys::amf_bool,
+    ) -> sys::AMF_RESULT,
+    is_interlaced_supported: unsafe extern "C" fn(*mut sys::AMFIOCaps) -> sys::amf_bool,
+}
+
+/// `AMFIOCaps` の RAII ラッパー
+pub(crate) struct IoCaps {
+    ptr: *mut sys::AMFIOCaps,
+    f: IoCapsFuncs,
+}
+
+impl IoCaps {
+    /// 生ポインタから `IoCaps` を作成する
+    ///
+    /// # Safety
+    /// `ptr` は有効な `AMFIOCaps` を指し、呼び出し元が参照を所有していること。
+    unsafe fn from_raw(ptr: *mut sys::AMFIOCaps) -> Result<Self, Error> {
+        let vtbl = unsafe { &*(*ptr).pVtbl };
+        let release = require_vtbl_fn(vtbl.Release, "AMFIOCaps::Release")?;
+        let funcs = (|| {
+            Ok(IoCapsFuncs {
+                release,
+                get_width_range: require_vtbl_fn(vtbl.GetWidthRange, "AMFIOCaps::GetWidthRange")?,
+                get_height_range: require_vtbl_fn(
+                    vtbl.GetHeightRange,
+                    "AMFIOCaps::GetHeightRange",
+                )?,
+                get_vert_align: require_vtbl_fn(vtbl.GetVertAlign, "AMFIOCaps::GetVertAlign")?,
+                get_num_of_formats: require_vtbl_fn(
+                    vtbl.GetNumOfFormats,
+                    "AMFIOCaps::GetNumOfFormats",
+                )?,
+                get_format_at: require_vtbl_fn(vtbl.GetFormatAt, "AMFIOCaps::GetFormatAt")?,
+                get_num_of_memory_types: require_vtbl_fn(
+                    vtbl.GetNumOfMemoryTypes,
+                    "AMFIOCaps::GetNumOfMemoryTypes",
+                )?,
+                get_memory_type_at: require_vtbl_fn(
+                    vtbl.GetMemoryTypeAt,
+                    "AMFIOCaps::GetMemoryTypeAt",
+                )?,
+                is_interlaced_supported: require_vtbl_fn(
+                    vtbl.IsInterlacedSupported,
+                    "AMFIOCaps::IsInterlacedSupported",
+                )?,
+            })
+        })();
+        match funcs {
+            Ok(f) => Ok(Self { ptr, f }),
+            Err(e) => {
+                unsafe { release(ptr) };
+                Err(e)
+            }
+        }
+    }
+
+    /// 幅の範囲を返す
+    pub(crate) fn width_range(&self) -> (sys::amf_int32, sys::amf_int32) {
+        let mut min_width = 0;
+        let mut max_width = 0;
+        unsafe {
+            (self.f.get_width_range)(self.ptr, &mut min_width, &mut max_width);
+        }
+        (min_width, max_width)
+    }
+
+    /// 高さの範囲を返す
+    pub(crate) fn height_range(&self) -> (sys::amf_int32, sys::amf_int32) {
+        let mut min_height = 0;
+        let mut max_height = 0;
+        unsafe {
+            (self.f.get_height_range)(self.ptr, &mut min_height, &mut max_height);
+        }
+        (min_height, max_height)
+    }
+
+    /// 垂直アライメントを返す
+    pub(crate) fn vertical_alignment(&self) -> sys::amf_int32 {
+        unsafe { (self.f.get_vert_align)(self.ptr) }
+    }
+
+    /// 対応する surface format の一覧を返す
+    pub(crate) fn formats(&self) -> Result<Vec<(sys::AMF_SURFACE_FORMAT, bool)>, Error> {
+        let count = unsafe { (self.f.get_num_of_formats)(self.ptr) };
+        let mut formats = Vec::new();
+        for index in 0..count {
+            let mut format = sys::AMF_SURFACE_FORMAT::AMF_SURFACE_UNKNOWN;
+            let mut native = 0;
+            let result =
+                unsafe { (self.f.get_format_at)(self.ptr, index, &mut format, &mut native) };
+            AmfError::check(result, "AMFIOCaps::GetFormatAt")?;
+            formats.push((format, native != 0));
+        }
+        Ok(formats)
+    }
+
+    /// 対応する memory type の一覧を返す
+    pub(crate) fn memory_types(&self) -> Result<Vec<(sys::AMF_MEMORY_TYPE, bool)>, Error> {
+        let count = unsafe { (self.f.get_num_of_memory_types)(self.ptr) };
+        let mut memory_types = Vec::new();
+        for index in 0..count {
+            let mut memory_type = sys::AMF_MEMORY_TYPE::AMF_MEMORY_UNKNOWN;
+            let mut native = 0;
+            let result = unsafe {
+                (self.f.get_memory_type_at)(self.ptr, index, &mut memory_type, &mut native)
+            };
+            AmfError::check(result, "AMFIOCaps::GetMemoryTypeAt")?;
+            memory_types.push((memory_type, native != 0));
+        }
+        Ok(memory_types)
+    }
+
+    /// インターレースに対応しているかを返す
+    pub(crate) fn interlaced(&self) -> bool {
+        unsafe { (self.f.is_interlaced_supported)(self.ptr) != 0 }
+    }
+}
+
+impl Drop for IoCaps {
+    fn drop(&mut self) {
+        unsafe {
+            (self.f.release)(self.ptr);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use super::*;
+    use crate::AmfLibrary;
+    use crate::types::FrameFormat;
+
+    /// テスト用の Context を作成する
+    fn create_context() -> Context {
+        AmfLibrary::instance()
+            .create_context()
+            .expect("Context の作成に失敗")
+    }
+
+    /// テスト用の Surface を作成する
+    fn create_surface(context: &Context) -> Surface {
+        context
+            .alloc_surface(
+                MemoryType::Host,
+                SurfaceFormat::from(FrameFormat::Nv12),
+                320,
+                240,
+            )
+            .expect("Surface の確保に失敗")
+    }
+
+    /// テスト用の Buffer を作成する
+    fn create_buffer(context: &Context) -> Buffer {
+        context
+            .alloc_buffer(MemoryType::Host, 4096)
+            .expect("Buffer の確保に失敗")
+    }
+
+    /// Surface と Buffer が確保元の Context を保持することを確認する
+    #[test]
+    fn test_handle_context_matches_source_context() {
+        let context_a = create_context();
+        let context_b = create_context();
+        let surface_a = create_surface(&context_a);
+        let surface_b = create_surface(&context_b);
+        let buffer_a = create_buffer(&context_a);
+
+        assert_eq!(
+            surface_a.context(),
+            context_a,
+            "Surface が確保元の Context を保持していない"
+        );
+        assert_ne!(
+            surface_a.context(),
+            context_b,
+            "別の Context の Surface が同じ Context と判定された"
+        );
+        assert_eq!(
+            surface_b.context(),
+            context_b,
+            "Surface が確保元の Context を保持していない"
+        );
+        assert_eq!(
+            buffer_a.context(),
+            context_a,
+            "Buffer が確保元の Context を保持していない"
+        );
+        assert_ne!(
+            buffer_a.context(),
+            context_b,
+            "別の Context の Buffer が同じ Context と判定された"
+        );
+
+        // from_raw で再構築しても、指定した Context を保持する
+        let raw_surface =
+            unsafe { Surface::from_raw(surface_a.clone().into_raw(), context_a.clone()) }
+                .expect("Surface の再構築に失敗");
+        assert_eq!(
+            raw_surface.context(),
+            context_a,
+            "from_raw で再構築した Surface が Context を保持していない"
+        );
+
+        let cloned_context = context_a.clone();
+        assert_eq!(
+            cloned_context, context_a,
+            "Clone した Context が元の Context と等しくない"
+        );
+        assert_ne!(
+            context_a, context_b,
+            "別々に作成した Context が等しいと判定された"
+        );
+    }
+
+    /// Plane が Surface と同じ状態を共有することを確認する
+    #[test]
+    fn test_plane_shares_state_with_surface() {
+        let context = create_context();
+        let surface = create_surface(&context);
+
+        assert!(
+            !surface.is_shared(),
+            "Plane を取得する前の Surface が共有扱いになっている"
+        );
+        let plane = surface
+            .get_plane(PlaneType::Y)
+            .expect("Y プレーンの取得に失敗");
+        assert!(
+            surface.is_shared(),
+            "Plane を取得した Surface が共有扱いになっていない"
+        );
+
+        let cloned = plane.clone();
+        drop(cloned);
+        assert!(
+            surface.is_shared(),
+            "Plane の Clone を drop しても、Plane が生存している Surface が共有扱いになっていない"
+        );
+
+        drop(plane);
+        assert!(
+            !surface.is_shared(),
+            "Plane を drop した後の Surface が共有扱いになっている"
+        );
+    }
+
+    /// PropertyStorage が Surface と同じ状態を共有することを確認する
+    #[test]
+    fn test_property_storage_shares_state_with_surface() {
+        let context = create_context();
+        let surface = create_surface(&context);
+        let property_storage = surface
+            .property_storage()
+            .expect("PropertyStorage の取得に失敗");
+
+        assert!(
+            Arc::ptr_eq(&surface.state, &property_storage.state),
+            "PropertyStorage が Surface の状態を共有していない"
+        );
+    }
+
+    /// Data が Surface と同じ状態と Plane カウンタを共有することを確認する
+    #[test]
+    fn test_data_shares_state_with_surface() {
+        let context = create_context();
+        let surface = create_surface(&context);
+        let data = surface.data().expect("Data の作成に失敗");
+
+        assert!(
+            Arc::ptr_eq(&surface.state, &data.state),
+            "Data が Surface の状態を共有していない"
+        );
+        assert!(
+            Arc::ptr_eq(&surface.planes, &data.planes),
+            "Data が Surface の Plane カウンタを共有していない"
+        );
+        assert!(
+            surface.is_shared(),
+            "Data を保持している Surface が共有扱いになっていない"
+        );
+
+        drop(data);
+        assert!(
+            !surface.is_shared(),
+            "Data を drop した後の Surface が共有扱いになっている"
+        );
+    }
+
+    /// Data から作った Surface が状態と Plane カウンタを共有することを確認する
+    #[test]
+    fn test_data_to_surface_shares_state_and_planes() {
+        let context = create_context();
+        let surface = create_surface(&context);
+        let data = surface.data().expect("Data の作成に失敗");
+        let other = data.to_surface().expect("Surface の作成に失敗");
+
+        assert!(
+            Arc::ptr_eq(&surface.state, &other.state),
+            "Data から作った Surface が状態を共有していない"
+        );
+        assert!(
+            Arc::ptr_eq(&surface.planes, &other.planes),
+            "Data から作った Surface が Plane カウンタを共有していない"
+        );
+
+        let plane = other
+            .get_plane(PlaneType::Y)
+            .expect("Y プレーンの取得に失敗");
+        assert!(
+            surface.convert(MemoryType::Host).is_err(),
+            "Plane が生存しているのに Surface::convert が成功した"
+        );
+
+        drop(plane);
+        drop(data);
+        drop(other);
+    }
+
+    /// Surface::into_data が Clone と状態・Plane カウンタを共有することを確認する
+    #[test]
+    fn test_surface_into_data_shares_state_with_clone() {
+        let context = create_context();
+        let surface = create_surface(&context);
+        let clone = surface.clone();
+        let data = surface.into_data().expect("Data の作成に失敗");
+
+        assert!(
+            Arc::ptr_eq(&clone.state, &data.state),
+            "into_data で作った Data が Clone と状態を共有していない"
+        );
+        assert!(
+            Arc::ptr_eq(&clone.planes, &data.planes),
+            "into_data で作った Data が Clone と Plane カウンタを共有していない"
+        );
+        assert!(
+            clone.is_shared(),
+            "Data を保持している Clone が共有扱いになっていない"
+        );
+
+        drop(data);
+        assert!(
+            !clone.is_shared(),
+            "Data を drop した後の Clone が共有扱いになっている"
+        );
+    }
+
+    /// Buffer::data と Data::to_buffer が状態を共有することを確認する
+    #[test]
+    fn test_buffer_data_shares_state() {
+        let context = create_context();
+        let buffer = create_buffer(&context);
+        let data = buffer.data().expect("Data の作成に失敗");
+        let other = data.to_buffer().expect("Buffer の作成に失敗");
+
+        assert!(
+            Arc::ptr_eq(&buffer.state, &data.state),
+            "Data が Buffer の状態を共有していない"
+        );
+        assert!(
+            Arc::ptr_eq(&buffer.state, &other.state),
+            "Data::to_buffer で作った Buffer が状態を共有していない"
+        );
+        assert!(
+            buffer.is_shared(),
+            "Data と派生 Buffer を保持している Buffer が共有扱いになっていない"
+        );
+
+        drop(other);
+        drop(data);
+        assert!(
+            !buffer.is_shared(),
+            "派生ハンドルを drop した後の Buffer が共有扱いになっている"
+        );
+    }
+
+    /// Buffer::into_data が Clone と状態を共有することを確認する
+    #[test]
+    fn test_buffer_into_data_shares_state_with_clone() {
+        let context = create_context();
+        let buffer = create_buffer(&context);
+        let clone = buffer.clone();
+        let data = buffer.into_data().expect("Data の作成に失敗");
+
+        assert!(
+            Arc::ptr_eq(&clone.state, &data.state),
+            "into_data で作った Data が Clone と状態を共有していない"
+        );
+        assert!(
+            clone.is_shared(),
+            "Data を保持している Clone が共有扱いになっていない"
+        );
+
+        drop(data);
+        assert!(
+            !clone.is_shared(),
+            "Data を drop した後の Clone が共有扱いになっている"
+        );
+    }
+
+    /// Data::from_raw から作った複数の Surface が Plane カウンタを共有することを確認する
+    #[test]
+    fn test_data_from_raw_to_surface_shares_planes() {
+        let context = create_context();
+        let surface = create_surface(&context);
+        let ptr = surface.into_raw() as *mut sys::AMFData;
+        let data = unsafe { Data::from_raw(ptr, context.clone()) }.expect("Data の作成に失敗");
+
+        let first = data.to_surface().expect("1 つ目の Surface の作成に失敗");
+        let second = data.to_surface().expect("2 つ目の Surface の作成に失敗");
+
+        let plane = first
+            .get_plane(PlaneType::Y)
+            .expect("Y プレーンの取得に失敗");
+        assert!(
+            second.convert(MemoryType::Host).is_err(),
+            "Plane が生存しているのに別の Surface から convert が成功した"
+        );
+
+        drop(plane);
+    }
+
+    /// Surface 由来の Data を Buffer に変換すると InvalidState になることを確認する
+    #[test]
+    fn test_data_to_buffer_rejects_surface() {
+        let context = create_context();
+        let surface = create_surface(&context);
+        let data = surface.data().expect("Data の作成に失敗");
+
+        let error = data
+            .to_buffer()
+            .expect_err("Surface 由来の Data の to_buffer が成功した");
+        assert!(
+            matches!(error, Error::InvalidState(_)),
+            "Data::to_buffer の型不一致が InvalidState でない: {error}"
+        );
+    }
+
+    /// Buffer 由来の Data を Surface に変換すると InvalidState になることを確認する
+    #[test]
+    fn test_data_to_surface_rejects_buffer() {
+        let context = create_context();
+        let buffer = create_buffer(&context);
+        let data = buffer.data().expect("Data の作成に失敗");
+
+        let error = data
+            .to_surface()
+            .expect_err("Buffer 由来の Data の to_surface が成功した");
+        assert!(
+            matches!(error, Error::InvalidState(_)),
+            "Data::to_surface の型不一致が InvalidState でない: {error}"
+        );
+    }
+
+    /// Data::get_data_type が Rust のデータ種別を返すことを確認する
+    #[test]
+    fn test_data_get_data_type() {
+        let context = create_context();
+        let surface = create_surface(&context);
+        let data = surface.data().expect("Data の作成に失敗");
+        assert_eq!(data.get_data_type(), DataType::Surface);
+
+        let buffer = create_buffer(&context);
+        let data = buffer.data().expect("Data の作成に失敗");
+        assert_eq!(data.get_data_type(), DataType::Buffer);
+    }
+
+    /// Component の PropertyStorage が Component と同じ状態を共有することを確認する
+    #[test]
+    fn test_component_property_storage_shares_state_with_component() {
+        let context = create_context();
+        let component = AmfLibrary::instance()
+            .create_component(&context, sys::str::AMFVideoEncoderVCE_AVC)
+            .expect("Component の作成に失敗");
+        let property_storage = component
+            .property_storage()
+            .expect("PropertyStorage の取得に失敗");
+
+        assert!(
+            Arc::ptr_eq(&component.state, &property_storage.state),
+            "PropertyStorage が Component の状態を共有していない"
+        );
+        assert_eq!(
+            component.context(),
+            property_storage.context(),
+            "PropertyStorage の Context が Component の Context と一致しない"
+        );
+    }
+
+    /// from_raw_acquired で作成したハンドルが状態を共有しないことを確認する
+    #[test]
+    fn test_from_raw_acquired_does_not_share_state() {
+        let context = create_context();
+        let surface = create_surface(&context);
+        let clone = surface.clone();
+        let other = unsafe { Surface::from_raw_acquired(surface.as_ptr(), context.clone()) }
+            .expect("Surface の再構築に失敗");
+
+        assert!(
+            !Arc::ptr_eq(&surface.state, &other.state),
+            "from_raw_acquired が元のハンドルと状態を共有している"
+        );
+        assert!(
+            !Arc::ptr_eq(&clone.state, &other.state),
+            "from_raw_acquired が Clone と状態を共有している"
+        );
+
+        // 元のハンドルと Clone は引き続き利用できる
+        let plane = surface
+            .get_plane(PlaneType::Y)
+            .expect("Y プレーンの取得に失敗");
+        assert_eq!(plane.get_width(), 320, "幅が一致しない");
+        drop(plane);
+        let plane = clone
+            .get_plane(PlaneType::Y)
+            .expect("Y プレーンの取得に失敗");
+        assert_eq!(plane.get_width(), 320, "幅が一致しない");
+        drop(plane);
+
+        // 元のハンドルと Clone を drop しても、Acquire 済みの other は利用できる
+        drop(clone);
+        drop(surface);
+        let plane = other
+            .get_plane(PlaneType::Y)
+            .expect("Y プレーンの取得に失敗");
+        assert_eq!(plane.get_width(), 320, "幅が一致しない");
+    }
+
+    /// Surface の is_shared がハンドル数に応じて変化することを確認する
+    #[test]
+    fn test_surface_is_shared_tracks_handles() {
+        let context = create_context();
+        let surface = create_surface(&context);
+
+        assert!(
+            !surface.is_shared(),
+            "作成直後の Surface が共有扱いになっている"
+        );
+        let clone = surface.clone();
+        assert!(
+            surface.is_shared(),
+            "Clone 後の Surface が共有扱いになっていない"
+        );
+        assert!(
+            clone.is_shared(),
+            "Clone 側の Surface が共有扱いになっていない"
+        );
+        drop(clone);
+        assert!(
+            !surface.is_shared(),
+            "Clone を drop した後の Surface が共有扱いになっている"
+        );
+    }
+
+    /// Buffer の is_shared がハンドル数に応じて変化することを確認する
+    #[test]
+    fn test_buffer_is_shared_tracks_handles() {
+        let context = create_context();
+        let buffer = create_buffer(&context);
+
+        assert!(
+            !buffer.is_shared(),
+            "作成直後の Buffer が共有扱いになっている"
+        );
+        let clone = buffer.clone();
+        assert!(
+            buffer.is_shared(),
+            "Clone 後の Buffer が共有扱いになっていない"
+        );
+        assert!(
+            clone.is_shared(),
+            "Clone 側の Buffer が共有扱いになっていない"
+        );
+        drop(clone);
+        assert!(
+            !buffer.is_shared(),
+            "Clone を drop した後の Buffer が共有扱いになっている"
+        );
+    }
+
+    /// Surface を複数スレッドから参照で並行利用できることを確認する
+    #[test]
+    fn test_surface_can_be_used_from_multiple_threads_by_reference() {
+        let context = create_context();
+        let surface = create_surface(&context);
+
+        std::thread::scope(|scope| {
+            for _ in 0..4 {
+                scope.spawn(|| {
+                    for i in 0..100 {
+                        surface.set_pts(i);
+                        let plane = surface
+                            .get_plane(PlaneType::Y)
+                            .expect("Y プレーンの取得に失敗");
+                        assert!(
+                            unsafe { plane.as_slice() }.is_ok(),
+                            "Y プレーンをスライスとして取得できない"
+                        );
+                    }
+                });
+            }
+        });
+    }
+
+    /// null ポインタがスライス生成の対象にならないことを確認する
+    #[test]
+    fn test_validate_slice_ptr_rejects_null() {
+        assert!(
+            matches!(
+                validate_slice_ptr(std::ptr::null()),
+                Err(Error::Internal(_))
+            ),
+            "null ポインタが受け入れられた"
+        );
+
+        let data = [0u8; 1];
+        assert!(
+            validate_slice_ptr(data.as_ptr()).is_ok(),
+            "null でないポインタが拒否された"
+        );
+    }
+
+    /// isize::MAX を超える長さがスライスの長さとして拒否されることを確認する
+    #[test]
+    fn test_validate_slice_len_rejects_too_long() {
+        assert!(
+            validate_slice_len(isize::MAX as usize).is_ok(),
+            "isize::MAX の長さが拒否された"
+        );
+        assert!(
+            matches!(
+                validate_slice_len(isize::MAX as usize + 1),
+                Err(Error::Internal(_))
+            ),
+            "isize::MAX を超える長さが受け入れられた"
+        );
+    }
+
+    /// 負のピッチと積のオーバーフローが拒否されることを確認する
+    #[test]
+    fn test_plane_slice_len_validates_pitch() {
+        assert_eq!(
+            plane_slice_len(false, 4, 3).expect("正のピッチが拒否された"),
+            12,
+            "ピッチの積が一致しない"
+        );
+        assert!(
+            matches!(plane_slice_len(false, -1, 3), Err(Error::Internal(_))),
+            "負の hpitch が受け入れられた"
+        );
+        assert!(
+            matches!(plane_slice_len(false, 4, -1), Err(Error::Internal(_))),
+            "負の vpitch が受け入れられた"
+        );
+        assert!(
+            matches!(checked_mul_len(usize::MAX, 2), Err(Error::Internal(_))),
+            "長さの積のオーバーフローが受け入れられた"
+        );
+        assert!(
+            matches!(plane_slice_len(true, 4, 3), Err(Error::InvalidState(_))),
+            "タイル状のプレーンが受け入れられた"
+        );
     }
 }

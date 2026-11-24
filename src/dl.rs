@@ -1,7 +1,10 @@
-//! プラットフォーム固有の動的ライブラリローダー
+//! Linux の dlopen を利用した動的ライブラリローダー
 
-use std::ffi::{CString, c_void};
+use std::ffi::{CStr, CString, c_char, c_int, c_void};
+use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
+
+use crate::error::{EnvironmentError, Error};
 
 /// 動的ライブラリのハンドル
 pub(crate) struct DynLib {
@@ -16,6 +19,16 @@ impl std::fmt::Debug for DynLib {
 
 unsafe impl Send for DynLib {}
 
+// Linux の dlopen は RTLD_LOCAL が 0 なので、RTLD_LAZY だけを指定する。
+const DLOPEN_FLAGS: c_int = 1;
+
+unsafe extern "C" {
+    fn dlopen(filename: *const c_char, flags: c_int) -> *mut c_void;
+    fn dlsym(handle: *mut c_void, symbol: *const c_char) -> *mut c_void;
+    fn dlclose(handle: *mut c_void) -> c_int;
+    fn dlerror() -> *const c_char;
+}
+
 impl DynLib {
     /// シンボルを取得して指定の型として返す
     ///
@@ -26,137 +39,119 @@ impl DynLib {
     ///   (`assert_eq!` でサイズチェックを行うが、型の正しさは呼び出し側が保証する)
     /// - `transmute_copy` により生ポインタを `T` にビットキャストするため、
     ///   `T` が実際のシンボルの ABI と一致しない場合は未定義動作になる
-    pub(crate) unsafe fn get<T>(&self, symbol: &[u8]) -> Result<T, String> {
+    ///
+    /// # Errors
+    ///
+    /// シンボル名に NUL バイトが含まれる場合、またはシンボルを取得できない場合に
+    /// エラーを返す。
+    pub(crate) unsafe fn get<T>(&self, symbol: &[u8]) -> Result<T, Error> {
         assert_eq!(
             std::mem::size_of::<T>(),
             std::mem::size_of::<*mut c_void>(),
             "T must be pointer-sized"
         );
-        let c_symbol =
-            CString::new(symbol).map_err(|_| "symbol name contains null byte".to_string())?;
+        let c_symbol = CString::new(symbol)?;
         let ptr = unsafe { self.sym(&c_symbol)? };
         Ok(unsafe { std::mem::transmute_copy(&ptr) })
     }
+
+    /// 指定したパスの動的ライブラリを開く
+    ///
+    /// # Errors
+    ///
+    /// パスに NUL バイトが含まれる場合、またはライブラリを開けない場合に
+    /// エラーを返す。ライブラリを開けない場合の原因は `source()` で取得できる。
+    pub(crate) fn open(path: &Path) -> Result<Self, Error> {
+        let c_path = CString::new(path.as_os_str().as_bytes())?;
+        unsafe {
+            dlerror();
+            let handle = dlopen(c_path.as_ptr(), DLOPEN_FLAGS);
+            if handle.is_null() {
+                let err = dlerror();
+                let source = if err.is_null() {
+                    std::io::Error::other("dlopen failed without a diagnostic message")
+                } else {
+                    std::io::Error::other(CStr::from_ptr(err).to_string_lossy().into_owned())
+                };
+                return Err(EnvironmentError::new(
+                    format!("failed to load library: {}", path.display()),
+                    source,
+                )
+                .into());
+            }
+            Ok(DynLib { handle })
+        }
+    }
+
+    /// シンボルを取得する
+    ///
+    /// # Errors
+    ///
+    /// シンボルを取得できない場合にエラーを返す。原因は `source()` で取得できる。
+    // POSIX では dlsym がシンボル値として正当に NULL を返すケースがあるが、
+    // このクレートでは AMF の関数ポインタのみを取得するため NULL は常にエラーとして扱う。
+    pub(crate) unsafe fn sym(&self, symbol: &CString) -> Result<*mut c_void, Error> {
+        unsafe {
+            dlerror();
+            let ptr = dlsym(self.handle, symbol.as_ptr());
+            if ptr.is_null() {
+                let err = dlerror();
+                let source = if err.is_null() {
+                    std::io::Error::other("dlsym failed without a diagnostic message")
+                } else {
+                    std::io::Error::other(CStr::from_ptr(err).to_string_lossy().into_owned())
+                };
+                return Err(EnvironmentError::new(
+                    format!("failed to find symbol: {}", symbol.to_string_lossy()),
+                    source,
+                )
+                .into());
+            }
+            Ok(ptr)
+        }
+    }
 }
 
-#[cfg(unix)]
-mod unix {
-    use super::*;
-    use std::ffi::{CStr, c_char, c_int};
+impl Drop for DynLib {
+    fn drop(&mut self) {
+        unsafe {
+            dlclose(self.handle);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::ffi::OsStr;
     use std::os::unix::ffi::OsStrExt;
+    use std::path::Path;
 
-    // macOS では RTLD_LOCAL が 0x4 なので明示的に指定する必要がある
-    #[cfg(target_os = "macos")]
-    const DLOPEN_FLAGS: c_int = 1 | 4; // RTLD_LAZY | RTLD_LOCAL
-
-    #[cfg(not(target_os = "macos"))]
-    const DLOPEN_FLAGS: c_int = 1; // RTLD_LAZY (RTLD_LOCAL = 0)
-
-    unsafe extern "C" {
-        fn dlopen(filename: *const c_char, flags: c_int) -> *mut c_void;
-        fn dlsym(handle: *mut c_void, symbol: *const c_char) -> *mut c_void;
-        fn dlclose(handle: *mut c_void) -> c_int;
-        fn dlerror() -> *const c_char;
-    }
-
-    impl DynLib {
-        pub(crate) fn open(path: &Path) -> Result<Self, String> {
-            let c_path = CString::new(path.as_os_str().as_bytes())
-                .map_err(|_| "path contains null byte".to_string())?;
-            unsafe {
-                dlerror();
-                let handle = dlopen(c_path.as_ptr(), DLOPEN_FLAGS);
-                if handle.is_null() {
-                    let err = dlerror();
-                    let msg = if err.is_null() {
-                        format!("failed to load library: {}", path.display())
-                    } else {
-                        CStr::from_ptr(err).to_string_lossy().into_owned()
-                    };
-                    return Err(msg);
-                }
-                Ok(DynLib { handle })
-            }
-        }
-
-        // POSIX では dlsym がシンボル値として正当に NULL を返すケースがあるが、
-        // このクレートでは AMF の関数ポインタのみを取得するため NULL は常にエラーとして扱う。
-        pub(crate) unsafe fn sym(&self, symbol: &CString) -> Result<*mut c_void, String> {
-            unsafe {
-                dlerror();
-                let ptr = dlsym(self.handle, symbol.as_ptr());
-                if ptr.is_null() {
-                    let err = dlerror();
-                    let msg = if err.is_null() {
-                        format!("symbol '{}' resolved to null", symbol.to_string_lossy())
-                    } else {
-                        CStr::from_ptr(err).to_string_lossy().into_owned()
-                    };
-                    return Err(msg);
-                }
-                Ok(ptr)
-            }
-        }
-    }
-
-    impl Drop for DynLib {
-        fn drop(&mut self) {
-            unsafe {
-                dlclose(self.handle);
-            }
-        }
-    }
-}
-
-#[cfg(windows)]
-mod windows {
     use super::*;
-    use std::ffi::c_char;
-    use std::os::windows::ffi::OsStrExt;
 
-    unsafe extern "system" {
-        fn LoadLibraryW(lpLibFileName: *const u16) -> *mut c_void;
-        fn GetProcAddress(hModule: *mut c_void, lpProcName: *const c_char) -> *mut c_void;
-        fn FreeLibrary(hLibModule: *mut c_void) -> i32;
-        fn GetLastError() -> u32;
+    /// 存在しないライブラリを開くと Environment エラーと source を返すことを確認する
+    #[test]
+    fn test_open_missing_library_returns_environment_error() {
+        let path = Path::new("/nonexistent/shiguredo-amf-test.so");
+        let error = DynLib::open(path).expect_err("存在しないライブラリを開けてしまった");
+        assert!(
+            matches!(&error, Error::Environment(_)),
+            "Environment エラーではない: {error}"
+        );
+        assert!(
+            std::error::Error::source(&error).is_some(),
+            "source が取得できない: {error}"
+        );
     }
 
-    impl DynLib {
-        pub(crate) fn open(path: &Path) -> Result<Self, String> {
-            let wide: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
-            unsafe {
-                let handle = LoadLibraryW(wide.as_ptr());
-                if handle.is_null() {
-                    return Err(format!(
-                        "LoadLibraryW failed for '{}': error code {}",
-                        path.display(),
-                        GetLastError()
-                    ));
-                }
-                Ok(DynLib { handle })
-            }
-        }
-
-        pub(crate) unsafe fn sym(&self, symbol: &CString) -> Result<*mut c_void, String> {
-            unsafe {
-                let ptr = GetProcAddress(self.handle, symbol.as_ptr().cast());
-                if ptr.is_null() {
-                    return Err(format!(
-                        "GetProcAddress failed for '{}': error code {}",
-                        symbol.to_string_lossy(),
-                        GetLastError()
-                    ));
-                }
-                Ok(ptr)
-            }
-        }
-    }
-
-    impl Drop for DynLib {
-        fn drop(&mut self) {
-            unsafe {
-                FreeLibrary(self.handle);
-            }
-        }
+    /// パスに NUL バイトが含まれる場合は Internal エラーになることを確認する
+    #[test]
+    fn test_open_path_with_nul_returns_internal_error() {
+        let path = Path::new(OsStr::from_bytes(b"/nonexistent/amf\0test.so"));
+        let error =
+            DynLib::open(path).expect_err("NUL バイトを含むパスでライブラリを開けてしまった");
+        assert!(
+            matches!(&error, Error::Internal(_)),
+            "Internal エラーではない: {error}"
+        );
     }
 }

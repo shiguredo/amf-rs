@@ -4,20 +4,35 @@
 //! bindgen でヘッダーから自動生成された定義と、
 //! bindgen で生成できない補助定義 (プロパティ名定数、ヘルパー関数等) を含む。
 
-#![allow(non_camel_case_types)]
-#![allow(non_snake_case)]
-#![allow(non_upper_case_globals)]
-#![allow(dead_code)]
-#![allow(clippy::all)]
-
 // ビルド時に生成されるメタデータ
-include!(concat!(env!("OUT_DIR"), "/metadata.rs"));
+mod metadata {
+    #![expect(missing_docs)]
+    include!(concat!(env!("OUT_DIR"), "/metadata.rs"));
+}
+pub use metadata::*;
 
 // bindgen で AMF ヘッダーから自動生成されたバインディング
-include!(concat!(env!("OUT_DIR"), "/bindings.rs"));
+mod bindings {
+    // 生成コードは C の命名規則をそのまま持つため、Rust の命名規則の lint に
+    // 適合しない。生成コードだけに lint の抑制を閉じ込め、手書きコードには
+    // 抑制を及ぼさない。
+    #![expect(non_camel_case_types)]
+    #![expect(non_snake_case)]
+    #![expect(non_upper_case_globals)]
+    #![expect(missing_docs)]
+    include!(concat!(env!("OUT_DIR"), "/bindings.rs"));
+}
+pub use bindings::*;
 
-// ヘッダーのワイド文字列マクロから自動生成されたプロパティ名定数
+/// AMF ヘッダーのマクロから生成した文字列定数
+///
+/// AMF のコンポーネント ID とプロパティ名を表す。定数値は `&str` であり、
+/// AMF へ渡す際にワイド文字列へ変換する。
 pub mod str {
+    // 定数名は AMF ヘッダーのマクロ名をそのまま使うため、大文字だけの
+    // 命名規則には従わない。
+    #![expect(non_upper_case_globals)]
+    #![expect(missing_docs)]
     include!(concat!(env!("OUT_DIR"), "/properties.rs"));
 }
 
@@ -34,23 +49,32 @@ pub const AMF_FULL_VERSION: amf_uint64 = (AMF_VERSION_MAJOR as amf_uint64) << 48
     | (AMF_VERSION_RELEASE as amf_uint64) << 16
     | AMF_VERSION_BUILD_NUM as amf_uint64;
 
-/// Linux x86_64 での AMF ランタイムライブラリ名
+/// Linux x86_64 の AMD GPU ドライバーが提供する AMF ランタイムライブラリ名
 pub const AMF_DLL_NAME: &str = "libamfrt64.so.1";
 
 // ---------------------------------------------------------------------------
 // DLL エントリーポイント関数型
-// dl.rs の get<T> で直接使用するため Option でラップしない
+// ライブラリから取得できたことを前提に呼び出す関数ポインタの型のため、
+// Option でラップしない
 // ---------------------------------------------------------------------------
-pub type AMFInit_Fn =
-    unsafe extern "C" fn(version: amf_uint64, ppFactory: *mut *mut AMFFactory) -> AMF_RESULT;
-pub type AMFQueryVersion_Fn = unsafe extern "C" fn(pVersion: *mut amf_uint64) -> AMF_RESULT;
+/// `AMFInit` の関数ポインタ型
+///
+/// `version` には要求する AMF のバージョンを、`pp_factory` には
+/// `AMFFactory` のポインタを書き込む先のポインタを指定する。
+pub type AmfInitFn =
+    unsafe extern "C" fn(version: amf_uint64, pp_factory: *mut *mut AMFFactory) -> AMF_RESULT;
+
+/// `AMFQueryVersion` の関数ポインタ型
+///
+/// `p_version` には AMF のバージョンを受け取るポインタを指定する。
+pub type AmfQueryVersionFn = unsafe extern "C" fn(p_version: *mut amf_uint64) -> AMF_RESULT;
 
 // ---------------------------------------------------------------------------
 // AMFContext1 の IID
-// AMF_DECLARE_IID マクロで定義されるが、bindgen では名前が異なる場合がある
+// AMF_DECLARE_IID マクロで定義されるが、bindgen は定数として生成しない
 // ---------------------------------------------------------------------------
 
-/// IID_AMFContext1: {d9e9f868-6220-44c6-a22f-7cd6dac68646}
+/// AMFContext1 の IID (IID_AMFContext1: {d9e9f868-6220-44c6-a22f-7cd6dac68646})
 pub const IID_AMF_CONTEXT1: AMFGuid = AMFGuid {
     data1: 0xd9e9f868,
     data2: 0x6220,
@@ -71,8 +95,6 @@ pub const IID_AMF_CONTEXT1: AMFGuid = AMFGuid {
 // フィールド名は bindgen の生成結果に依存する。
 // AMF SDK の Variant.h では AMFVariantStruct の共用体は
 // 匿名共用体または名前付きフィールドで定義される。
-// ビルドエラーが発生した場合、OUT_DIR/bindings.rs の
-// AMFVariantStruct 定義を確認して修正すること。
 // ---------------------------------------------------------------------------
 
 /// bindgen が生成する匿名共用体の型別名
@@ -145,10 +167,25 @@ impl AMFVariantStruct {
 }
 
 // ---------------------------------------------------------------------------
-// ワイド文字列ヘルパー (Linux: wchar_t = i32 = UTF-32)
+// ワイド文字列ヘルパー
+//
+// Linux x86_64 の wchar_t は 32 ビットの符号付き整数であり、AMF の
+// ワイド文字列 (amf_int32 の配列) とそのまま相互変換できる。
 // ---------------------------------------------------------------------------
 
-/// Rust 文字列をヌル終端の UTF-32 (Linux wchar_t) 配列に変換する
+/// ヌル終端の AMF ワイド文字列を Rust 文字列に変換する
+///
+/// Linux x86_64 の `wchar_t` (UTF-32) を前提とする。
+pub fn from_wstring(buf: &[amf_int32]) -> String {
+    buf.iter()
+        .take_while(|&&c| c != 0)
+        .filter_map(|&c| char::from_u32(c as u32))
+        .collect()
+}
+
+/// Rust 文字列をヌル終端の AMF ワイド文字列に変換する
+///
+/// Linux x86_64 の `wchar_t` (UTF-32) を前提とする。
 pub fn to_wstring(s: &str) -> Vec<amf_int32> {
     s.chars()
         .map(|c| c as amf_int32)

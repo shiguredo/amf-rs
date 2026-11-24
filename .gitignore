@@ -4,6 +4,7 @@ target/
 # Agents
 .claude/
 .codex/
+.agents/
 
 # macOS
 .DS_Store

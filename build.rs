@@ -9,6 +9,30 @@ use std::{
 // 依存ライブラリの名前
 const LIB_NAME: &str = "AMF";
 
+// AMF の VulkanAMF.h が参照する Vulkan の型宣言だけを持つスタブヘッダー
+const VULKAN_STUB_HEADER: &str = r#"#ifndef AMF_RS_VULKAN_STUB_H
+#define AMF_RS_VULKAN_STUB_H
+
+#include <stdint.h>
+
+typedef void *VkInstance;
+typedef void *VkPhysicalDevice;
+typedef void *VkDevice;
+
+typedef uint64_t VkSemaphore;
+typedef uint64_t VkFence;
+typedef uint64_t VkBuffer;
+typedef uint64_t VkDeviceMemory;
+typedef uint64_t VkImage;
+typedef uint64_t VkImageView;
+typedef uint32_t VkFormat;
+typedef uint32_t VkImageTiling;
+typedef uint32_t VkImageLayout;
+typedef uint32_t VkAccessFlagBits;
+
+#endif
+"#;
+
 fn main() {
     // Cargo.toml か build.rs が更新されたら、依存ライブラリを再ビルドする
     println!("cargo::rerun-if-changed=Cargo.toml");
@@ -60,6 +84,17 @@ fn main() {
     // 依存ライブラリのリポジトリを取得する
     git_clone_external_lib(&out_build_dir, &git_url, &version);
 
+    // VulkanAMF.h が vulkan/vulkan.h をインクルードするため、スタブヘッダーを
+    // 生成してインクルードパスに追加する。
+    let vulkan_stub_dir = out_dir.join("vulkan-stub");
+    std::fs::create_dir_all(vulkan_stub_dir.join("vulkan"))
+        .expect("failed to create vulkan stub directory");
+    std::fs::write(
+        vulkan_stub_dir.join("vulkan").join("vulkan.h"),
+        VULKAN_STUB_HEADER,
+    )
+    .expect("failed to write vulkan stub header");
+
     // ラッパーヘッダーを生成する
     let wrapper_path = out_dir.join("wrapper.h");
     std::fs::write(
@@ -76,6 +111,7 @@ fn main() {
             "#include <core/Surface.h>",
             "#include <core/Buffer.h>",
             "#include <core/Context.h>",
+            "#include <core/VulkanAMF.h>",
             "#include <core/Factory.h>",
             "#include <components/Component.h>",
             "#include <components/VideoEncoderVCE.h>",
@@ -92,6 +128,10 @@ fn main() {
         .header(wrapper_path.to_str().expect("invalid wrapper path"))
         .clang_arg(format!(
             "-I{}",
+            vulkan_stub_dir.to_str().expect("invalid vulkan stub path")
+        ))
+        .clang_arg(format!(
+            "-I{}",
             include_dir.to_str().expect("invalid include path")
         ))
         // AMF ヘッダーは macOS でもパース可能 (非 Windows/非 Linux パスで
@@ -105,12 +145,18 @@ fn main() {
         .allowlist_function("amf_.*")
         // 列挙型を Rust enum として生成する
         .rustified_enum("AMF_RESULT")
-        .rustified_enum("AMF_SURFACE_FORMAT")
-        .rustified_enum("AMF_MEMORY_TYPE")
-        .rustified_enum("AMF_DATA_TYPE")
+        // AMF が将来追加した値も保持できるよう、AMF が返す列挙型は newtype にする
+        .newtype_enum("AMF_SURFACE_FORMAT")
+        .newtype_enum("AMF_MEMORY_TYPE")
+        .newtype_enum("AMF_DATA_TYPE")
         .rustified_enum("AMF_PLANE_TYPE")
-        .rustified_enum("AMF_VARIANT_TYPE")
+        .newtype_enum("AMF_VARIANT_TYPE")
         .rustified_enum("AMF_DX_VERSION")
+        // レート制御メソッドは H.264 と HEVC / AV1 で値の並びが異なるため、
+        // 設定値の指定にはコーデック別の enum を使う
+        .rustified_enum("AMF_VIDEO_ENCODER_RATE_CONTROL_METHOD_ENUM")
+        .rustified_enum("AMF_VIDEO_ENCODER_HEVC_RATE_CONTROL_METHOD_ENUM")
+        .rustified_enum("AMF_VIDEO_ENCODER_AV1_RATE_CONTROL_METHOD_ENUM")
         // dl.rs の get<T> で使用するため Option でラップしない型を除外する
         .blocklist_type("AMFInit_Fn")
         .blocklist_type("AMFQueryVersion_Fn")
@@ -176,21 +222,82 @@ pub const AMF_VERSION_BUILD_NUM: u32 = 0;
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AMF_RESULT { AMF_OK = 0, AMF_FAIL = 1 }
-#[repr(C)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum AMF_SURFACE_FORMAT { AMF_SURFACE_UNKNOWN = 0, AMF_SURFACE_NV12 = 1 }
-#[repr(C)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum AMF_MEMORY_TYPE { AMF_MEMORY_UNKNOWN = 0, AMF_MEMORY_HOST = 1 }
-#[repr(C)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum AMF_DATA_TYPE { AMF_DATA_BUFFER = 0, AMF_DATA_SURFACE = 1 }
+#[repr(transparent)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct AMF_SURFACE_FORMAT(pub amf_uint);
+#[repr(transparent)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct AMF_MEMORY_TYPE(pub amf_uint);
+#[repr(transparent)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct AMF_DATA_TYPE(pub amf_uint);
+impl AMF_DATA_TYPE {
+    pub const AMF_DATA_BUFFER: AMF_DATA_TYPE = AMF_DATA_TYPE(0);
+    pub const AMF_DATA_SURFACE: AMF_DATA_TYPE = AMF_DATA_TYPE(1);
+    pub const AMF_DATA_AUDIO_BUFFER: AMF_DATA_TYPE = AMF_DATA_TYPE(2);
+    pub const AMF_DATA_USER: AMF_DATA_TYPE = AMF_DATA_TYPE(1000);
+}
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AMF_PLANE_TYPE { AMF_PLANE_UNKNOWN = 0, AMF_PLANE_PACKED = 1, AMF_PLANE_Y = 2, AMF_PLANE_UV = 3, AMF_PLANE_U = 4, AMF_PLANE_V = 5 }
-#[repr(C)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum AMF_VARIANT_TYPE { AMF_VARIANT_EMPTY = 0, AMF_VARIANT_BOOL = 1, AMF_VARIANT_INT64 = 2, AMF_VARIANT_DOUBLE = 3, AMF_VARIANT_RATE = 7, AMF_VARIANT_SIZE = 5, AMF_VARIANT_RATIO = 8, AMF_VARIANT_FLOAT = 13 }
+#[repr(transparent)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct AMF_VARIANT_TYPE(pub amf_uint);
+pub type AMF_VIDEO_ENCODER_OUTPUT_DATA_TYPE_ENUM = amf_uint;
+pub const AMF_VIDEO_ENCODER_OUTPUT_DATA_TYPE_ENUM_AMF_VIDEO_ENCODER_OUTPUT_DATA_TYPE_IDR: AMF_VIDEO_ENCODER_OUTPUT_DATA_TYPE_ENUM = 0;
+pub const AMF_VIDEO_ENCODER_OUTPUT_DATA_TYPE_ENUM_AMF_VIDEO_ENCODER_OUTPUT_DATA_TYPE_I: AMF_VIDEO_ENCODER_OUTPUT_DATA_TYPE_ENUM = 1;
+pub const AMF_VIDEO_ENCODER_OUTPUT_DATA_TYPE_ENUM_AMF_VIDEO_ENCODER_OUTPUT_DATA_TYPE_P: AMF_VIDEO_ENCODER_OUTPUT_DATA_TYPE_ENUM = 2;
+pub const AMF_VIDEO_ENCODER_OUTPUT_DATA_TYPE_ENUM_AMF_VIDEO_ENCODER_OUTPUT_DATA_TYPE_B: AMF_VIDEO_ENCODER_OUTPUT_DATA_TYPE_ENUM = 3;
+pub type AMF_VIDEO_ENCODER_HEVC_OUTPUT_DATA_TYPE_ENUM = amf_uint;
+pub const AMF_VIDEO_ENCODER_HEVC_OUTPUT_DATA_TYPE_ENUM_AMF_VIDEO_ENCODER_HEVC_OUTPUT_DATA_TYPE_IDR: AMF_VIDEO_ENCODER_HEVC_OUTPUT_DATA_TYPE_ENUM = 0;
+pub const AMF_VIDEO_ENCODER_HEVC_OUTPUT_DATA_TYPE_ENUM_AMF_VIDEO_ENCODER_HEVC_OUTPUT_DATA_TYPE_I: AMF_VIDEO_ENCODER_HEVC_OUTPUT_DATA_TYPE_ENUM = 1;
+pub const AMF_VIDEO_ENCODER_HEVC_OUTPUT_DATA_TYPE_ENUM_AMF_VIDEO_ENCODER_HEVC_OUTPUT_DATA_TYPE_P: AMF_VIDEO_ENCODER_HEVC_OUTPUT_DATA_TYPE_ENUM = 2;
+pub type AMF_VIDEO_ENCODER_AV1_OUTPUT_FRAME_TYPE_ENUM = amf_uint;
+pub const AMF_VIDEO_ENCODER_AV1_OUTPUT_FRAME_TYPE_ENUM_AMF_VIDEO_ENCODER_AV1_OUTPUT_FRAME_TYPE_KEY: AMF_VIDEO_ENCODER_AV1_OUTPUT_FRAME_TYPE_ENUM = 0;
+pub const AMF_VIDEO_ENCODER_AV1_OUTPUT_FRAME_TYPE_ENUM_AMF_VIDEO_ENCODER_AV1_OUTPUT_FRAME_TYPE_INTRA_ONLY: AMF_VIDEO_ENCODER_AV1_OUTPUT_FRAME_TYPE_ENUM = 1;
+pub const AMF_VIDEO_ENCODER_AV1_OUTPUT_FRAME_TYPE_ENUM_AMF_VIDEO_ENCODER_AV1_OUTPUT_FRAME_TYPE_INTER: AMF_VIDEO_ENCODER_AV1_OUTPUT_FRAME_TYPE_ENUM = 2;
+pub const AMF_VIDEO_ENCODER_AV1_OUTPUT_FRAME_TYPE_ENUM_AMF_VIDEO_ENCODER_AV1_OUTPUT_FRAME_TYPE_SWITCH: AMF_VIDEO_ENCODER_AV1_OUTPUT_FRAME_TYPE_ENUM = 3;
+pub const AMF_VIDEO_ENCODER_AV1_OUTPUT_FRAME_TYPE_ENUM_AMF_VIDEO_ENCODER_AV1_OUTPUT_FRAME_TYPE_SHOW_EXISTING: AMF_VIDEO_ENCODER_AV1_OUTPUT_FRAME_TYPE_ENUM = 4;
+#[repr(i32)]
+#[derive(Debug, Copy, Clone, Hash, PartialEq, Eq)]
+pub enum AMF_VIDEO_ENCODER_RATE_CONTROL_METHOD_ENUM {
+    AMF_VIDEO_ENCODER_RATE_CONTROL_METHOD_UNKNOWN = -1,
+    AMF_VIDEO_ENCODER_RATE_CONTROL_METHOD_CONSTANT_QP = 0,
+    AMF_VIDEO_ENCODER_RATE_CONTROL_METHOD_CBR = 1,
+    AMF_VIDEO_ENCODER_RATE_CONTROL_METHOD_PEAK_CONSTRAINED_VBR = 2,
+    AMF_VIDEO_ENCODER_RATE_CONTROL_METHOD_LATENCY_CONSTRAINED_VBR = 3,
+    AMF_VIDEO_ENCODER_RATE_CONTROL_METHOD_QUALITY_VBR = 4,
+    AMF_VIDEO_ENCODER_RATE_CONTROL_METHOD_HIGH_QUALITY_VBR = 5,
+    AMF_VIDEO_ENCODER_RATE_CONTROL_METHOD_HIGH_QUALITY_CBR = 6,
+}
+#[repr(i32)]
+#[derive(Debug, Copy, Clone, Hash, PartialEq, Eq)]
+pub enum AMF_VIDEO_ENCODER_HEVC_RATE_CONTROL_METHOD_ENUM {
+    AMF_VIDEO_ENCODER_HEVC_RATE_CONTROL_METHOD_UNKNOWN = -1,
+    AMF_VIDEO_ENCODER_HEVC_RATE_CONTROL_METHOD_CONSTANT_QP = 0,
+    AMF_VIDEO_ENCODER_HEVC_RATE_CONTROL_METHOD_LATENCY_CONSTRAINED_VBR = 1,
+    AMF_VIDEO_ENCODER_HEVC_RATE_CONTROL_METHOD_PEAK_CONSTRAINED_VBR = 2,
+    AMF_VIDEO_ENCODER_HEVC_RATE_CONTROL_METHOD_CBR = 3,
+    AMF_VIDEO_ENCODER_HEVC_RATE_CONTROL_METHOD_QUALITY_VBR = 4,
+    AMF_VIDEO_ENCODER_HEVC_RATE_CONTROL_METHOD_HIGH_QUALITY_VBR = 5,
+    AMF_VIDEO_ENCODER_HEVC_RATE_CONTROL_METHOD_HIGH_QUALITY_CBR = 6,
+}
+#[repr(i32)]
+#[derive(Debug, Copy, Clone, Hash, PartialEq, Eq)]
+pub enum AMF_VIDEO_ENCODER_AV1_RATE_CONTROL_METHOD_ENUM {
+    AMF_VIDEO_ENCODER_AV1_RATE_CONTROL_METHOD_UNKNOWN = -1,
+    AMF_VIDEO_ENCODER_AV1_RATE_CONTROL_METHOD_CONSTANT_QP = 0,
+    AMF_VIDEO_ENCODER_AV1_RATE_CONTROL_METHOD_LATENCY_CONSTRAINED_VBR = 1,
+    AMF_VIDEO_ENCODER_AV1_RATE_CONTROL_METHOD_PEAK_CONSTRAINED_VBR = 2,
+    AMF_VIDEO_ENCODER_AV1_RATE_CONTROL_METHOD_CBR = 3,
+    AMF_VIDEO_ENCODER_AV1_RATE_CONTROL_METHOD_QUALITY_VBR = 4,
+    AMF_VIDEO_ENCODER_AV1_RATE_CONTROL_METHOD_HIGH_QUALITY_VBR = 5,
+    AMF_VIDEO_ENCODER_AV1_RATE_CONTROL_METHOD_HIGH_QUALITY_CBR = 6,
+}
+pub type AMF_VIDEO_DECODER_MODE_ENUM = amf_uint;
+pub const AMF_VIDEO_DECODER_MODE_ENUM_AMF_VIDEO_DECODER_MODE_REGULAR: AMF_VIDEO_DECODER_MODE_ENUM = 0;
+pub const AMF_VIDEO_DECODER_MODE_ENUM_AMF_VIDEO_DECODER_MODE_COMPLIANT: AMF_VIDEO_DECODER_MODE_ENUM = 1;
+pub const AMF_VIDEO_DECODER_MODE_ENUM_AMF_VIDEO_DECODER_MODE_LOW_LATENCY: AMF_VIDEO_DECODER_MODE_ENUM = 2;
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Default)]
 pub struct AMFRect { pub left: amf_int32, pub top: amf_int32, pub right: amf_int32, pub bottom: amf_int32 }
@@ -208,15 +315,49 @@ pub struct AMFRatio { pub num: amf_uint32, pub den: amf_uint32 }
 pub struct AMFGuid { pub data1: amf_uint32, pub data2: amf_uint16, pub data3: amf_uint16, pub data41: amf_uint8, pub data42: amf_uint8, pub data43: amf_uint8, pub data44: amf_uint8, pub data45: amf_uint8, pub data46: amf_uint8, pub data47: amf_uint8, pub data48: amf_uint8 }
 
 #[repr(C)]
+#[derive(Debug, Clone, Copy, Default)]
+pub struct AMFPoint { pub x: amf_int32, pub y: amf_int32 }
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct AMFColor { pub __bindgen_anon_1: AMFColor__bindgen_ty_1 }
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub union AMFColor__bindgen_ty_1 { pub rgba: amf_uint32 }
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default)]
+pub struct AMFFloatSize { pub width: amf_float, pub height: amf_float }
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default)]
+pub struct AMFFloatPoint2D { pub x: amf_float, pub y: amf_float }
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default)]
+pub struct AMFFloatPoint3D { pub x: amf_float, pub y: amf_float, pub z: amf_float }
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default)]
+pub struct AMFFloatVector4D { pub x: amf_float, pub y: amf_float, pub z: amf_float, pub w: amf_float }
+#[repr(C)]
+pub struct AMFInterface { pub pVtbl: *const std::ffi::c_void }
+
+#[repr(C)]
 #[derive(Clone, Copy)]
 pub union AMFVariantStruct__bindgen_ty_1 {
     pub boolValue: amf_bool,
     pub int64Value: amf_int64,
     pub doubleValue: amf_double,
     pub floatValue: amf_float,
-    pub rateValue: AMFRate,
+    pub stringValue: *mut std::os::raw::c_char,
+    pub wstringValue: *mut wchar_t,
+    pub pInterface: *mut AMFInterface,
+    pub rectValue: AMFRect,
     pub sizeValue: AMFSize,
+    pub pointValue: AMFPoint,
+    pub rateValue: AMFRate,
     pub ratioValue: AMFRatio,
+    pub colorValue: AMFColor,
+    pub floatSizeValue: AMFFloatSize,
+    pub floatPoint2DValue: AMFFloatPoint2D,
+    pub floatPoint3DValue: AMFFloatPoint3D,
+    pub floatVector4DValue: AMFFloatVector4D,
 }
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -225,12 +366,55 @@ pub struct AMFVariantStruct {
     pub __bindgen_anon_1: AMFVariantStruct__bindgen_ty_1,
 }
 
+pub type AMF_ACCELERATION_TYPE = std::ffi::c_int;
+
+#[repr(C)]
+pub struct AMFCaps { pub pVtbl: *const AMFCapsVtbl }
+#[repr(C)]
+#[derive(Default, Copy, Clone)]
+pub struct AMFCapsVtbl {
+    pub Release: Option<unsafe extern "C" fn(*mut AMFCaps) -> amf_long>,
+    pub GetAccelerationType: Option<unsafe extern "C" fn(*mut AMFCaps) -> AMF_ACCELERATION_TYPE>,
+    pub GetInputCaps: Option<unsafe extern "C" fn(*mut AMFCaps, *mut *mut AMFIOCaps) -> AMF_RESULT>,
+    pub GetOutputCaps: Option<unsafe extern "C" fn(*mut AMFCaps, *mut *mut AMFIOCaps) -> AMF_RESULT>,
+    pub GetPropertyCount: Option<unsafe extern "C" fn(*mut AMFCaps) -> amf_size>,
+    pub GetPropertyAt: Option<unsafe extern "C" fn(*mut AMFCaps, amf_size, *mut wchar_t, amf_size, *mut AMFVariantStruct) -> AMF_RESULT>,
+    pub GetProperty: Option<unsafe extern "C" fn(*mut AMFCaps, *const wchar_t, *mut AMFVariantStruct) -> AMF_RESULT>,
+}
+#[repr(C)]
+pub struct AMFIOCaps { pub pVtbl: *const AMFIOCapsVtbl }
+#[repr(C)]
+#[derive(Default, Copy, Clone)]
+pub struct AMFIOCapsVtbl {
+    pub Release: Option<unsafe extern "C" fn(*mut AMFIOCaps) -> amf_long>,
+    pub GetWidthRange: Option<unsafe extern "C" fn(*mut AMFIOCaps, *mut amf_int32, *mut amf_int32)>,
+    pub GetHeightRange: Option<unsafe extern "C" fn(*mut AMFIOCaps, *mut amf_int32, *mut amf_int32)>,
+    pub GetVertAlign: Option<unsafe extern "C" fn(*mut AMFIOCaps) -> amf_int32>,
+    pub GetNumOfFormats: Option<unsafe extern "C" fn(*mut AMFIOCaps) -> amf_int32>,
+    pub GetFormatAt: Option<unsafe extern "C" fn(*mut AMFIOCaps, amf_int32, *mut AMF_SURFACE_FORMAT, *mut amf_bool) -> AMF_RESULT>,
+    pub GetNumOfMemoryTypes: Option<unsafe extern "C" fn(*mut AMFIOCaps) -> amf_int32>,
+    pub GetMemoryTypeAt: Option<unsafe extern "C" fn(*mut AMFIOCaps, amf_int32, *mut AMF_MEMORY_TYPE, *mut amf_bool) -> AMF_RESULT>,
+    pub IsInterlacedSupported: Option<unsafe extern "C" fn(*mut AMFIOCaps) -> amf_bool>,
+}
+
 #[repr(C)]
 pub struct AMFFactory { pub pVtbl: *const std::ffi::c_void }
 #[repr(C)]
 pub struct AMFContext { pub pVtbl: *const std::ffi::c_void }
 #[repr(C)]
 pub struct AMFContext1 { pub pVtbl: *const std::ffi::c_void }
+pub type VkInstance = *mut std::ffi::c_void;
+pub type VkPhysicalDevice = *mut std::ffi::c_void;
+pub type VkDevice = *mut std::ffi::c_void;
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default)]
+pub struct AMFVulkanDevice {
+    pub cbSizeof: amf_size,
+    pub pNext: *mut std::ffi::c_void,
+    pub hInstance: VkInstance,
+    pub hPhysicalDevice: VkPhysicalDevice,
+    pub hDevice: VkDevice,
+}
 #[repr(C)]
 pub struct AMFPropertyStorage { pub pVtbl: *const std::ffi::c_void }
 #[repr(C)]

@@ -1,6 +1,6 @@
 ---
 name: shiguredo-amf
-description: 時雨堂の AMD AMF (Advanced Media Framework) Rust バインディング shiguredo_amf の機能・API リファレンス。H.264 / H.265 / AV1 のハードウェアエンコード・デコード、AMF ランタイムの動的ロード、Surface / Buffer 管理、ハンドラーベースのコールバック設計、エンコード中の動的プロパティ再設定に関する質問時に使用。
+description: 時雨堂の AMD AMF (Advanced Media Framework) Rust バインディング shiguredo_amf の機能と API のリファレンス。H.264 / H.265 / AV1 のハードウェアエンコード、H.264 / H.265 / AV1 / VP9 のハードウェアデコード、AMF ランタイムの動的ロード、Surface / Buffer 管理、ハンドラーベースのコールバック設計、エンコード中の動的プロパティ再設定、コーデック別の QP 範囲、エンコーダーの用途と品質プリセット、デコーダーの低遅延・リオーダー・サーフェスプール設定、統計値、Vulkan デバイスの選択に関する質問時に使用。
 ---
 
 # shiguredo_amf
@@ -9,23 +9,29 @@ AMD GPU 向けハードウェアアクセラレーションによるビデオエ
 
 ## 特徴
 
-- **AMD AMF (Advanced Media Framework)** ベースの H.264 / H.265 / AV1 ハードウェアエンコード・デコード
+- **AMD AMF (Advanced Media Framework)** ベースの H.264 / H.265 / AV1 ハードウェアエンコード、H.264 / H.265 / AV1 / VP9 ハードウェアデコード
 - **AMF ランタイムライブラリ** (`libamfrt64.so.1`) を `dlopen` で動的にロード (ビルド時のリンク不要)
 - **Vulkan バックエンド**で GPU 処理を実行 (Linux x86_64)
-- **エンコード入力フォーマット選択**: NV12 / YV12 / I420 / BGRA / ARGB / RGBA / YUY2 / UYVY / P010 / P012 / P016 / Y210 / AYUV / Y410 / Y416
+- **エンコード入力フォーマット選択**: 8bit / 10bit (AMD Radeon 780M では NV12 / YV12 / I420 / BGRA / ARGB / RGBA / YUY2 / P010 を確認済み。P010 は HEVC と AV1 で利用できる)
 - **デコード出力**は NV12 フォーマット
-- **フレーム単位のエンコードオプション** (IDR フレーム強制)
+- **デコーダーの遅延とサーフェスプールの調整**: `DecoderConfig` の `low_latency` / `reorder_mode` / `surface_pool_size`
+- **フレーム単位のエンコードオプション** (IDR / I / P フレームの強制)
 - **エンコード中の動的プロパティ再設定** (`Encoder::reconfigure`)
 - **CQP / CBR / VBR / LCVBR / QVBR / HQVBR / HQCBR** レート制御モード
+- **レート制御時の QP 範囲指定** (`QpRange`、コーデック別に指定可能)
+- **エンコーダーの用途** (`EncoderUsage`) と**品質プリセット** (`QualityPreset`) の指定
+- **統計値**: `Encoder::stats()` / `Decoder::stats()` で送信件数、出力件数、エラー件数、in-flight フレーム数を取得できる
 - **ハンドラーベースのコールバック**設計: エンコード/デコード結果はワーカースレッドから `EncodeHandler` / `DecodeHandler` に通知される
+- **AMFContext の明示的な管理**: 利用者が任意の個数の Context を作成し、`Context` を Clone して Encoder / Decoder に渡す。同じ Context で解像度とフォーマットが一致していれば、デコード結果の Surface をそのままエンコードできる
+- **Vulkan デバイスの選択**: Vulkan デバイスを `UninitializedContext::init_vulkan_with_device` に渡すことで、複数 GPU 環境で使用する GPU を選べる
 - ビルド時に GitHub から AMF ヘッダーを自動取得 (`bindgen` 経由)
 
 ## バージョン情報
 
 - crate 名: `shiguredo_amf`
-- バージョン: 2026.3.0
+- バージョン: 2026.4.0
 - Rust Edition: 2024
-- 最小 Rust バージョン: 1.88
+- 最小 Rust バージョン: 1.95
 - AMF SDK バージョン: v1.5.2
 - ライセンス: Apache-2.0
 
@@ -35,7 +41,7 @@ AMD GPU 向けハードウェアアクセラレーションによるビデオエ
 - AMD GPU (RDNA 以降推奨)
 - AMD GPU ドライバー (AMF ランタイムライブラリを含む)
 - Vulkan ドライバー
-- ビルド時: git
+- ビルド時: git、libclang (bindgen 依存、Ubuntu では `libclang-dev` パッケージ)
 
 ## コア API
 
@@ -43,30 +49,44 @@ AMD GPU 向けハードウェアアクセラレーションによるビデオエ
 
 | 型/関数 | 説明 | 主要 API |
 |--------|------|---------|
-| `AmfLibrary` | AMF ランタイムライブラリのプロセスシングルトン | `instance()`, `query_version() -> Result<(u16, u16, u16, u16), Error>` |
-| `Encoder<H: EncodeHandler>` | AMF ハードウェアエンコーダー | `new(EncoderConfig, H)`, `alloc_surface()`, `encode(Surface, &EncodeOptions, H::UserData)`, `reconfigure(ReconfigureParams)`, `finish()` |
-| `Decoder<H: DecodeHandler>` | AMF ハードウェアデコーダー | `new(DecoderConfig, H)`, `alloc_buffer(size)`, `decode(Buffer, H::UserData)`, `finish()` |
-| `supported_codecs() -> Vec<CodecInfo>` | このバックエンドで利用可能なコーデック情報の一覧を返す (ランタイムがロードできない場合は全コーデック非対応を返す) | - |
+| `AmfLibrary` | AMF ランタイムライブラリのプロセスシングルトン | `instance()`, `query_version() -> Result<AmfVersion, Error>`, `create_context() -> Result<Context, Error>`, `create_uninitialized_context() -> Result<UninitializedContext, Error>` |
+| `Encoder<H: EncodeHandler>` | AMF ハードウェアエンコーダー | `new(Context, EncoderConfig, H)`, `context()`, `stats()`, `alloc_surface()`, `encode(Surface, EncodeOptions, H::UserData)`, `reconfigure(ReconfigureParams)`, `finish()` |
+| `Decoder<H: DecodeHandler>` | AMF ハードウェアデコーダー | `new(Context, DecoderConfig, H)`, `context()`, `stats()`, `alloc_buffer(size)`, `decode(Buffer, H::UserData)`, `finish()` |
+| `supported_codecs() -> Result<Vec<CodecInfo>, Error>` | このバックエンドで利用可能なコーデック情報の一覧を返す (AMF ランタイムまたは Vulkan デバイスを初期化できない場合はエラー) | - |
 | `BUILD_VERSION` | ビルド時の AMF バージョン文字列 (`&'static str`) | - |
+| `AmfVersion` | AMF ランタイムのバージョン | フィールド: `major`, `minor`, `release`, `build` (すべて `u16`)。`Display` は `major.minor.release.build` 形式 |
 
-`Encoder` / `Decoder` は内部でワーカースレッドを起動し、`encode()` / `decode()` で投入したフレームの結果は `EncodeHandler::on_encoded` / `DecodeHandler::on_decoded` に非同期で通知される。`finish()` は残りのフレームをハンドラーが受け取り終わるまで待機する。
+`Encoder` / `Decoder` は内部でワーカースレッドを起動し、`encode()` / `decode()` で投入したフレームの結果は `EncodeHandler::on_encoded` / `DecodeHandler::on_decoded` に非同期で通知される。`finish()` は残りのフレームをハンドラーが受け取り終わるまで待機する。`finish()` が成功した後に `encode()` / `reconfigure()` / `decode()` を呼ぶとエラーになる。2 回目の `finish()` もエラーになる。`finish()` を呼ばずに drop すると、drop の処理中に、すでに `encode()` / `decode()` が成功したフレームの出力が通知されることがある。drop は、すべてのフレームの出力が通知されることを保証しない。
+
+`AmfLibrary::instance().create_context()` は呼び出しごとに新しい `Context` を
+既定の Vulkan デバイスで初期化して返す。Vulkan デバイスを選択する場合は
+`AmfLibrary::create_uninitialized_context()` で `UninitializedContext` を作成し、
+`UninitializedContext::vulkan_device_extensions()` で拡張を取得してから
+`UninitializedContext::init_vulkan_with_device()` で初期化する。
+同じ `Context` を Clone して Encoder と Decoder に渡すと、解像度とフォーマットが
+一致していれば、Decoder の `on_decoded` で受け取った `Surface` をそのまま Encoder の
+`encode()` に投入できる。別の `Context` を渡すこともできるが、
+`Surface` / `Buffer` は同じ Context のコンポーネントにしか投入できない。
 
 ### エンコーダー設定型
 
 | 型 | 説明 | 主要メソッド |
 |----|------|-------------|
-| `EncoderConfig` | エンコーダー設定 | `new(CodecConfig, width, height, FrameFormat, framerate_num, framerate_den, RateControlMode)`, フィールド: `target_kbps`, `max_kbps`, `qpi`, `qpp`, `qpb`, `gop_pic_size` (全て `Option`) |
+| `EncoderConfig` | エンコーダー設定 | `new(CodecConfig, width, height, FrameFormat, framerate_num, framerate_den, RateControlMode)` で必須項目を指定し、`usage` (`EncoderUsage`、既定 `Transcoding`), `quality_preset`, `target_kbps`, `max_kbps`, `qpi`, `qpp`, `qpb`, `gop_pic_size`, `b_pic_pattern` をフィールドで指定する (`usage` 以外は `Option`) |
 | `CodecConfig` | コーデック設定 enum | `H264(H264EncoderConfig)`, `Hevc(HevcEncoderConfig)`, `Av1(Av1EncoderConfig)` |
-| `H264EncoderConfig` | H.264 エンコーダー固有設定 | `profile: Option<H264Profile>` |
-| `HevcEncoderConfig` | HEVC エンコーダー固有設定 | `profile: Option<HevcProfile>` |
-| `Av1EncoderConfig` | AV1 エンコーダー固有設定 | `profile: Option<Av1Profile>` |
+| `H264EncoderConfig` | H.264 エンコーダー固有設定 | `profile: Option<H264Profile>`, `qp_range: QpRange` |
+| `HevcEncoderConfig` | HEVC エンコーダー固有設定 | `profile: Option<HevcProfile>`, `qp_range_i: QpRange`, `qp_range_p: QpRange` |
+| `Av1EncoderConfig` | AV1 エンコーダー固有設定 | `profile: Option<Av1Profile>`, `qp_range_intra: QpRange`, `qp_range_inter: QpRange`, `qp_range_inter_b: QpRange` |
+| `QpRange` | レート制御時の QP / Q インデックスの下限と上限 | `min: Option<u16>`, `max: Option<u16>` (それぞれ独立して指定でき、`None` は AMF の既定値) |
 | `H264Profile` | H.264 プロファイル | `Baseline`, `Main`, `High`, `ConstrainedBaseline`, `ConstrainedHigh` |
 | `HevcProfile` | HEVC プロファイル | `Main`, `Main10` |
 | `Av1Profile` | AV1 プロファイル | `Main` |
-| `FrameFormat` | エンコーダー入力フレームフォーマット | `Nv12`, `Yv12`, `I420`, `Bgra`, `Argb`, `Rgba`, `Yuy2`, `Uyvy`, `P010`, `P012`, `P016`, `Y210`, `Ayuv`, `Y410`, `Y416`, `frame_size(width, height) -> Option<usize>` |
+| `FrameFormat` | エンコーダー入力フレームフォーマット | `Nv12`, `Yv12`, `I420`, `Bgra`, `Argb`, `Rgba`, `Yuy2`, `Uyvy`, `P010`, `P012`, `P016`, `Y210`, `Ayuv`, `Y410`, `Y416` |
 | `RateControlMode` | レート制御モード | `Cqp`, `Cbr`, `Vbr`, `LatencyConstrainedVbr`, `QualityVbr`, `HighQualityVbr`, `HighQualityCbr` |
+| `EncoderUsage` | エンコーダーの用途 | `Transcoding`, `UltraLowLatency`, `LowLatency`, `Webcam`, `HighQuality`, `LowLatencyHighQuality` |
+| `QualityPreset` | 品質プリセット | `Speed`, `Balanced`, `Quality`, `HighQuality` |
 | `EncodeOptions` | フレーム単位のエンコードオプション | `frame_type: u16` (デフォルト 0 = 自動。`frame_type` モジュール参照) |
-| `ReconfigureParams` | 動的プロパティ再設定パラメータ | `framerate_num`, `framerate_den`, `target_kbps`, `max_kbps`, `qpi`, `qpp`, `qpb`, `gop_pic_size` (全て `Option`、`None` の項目は変更しない) |
+| `ReconfigureParams` | 動的プロパティ再設定パラメータ | `framerate_num`, `framerate_den`, `target_kbps`, `max_kbps`, `qpi`, `qpp`, `qpb`, `gop_pic_size` (すべて `Option`、`None` の項目は変更しない) |
 | `EncodedFrame<T>` | エンコード済みフレーム | `buffer() -> &Buffer`, `picture_type() -> PictureType`, `user_data() -> &T`, `into_parts() -> (Buffer, T)` |
 | `PictureType` | エンコード済みフレームのピクチャタイプ | `Idr`, `I`, `P`, `B`, `Unknown` |
 
@@ -74,23 +94,49 @@ AMD GPU 向けハードウェアアクセラレーションによるビデオエ
 
 | 型 | 説明 | 主要メソッド |
 |----|------|-------------|
-| `DecoderConfig` | デコーダー設定 | `codec: DecoderCodec` |
-| `DecoderCodec` | デコーダーのコーデック種別 | `H264`, `Hevc`, `Av1` |
+| `DecoderConfig` | デコーダー設定 | `new(DecoderCodec)`, フィールド: `codec`, `low_latency: Option<bool>`, `reorder_mode: Option<DecoderReorderMode>`, `surface_pool_size: Option<u32>` |
+| `DecoderCodec` | デコーダーのコーデック種別 | `H264`, `Hevc`, `Av1`, `Vp9` |
+| `DecoderReorderMode` | DPB のリオーダーモード | `Regular`, `Compliant`, `LowLatency` |
 | `DecodedFrame<T>` | デコード済みフレーム | `surface() -> &Surface`, `user_data() -> &T`, `into_parts() -> (Surface, T)` |
+
+### 統計値
+
+| 型/メソッド | 説明 |
+|------------|------|
+| `Encoder::stats() -> &EncoderStats` | エンコーダーの統計値 |
+| `Decoder::stats() -> &DecoderStats` | デコーダーの統計値 |
+| `EncoderStats` | `total_encode_count` / `total_output_frame_count` / `total_error_count` / `total_output_bit_count` / `total_reconfigure_count` (`Counter`)、`in_flight_frames` (`Gauge`) |
+| `DecoderStats` | `total_decode_count` / `total_output_frame_count` / `total_error_count` (`Counter`)、`in_flight_frames` (`Gauge`) |
+| `Counter` | 通算値を保持する。`new()` と `get()` を持つ |
+| `Gauge` | 現在値を保持する。`new()` と `get()` を持つ |
+
+`total_encode_count` / `total_decode_count` は AMF に入力を受理させた通算回数、
+`total_output_frame_count` はハンドラーへ `Ok` を通知した通算回数、
+`total_error_count` は `Err` を通知した通算回数、
+`total_output_bit_count` は通知した出力ビットストリームの総ビット数、
+`total_reconfigure_count` は `reconfigure` に成功した通算回数である。
+`in_flight_frames` は入力が受理されてから結果を通知するまでのフレーム数で、
+`finish()` が成功すると 0 になる。
+
+`EncoderStats` / `DecoderStats` の `Clone` は各フィールドの現在値を個別にコピーした
+スナップショットを返すため、フィールド間の一貫性は保証されない。
+PSNR や QP などの画質統計は含まない。
 
 ### コーデック情報 (`codec_info`)
 
 | 型/関数 | 説明 |
 |--------|------|
-| `supported_codecs() -> Vec<CodecInfo>` | このバックエンドで利用可能なコーデック情報の一覧 |
-| `VideoCodecType` | コーデック種別 (`H264`, `Hevc`, `Av1`) |
-| `CodecInfo` | コーデックごとの情報 (`codec: VideoCodecType`, `decoding: DecodingInfo`, `encoding: EncodingInfo`) |
-| `DecodingInfo` | `supported: bool`, `hardware_accelerated: bool` |
-| `EncodingInfo` | `supported`, `hardware_accelerated`, `supports_frame_reordering`, `supports_multi_pass`, `profiles: EncodingProfiles` |
-| `EncodingProfiles` | `H264(Vec<H264EncodingProfile>)`, `Hevc(Vec<HevcEncodingProfile>)`, `Av1(Vec<Av1EncodingProfile>)`, `None` |
-| `H264EncodingProfile` | `Baseline`, `ConstrainedBaseline`, `Main`, `High`, `ConstrainedHigh` |
-| `HevcEncodingProfile` | `Main`, `Main10` |
-| `Av1EncodingProfile` | `Main` |
+| `supported_codecs() -> Result<Vec<CodecInfo>, Error>` | このバックエンドで利用可能なコーデック情報の一覧 |
+| `VideoCodecType` | コーデック種別 (`H264`, `Hevc`, `Av1`, `Vp9`) |
+| `CodecInfo` | コーデックごとの情報 (`codec`, `decoding: Option<DecodingInfo>`, `encoding: Option<EncodingInfo>`) |
+| `DecodingInfo` | `acceleration: Option<AccelerationType>`, `input: Option<IoCapabilities>`, `output: Option<IoCapabilities>`, `properties: Vec<Property>` |
+| `EncodingInfo` | `acceleration: Option<AccelerationType>`, `max_profile: Option<VideoProfile>`, `max_level: Option<i64>`, `supports_frame_reordering: Option<bool>`, `input: Option<IoCapabilities>`, `output: Option<IoCapabilities>`, `properties: Vec<Property>` |
+| `AccelerationType` | `NotSupported`, `Hardware`, `Gpu`, `Software`, `Unknown(i32)` |
+| `VideoProfile` | `H264(H264Profile)`, `Hevc(HevcProfile)`, `Av1(Av1Profile)`, `Unknown(i64)` |
+| `IoCapabilities` | `min_width` / `max_width` / `min_height` / `max_height` / `vertical_alignment`、`formats: Vec<SurfaceFormatCapability>` (`format` / `native`)、`memory_types: Vec<MemoryTypeCapability>` (`memory_type` / `native`)、`interlaced` |
+| `SurfaceFormat` | `Known(FrameFormat)`, `Unknown(u32)` |
+| `MemoryType` | `Host`, `OpenCl`, `OpenGl`, `Xv`, `Vulkan`, `Unknown(u32)` |
+| `Property` / `Value` | AMF が返した全ケーパビリティプロパティの名前と値。`Value` は `Empty` / `Bool` / `Int64` / `Double` / `Rect` / `Size` / `Point` / `Rate` / `Ratio` / `Color` / `String` / `WString` / `Interface` / `Float` / `FloatSize` / `FloatPoint2D` / `FloatPoint3D` / `FloatVector4D` / `Unknown` |
 
 ## ハンドラートレイト
 
@@ -103,73 +149,170 @@ AMD GPU 向けハードウェアアクセラレーションによるビデオエ
 | `FnEncodeHandler<T, E = crate::Error>` | `FnMut(Result<EncodedFrame<T>, E>) + Send + 'static` を `EncodeHandler` にラップする |
 | `FnDecodeHandler<T, E = crate::Error>` | `FnMut(Result<DecodedFrame<T>, E>) + Send + 'static` を `DecodeHandler` にラップする |
 
-ハンドラーが `Send + 'static` を要求するのは、ワーカースレッドへ所有権を移して呼び出すため。`UserData` は `encode()` / `decode()` に渡したフレームと 1:1 で対応する。
+ハンドラーが `Send + 'static` を要求するのは、ワーカースレッドへ所有権を移して呼び出すため。`UserData` は `encode()` / `decode()` に渡したフレームと 1:1 で対応する。`encode()` と `decode()` は B フレームによる出力順の入れ替えがあっても、入力したフレームに対応する出力へ `UserData` を付ける。
 
-### `frame_type` モジュール (vpl-rs 互換)
+### `frame_type` モジュール
 
 `EncodeOptions::frame_type` に指定するビットフラグ。AMF SDK 内部の picture type enum とは独立した値で、`Encoder::encode` 内で AMF の `force_picture_type` 等のプロパティに変換される。
 
 | 定数 | 値 | 説明 |
 |------|----|------|
 | `UNKNOWN` | `0` | 自動 (フラグなし) |
-| `I` | `0x0001` | I フレーム |
-| `P` | `0x0002` | P フレーム |
-| `B` | `0x0004` | B フレーム |
+| `I` | `0x0001` | I フレーム (H.264 / H.265 は I、AV1 は INTRA_ONLY) |
+| `P` | `0x0002` | P フレーム (AV1 では無視される) |
+| `B` | `0x0004` | B フレーム (無視される) |
 | `IDR` | `0x0020` | IDR フレーム (キーフレーム) |
-| `REF` | `0x0040` | 参照フレーム |
+| `REF` | `0x0040` | 参照フレーム (無視される) |
 
-現状の `Encoder::encode` は `frame_type & IDR != 0` のときに IDR を強制する。`I` / `P` / `B` / `REF` は vpl-rs と共通インターフェースを保つための定義で、現バージョンでは未使用。
+`Encoder::encode` は `IDR` / `I` / `P` を `IDR`、`I`、`P` の順に優先して 1 つ使用する。`B` / `REF`、AV1 の `P`、未定義のビットは無視する。B フレームを生成するには `EncoderConfig::b_pic_pattern` を指定する。先頭フレームと GOP の境界では、エンコーダーが IDR を優先するため `I` と `P` の指定が反映されない場合がある。
 
 ## AMF オブジェクトラッパー (`amf` モジュール)
 
 `*mut AMFSurface` などの生ポインタを `Acquire` / `Release` で RAII 管理するラッパー。vtable の関数ポインタは初期化時にすべて取り出して構造体メンバーに保持するため、メソッド呼び出しのたびに vtable 検証は行われない。
 
+`PlaneType` は `Surface::get_plane` に指定するプレーン種別 (`Packed`, `Y`, `Uv`, `U`, `V`)。
+
 | 型 | 説明 | 主要メソッド |
 |----|------|-------------|
-| `Context` | `AMFContext` のラッパー | `terminate()`, `alloc_surface(memory_type, format, width, height)`, `alloc_buffer(memory_type, size)`, `unsafe init_vulkan(device: *mut c_void)`, `as_ptr()`, `into_raw()` |
-| `Component` | `AMFComponent` のラッパー | `init(format, width, height)`, `re_init(width, height)`, `terminate()`, `drain()`, `flush()`, `unsafe submit_input(*mut AMFData)`, `unsafe query_output(*mut *mut AMFData)`, `get_context()`, `property_storage() -> Result<PropertyStorage, Error>` |
-| `Surface` | `AMFSurface` のラッパー | `set_pts(amf_pts)`, `set_duration(amf_pts)`, `get_plane(AMF_PLANE_TYPE) -> Result<Plane, Error>`, `get_plane_at(index)`, `convert(AMF_MEMORY_TYPE)`, `property_storage()`, `as_ptr()`, `into_raw()` |
-| `Buffer` | `AMFBuffer` のラッパー | `get_native() -> *mut c_void`, `get_size() -> amf_size`, `get_pts() -> amf_pts`, `get_duration() -> amf_pts`, `unsafe get_property(name_w, *mut AMFVariantStruct)`, `as_ptr()`, `into_raw()` |
-| `Plane` | `AMFPlane` のラッパー | `get_native() -> *mut c_void`, `get_hpitch() -> amf_int32`, `get_vpitch() -> amf_int32`, `get_width() -> amf_int32`, `get_height() -> amf_int32`, `as_ptr()`, `into_raw()` |
-| `PropertyStorage` | `AMFPropertyStorage` のラッパー | `set_property_int64(name, value)`, `set_property_size(name, width, height)`, `set_property_rate(name, num, den)`, `unsafe set_property(name_w, AMFVariantStruct)`, `as_ptr()`, `into_raw()` |
+| `Context` | `AMFContext` の参照カウントを管理する、Vulkan 初期化済みの Clone 可能なハンドル | `vulkan_device() -> Result<VulkanDevice, Error>`, `alloc_surface(MemoryType, SurfaceFormat, width, height)`, `alloc_buffer(MemoryType, size)`, `as_ptr()` |
+| `UninitializedContext` | Vulkan 未初期化の `AMFContext` を保持するハンドル | `vulkan_device_extensions() -> Result<Vec<String>, Error>`, `init_vulkan() -> Result<Context, Error>`, `unsafe init_vulkan_with_device(VulkanDevice) -> Result<Context, Error>` |
+| `VulkanDevice` | AMF に渡す Vulkan デバイスのハンドル一式 (`AMFVulkanDevice` に対応) | `unsafe from_raw(instance, physical_device, device)`, `instance() -> *mut c_void`, `physical_device() -> *mut c_void`, `device() -> *mut c_void` |
+| `Component` | `AMFComponent` のラッパー | `init(SurfaceFormat, width, height)`, `re_init(width, height)`, `terminate()`, `drain()`, `flush()`, `unsafe submit_input(*mut AMFData)`, `unsafe query_output(*mut *mut AMFData)`, `get_context()`, `context()`, `property_storage() -> Result<PropertyStorage, Error>` |
+| `Surface` | `AMFSurface` のラッパー | `context()`, `get_memory_type() -> MemoryType`, `set_pts(i64)`, `get_pts() -> i64`, `set_duration(i64)`, `get_plane(PlaneType) -> Result<Plane<'_>, Error>`, `get_plane_at(index) -> Result<Plane<'_>, Error>`, `convert(MemoryType) -> Result<(), Error>`, `data() -> Result<Data, Error>`, `into_data() -> Result<Data, Error>`, `property_storage()`, `as_ptr()`, `into_raw()` |
+| `Buffer` | `AMFBuffer` のラッパー | `context()`, `get_memory_type() -> MemoryType`, `get_native() -> *mut c_void`, `get_size() -> usize`, `set_size(usize) -> Result<(), Error>`, `unsafe as_slice() -> Result<&[u8], Error>`, `unsafe as_mut_slice() -> Result<&mut [u8], Error>`, `set_pts(i64)`, `get_pts() -> i64`, `get_duration() -> i64`, `data() -> Result<Data, Error>`, `into_data() -> Result<Data, Error>`, `property_storage() -> Result<PropertyStorage, Error>`, `as_ptr()`, `into_raw()` |
+| `Plane<'a>` | `AMFPlane` の RAII ラッパー。取得元の `Surface` を借用する | `context()`, `get_native() -> *mut c_void`, `get_hpitch() -> i32`, `get_vpitch() -> i32`, `get_width() -> i32`, `get_height() -> i32`, `is_tiled() -> bool`, `unsafe as_slice() -> Result<&[u8], Error>`, `unsafe as_mut_slice() -> Result<&mut [u8], Error>`, `as_ptr()`, `into_raw()` |
+| `PropertyStorage` | `AMFPropertyStorage` のラッパー | `context()`, `unsafe get_property(name_w, *mut AMFVariantStruct)`, `get_property_int64(name) -> Result<i64, Error>`, `get_property_size(name) -> Result<(i32, i32), Error>`, `set_property_int64(name, value)`, `set_property_bool(name, value)`, `set_property_size(name, width, height)`, `set_property_rate(name, num, den)`, `unsafe set_property(name_w, AMFVariantStruct)`, `as_ptr()`, `into_raw()` |
+| `Data` | `AMFData` の RAII ハンドル | `context()`, `get_data_type() -> DataType`, `property_storage() -> Result<PropertyStorage, Error>`, `to_buffer() -> Result<Buffer, Error>`, `to_surface() -> Result<Surface, Error>`, `as_ptr()`, `into_raw()`, `unsafe from_raw(*mut AMFData, Context)`, `unsafe from_raw_acquired(*mut AMFData, Context)` |
+| `DataType` | AMF のデータ種別 | `Buffer`, `Surface`, `AudioBuffer`, `User`, `Unknown(u32)` |
 
-全ラッパーは `Clone` 実装で `Acquire` を呼び、`Drop` 実装で `Release` を呼ぶ。`unsafe from_raw(ptr)` (Acquire なし) と `unsafe from_raw_acquired(ptr)` (Acquire 付き) の 2 系統のコンストラクタを持つ。`into_raw()` は所有権を放棄して `Release` を呼ばずに生ポインタを返す。
+`Context::alloc_surface` / `alloc_buffer` は `&self` に対して呼び出す。`Context` の `Clone` は
+`AMFContext::Acquire`、`Drop` は `AMFContext::Release` を呼ぶ。最後の参照が解放されたときに
+AMFContext が破棄され、そのデストラクタが `Terminate` を呼ぶ。`Context` は `PartialEq` / `Eq` を
+実装しており、同じ AMFContext を指すかを比較できる。各ハンドルは `context()` で保持する
+`Context` を取得できる。
 
-すべて `unsafe impl Send` 済み (AMF オブジェクトはスレッドセーフであると AMF ドキュメントに記載されているため)。
+`AmfLibrary::create_context()` は既定の Vulkan デバイスで初期化した `Context` を返す。
+Vulkan デバイスを選択する場合は `AmfLibrary::create_uninitialized_context()` で
+`UninitializedContext` を作成し、`UninitializedContext::vulkan_device_extensions()` で
+拡張を取得してから `UninitializedContext::init_vulkan_with_device(amf::VulkanDevice)` で
+初期化する。`VulkanDevice` は `VkInstance` / `VkPhysicalDevice` /
+`VkDevice` の 3 つのハンドルを保持する。3 つのハンドルは、そのハンドルを使用する
+すべての `Context` と、そこから取得したすべての AMF オブジェクトを破棄するまで
+有効にしておく。`Context::vulkan_device()` は AMF が使用しているハンドルを返す。
+取得元の `Context` から取得したハンドルを別の `Context` に渡す場合は、取得元の
+`Context` を、そのハンドルを使用するすべての `Context` と AMF オブジェクトより後に
+破棄する。
+
+`UninitializedContext::vulkan_device_extensions()` は AMF が要求する Vulkan デバイス拡張の
+一覧を返し、Vulkan デバイスを作成する前に呼び出せる。AMF SDK のサンプルと実機では
+初期化前でも取得できるが、AMF の API リファレンスは未初期化の `Context` に対して
+`AMF_NO_DEVICE` を返すとしている。AMF が未初期化の `Context` を受け付けない場合は
+`Error::Amf` を返す。AMF は既定で、コンピュート対応キューファミリ内のインデックス 0 の
+キューを使うため、そのキューを作成した `VkDevice` を渡す。Vulkan インスタンスの作成、
+物理デバイスの選択、拡張と feature の有効化は利用者が行う。AMF は渡された Vulkan
+デバイスの所有権を変更しない。既定の Vulkan デバイスは AMF が所有し、利用者は
+破棄しない。`VulkanDevice::from_raw` は所有権を変更せず、渡されたハンドルの所有者の
+ままである。利用者が所有するデバイスは、それを使用するすべての `Context` と AMF
+オブジェクトを破棄した後に利用者が破棄する。
+
+`Surface` / `Buffer` / `Plane` / `PropertyStorage` / `Component` は `Clone` 実装で `Acquire` を呼び、
+`Drop` 実装で `Release` を呼ぶ。`Surface` / `Buffer` / `PropertyStorage` は
+`unsafe from_raw(ptr, Context)` (Acquire なし) と `unsafe from_raw_acquired(ptr, Context)` (Acquire 付き) の
+2 系統のコンストラクタを持つ。`Plane` は `unsafe from_raw(ptr, &Surface)` と
+`unsafe from_raw_acquired(ptr, &Surface)` を持ち、生ポインタが取得元の `Surface` のものであることを
+呼び出し元が保証する。`Component` は `AmfLibrary` の内部でのみ作成し、公開の raw
+コンストラクタを持たない。`into_raw()` は所有権を放棄して `Release` を呼ばずに生ポインタを返す。
+生ポインタを利用する間は、対応する `Context` の Clone を保持すること。`Plane` の生ポインタは
+取得元の `Surface` が生存している間だけ有効なので、`Surface` も破棄しないこと。
+
+`Surface` / `Buffer` / `PropertyStorage` / `Component` / `Data` は作成元の `Context` の Clone を保持するため、これらのハンドルが生きている限り `Context` は破棄されない。
+
+`Plane<'a>` は `Surface::get_plane` / `Surface::get_plane_at` が返す。`Plane` の情報を取得する
+メソッドはロックで直列化され、複数の `Plane` を別スレッドで並行に使える。`Clone` / `Drop` /
+`context()` の参照カウント操作は thread-safe で、ロックを取らない。
+`Plane` の `context()` は取得元の `Surface` が保持する `Context` を返す。
+
+`Surface::convert` は `Plane` が生存している間はエラーを返す。`Surface` の `Clone` や
+`PropertyStorage` が存在するだけでは失敗しない。
+
+`Buffer` / `Plane` のフレームデータは unsafe な `as_slice` / `as_mut_slice` で読み書きする。`Buffer` の
+スライスは `get_size()` バイト、`Plane` のスライスは `get_hpitch() * get_vpitch()` バイトで、
+`Plane` の各行の先頭は `get_hpitch()` バイト間隔になる。ホストメモリ以外のオブジェクト、
+タイル状のプレーン、null、サイズ、ピッチがスライスの前提を満たさないオブジェクトは
+`Err` を返す。
+スライスが有効な間は、同じ AMF オブジェクトへのアクセスを他のハンドルから行わないこと。
+
+`Buffer::set_size` は確保済みサイズ以下の範囲でサイズを変更でき、確保済みサイズを
+超える値は `Err` になる。サイズ変更はメモリの再確保を伴わず、`get_size()` は最後に
+設定に成功したサイズを返す。
+
+`Clone` したハンドルは同じ AMF オブジェクトを指す。コンポーネントに投入する `Surface` / `Buffer` は、
+投入前に他のハンドルを破棄する必要がある。`Encoder::encode` / `Decoder::decode` は、投入する
+ハンドルが自分と同じ Context のものであり、かつ他のハンドルと共有されていないことを確認し、
+条件を満たさない場合はエラーを返す。
 
 ## エラー型
 
 | 型/関数 | 説明 |
 |--------|------|
-| `Error` | AMF 操作のエラー型 (`Debug + Display + std::error::Error`) |
-| `Error::new_custom(function: &'static str, message: &str)` | カスタムエラーを作成 (`status` なし) |
-| `Error::from_amf(AMF_RESULT, function)` | `AMF_RESULT` からエラーを作成 (内部の対応表を参照してメッセージを構築) |
-| `Error::check(AMF_RESULT, function) -> Result<(), Error>` | `AMF_OK` 以外を `Err` にして返す |
-| `Error::status() -> Option<AMF_RESULT>` | エラーに紐づく `AMF_RESULT` を返す (カスタムエラーは `None`) |
+| `Error` | AMF 操作のエラー (`Debug + Display + std::error::Error`) |
+| `Error::InvalidArgument(InvalidArgumentError)` | 引数、または引数が指すオブジェクトが操作の前提を満たさない |
+| `Error::InvalidState(InvalidStateError)` | オブジェクトの状態が操作に適していない |
+| `Error::Amf(AmfError)` | AMF の呼び出しがエラーステータスを返した |
+| `Error::Environment(EnvironmentError)` | 動的ライブラリのロードなど実行環境に起因する失敗 |
+| `Error::Internal(InternalError)` | ライブラリまたは AMF の前提が破られた |
+| `AmfError::status() -> AMF_RESULT` | AMF が返したステータスを返す |
+| `AmfError::operation() -> &str` | エラーステータスを返した AMF の操作名を返す |
+| `Error::source()` | 原因を持つ分類では内側の標準エラーを返す。原因を持たない場合は `None`。`std::error::Error` のメソッドなので trait の import が必要 |
+| `EnvironmentError::source()` / `InternalError::source()` | 分類型が持つ原因を返す。`EnvironmentError` は常に `Some`、`InternalError` は原因がない場合 `None` |
 
-`Display` フォーマットは `function() failed[status=AMF_FAIL]: General failure (AMF_FAIL)` のように `function` / `status` / メッセージを含む。`Error::status()` で `AMF_RESULT` を取り出して呼び出し側で分岐できる。
+`Display` は分類ごとに次の形式で表示する。`Environment` と `Internal` は文脈だけを表示し、原因は `source()` で取得する。
+
+- `InvalidArgument`: `invalid argument: ...`
+- `InvalidState`: `invalid state: ...`
+- `Amf`: 操作名とステータス (例: `AMFComponent::Init failed: AMF_FAIL`)
+- `Environment`: `environment error: ...`
+- `Internal`: `internal error: ...`
+
+原因の具体的な型が必要な場合は、`source()` が返す `&(dyn std::error::Error + 'static)` から `downcast_ref::<std::io::Error>()` などで取り出す。
+
+標準エラーから `?` で `Error` に変換できる。`std::io::Error` は `Environment`、`NulError` / `TryFromIntError` / `RecvError` / `SendError<T>` は `Internal` になる。
+
+分類は、呼び出し側が修正できる失敗 (`InvalidArgument` / `InvalidState`)、AMF が返したステータスを保持する失敗 (`Amf`)、実行環境やライブラリ内部に起因する失敗 (`Environment` / `Internal`) に分かれる。AMF のステータスで分岐する場合は `Error::Amf` から `AmfError` を取り出して `status()` を読む。
 
 主な `AMF_RESULT` バリアント (`ffi::AMF_RESULT` で公開): `AMF_OK`, `AMF_FAIL`, `AMF_INVALID_ARG`, `AMF_OUT_OF_MEMORY`, `AMF_NOT_SUPPORTED`, `AMF_WRONG_STATE`, `AMF_NO_DEVICE`, `AMF_EOF`, `AMF_REPEAT`, `AMF_INPUT_FULL`, `AMF_NEED_MORE_INPUT`, `AMF_DECODER_NO_FREE_SURFACES`, `AMF_VULKAN_FAILED` 等。
 
+`Encoder::encode` / `Decoder::decode` は、投入する `Surface` / `Buffer` が別の Context のもの、
+または他のハンドルと共有されている場合にエラーを返す。メッセージにはそれぞれ
+`does not belong to the encoder's AMF context` / `does not belong to the decoder's AMF context`、
+`shared with other handles` が含まれる。これらは呼び出し側が入力を直して再試行できる失敗である。
+
 ## FFI モジュール
 
-`ffi` モジュールは内部 `sys` モジュールの再公開で、`#[doc(hidden)]` 属性が付いている。semver 保証の対象外。`AMFSurface`, `AMFBuffer`, `AMF_SURFACE_FORMAT`, `AMF_PLANE_TYPE`, `AMF_MEMORY_TYPE` 等の `bindgen` 生成型と AMF プロパティ文字列定数 (`sys::str::*`) を含む。
+`ffi` モジュールは内部 `sys` モジュールの再公開で、`#[doc(hidden)]` 属性が付いている。semver 保証の対象外。`AMFSurface`, `AMFBuffer`, `AMFContext1`, `AMFVulkanDevice`, `AMF_SURFACE_FORMAT`, `AMF_PLANE_TYPE`, `AMF_MEMORY_TYPE` 等の `bindgen` 生成型と AMF プロパティ文字列定数 (`sys::str::*`) を含む。
 
 ## コード例
 
 ### エンコード
 
 ```rust
-use std::sync::{Arc, Mutex};
+use std::sync::mpsc;
 
 use shiguredo_amf::{
-    CodecConfig, EncodeOptions, EncodedFrame, Encoder, EncoderConfig, FrameFormat,
-    H264EncoderConfig, H264Profile, RateControlMode, ReconfigureParams, frame_type,
+    AmfLibrary, CodecConfig, EncodeOptions, EncodedFrame, Encoder, EncoderConfig, EncoderUsage,
+    FnEncodeHandler, FrameFormat, H264EncoderConfig, H264Profile, QpRange, QualityPreset,
+    RateControlMode, frame_type,
 };
+
+let context = AmfLibrary::instance().create_context()?;
 
 let mut config = EncoderConfig::new(
     CodecConfig::H264(H264EncoderConfig {
         profile: Some(H264Profile::High),
+        qp_range: QpRange {
+            min: Some(18),
+            max: Some(38),
+        },
     }),
     1920, // width
     1080, // height
@@ -179,63 +322,119 @@ let mut config = EncoderConfig::new(
     RateControlMode::Cbr,
 );
 config.target_kbps = Some(5_000);
+config.usage = EncoderUsage::LowLatency;
+config.quality_preset = Some(QualityPreset::Balanced);
 
 // クロージャをハンドラーにラップする
-let encoded = Arc::new(Mutex::new(Vec::new()));
-let e = encoded.clone();
-let mut encoder = Encoder::new(config, move |frame: EncodedFrame<()>| {
-    e.lock().unwrap().push(frame);
-})?;
+let (frame_tx, frame_rx) = mpsc::channel();
+let mut encoder = Encoder::new(
+    context.clone(),
+    config,
+    FnEncodeHandler::new(
+        move |result: Result<EncodedFrame<()>, shiguredo_amf::Error>| match result {
+            Ok(frame) => {
+                let _ = frame_tx.send(frame);
+            }
+            Err(e) => eprintln!("encode error: {e}"),
+        },
+    ),
+)?;
 
 // Surface を確保してフレームデータをコピーし、エンコードする
 let surface = encoder.alloc_surface()?;
 // ここで surface の Y/UV プレーンに NV12 フレームを書き込む...
 let options = EncodeOptions { frame_type: frame_type::UNKNOWN };
-encoder.encode(surface, &options, ())?;
+encoder.encode(surface, options, ())?;
 
 // 残りのフレームをすべて取得する (Drain → ワーカー完了待ち)
 encoder.finish()?;
 
-for frame in encoded.lock().unwrap().iter() {
+for frame in frame_rx.try_iter() {
     println!("encoded bytes: {}", frame.buffer().get_size());
-    println!("pts: {}", frame.buffer().get_pts());
     println!("picture type: {:?}", frame.picture_type());
 }
 ```
 
-`Encoder::new` に渡すクロージャは `FnMut(Result<EncodedFrame<T>, E>) + Send + 'static` であれば暗黙的に `FnEncodeHandler` 相当として扱える。`UserData` 型 (上記の `()` の位置) はフレーム単位の任意ユーザーデータで、`encode()` で渡した値が `EncodedFrame::user_data()` から取り出せる。
+`Encoder::new` に渡すクロージャは `FnEncodeHandler::new` でラップする。クロージャの引数は `Result<EncodedFrame<T>, E>` で、エラーもワーカースレッドから通知される。ハンドラーはワーカースレッドで呼ばれるため、結果は `mpsc::channel` の `Sender` でメインスレッドへ送る。`E` の既定値は `shiguredo_amf::Error` である。`UserData` 型 (上記の `()` の位置) はフレーム単位の任意ユーザーデータで、`encode()` で渡した値が `EncodedFrame::user_data()` から取り出せる。
+
+`EncoderConfig::b_pic_pattern` に GOP 内の連続 B フレーム数を指定すると B フレームを有効にできる。AMF の仕様上の値域は H.264 が 0-3、AV1 が 0-127 で、0 は B フレームなし、`None` は AMF の既定値 (0) になる。HEVC は B フレームを扱わないため指定できない。B フレームを有効にすると、ハンドラーへの通知順は入力順 (提示順) と異なる符号化順になるが、`encode()` に渡した `UserData` は対応する入力フレームの出力に付く。B フレームに対応していないと AMF が報告した GPU で 1 以上を指定した場合は `Encoder::new` がエラーを返す。`Encoder` は入出力の対応付けに `ShiguredoAmfFrameId` プロパティを使う。この名前はライブラリの予約名であり、利用者は入力 `Surface` に設定しないこと。`encode()` は入力 `Surface` の PTS を変更せず、出力 `Buffer` の PTS も設定しない。出力 `Buffer` の PTS は AMF が付けた値になる。
+
+コーデック別設定の `qp_range` 系に `QpRange` を指定すると、レート制御時の QP (AV1 は Q インデックス) の下限と上限を指定できる。H.264 は `qp_range` (AMF の MinQP / MaxQP はフレーム種別を分けない 1 組)、HEVC は `qp_range_i` / `qp_range_p`、AV1 は `qp_range_intra` / `qp_range_inter` / `qp_range_inter_b` を使う。`min` と `max` はそれぞれ独立して指定でき、`None` の側は AMF の既定値になる。AMF の仕様上の値域は、H.264 と HEVC が QP の 0-51、AV1 が Q インデックスの 1-255 である。`EncoderConfig::qpi` / `qpp` / `qpb` は CQP の固定 QP を指定するものであり、`qp_range` 系とは別の設定である。`H264EncoderConfig` / `HevcEncoderConfig` / `Av1EncoderConfig` は `Default` を実装しており、`..Default::default()` で未指定のフィールドを既定値にできる。
+
+`Encoder::encode` は入力 1 つにつき出力 1 つを前提とし、同じ入力に対応する出力が複数ある場合や、対応する入力がない出力が得られた場合はワーカーが `Err` として通知する。
+
+`Encoder::new` の第 1 引数には `AmfLibrary::instance().create_context()` で作成した `Context` を渡す。解像度とフォーマットが一致していれば、同じ `Context` を Clone して共有する `Decoder` の出力 `Surface` をそのまま `encode()` に投入できる。
 
 ### デコード
 
 ```rust
-use std::sync::{Arc, Mutex};
+use std::sync::mpsc;
 
-use shiguredo_amf::{DecodedFrame, Decoder, DecoderCodec, DecoderConfig};
+use shiguredo_amf::{
+    AmfLibrary, DecodedFrame, Decoder, DecoderCodec, DecoderConfig, FnDecodeHandler,
+};
 
-let config = DecoderConfig { codec: DecoderCodec::H264 };
-let decoded = Arc::new(Mutex::new(Vec::new()));
-let d = decoded.clone();
-let mut decoder = Decoder::new(config, move |frame: DecodedFrame<()>| {
-    d.lock().unwrap().push(frame);
-})?;
+let context = AmfLibrary::instance().create_context()?;
+
+let config = DecoderConfig::new(DecoderCodec::H264);
+
+// クロージャをハンドラーにラップする
+let (frame_tx, frame_rx) = mpsc::channel();
+let mut decoder = Decoder::new(
+    context.clone(),
+    config,
+    FnDecodeHandler::new(
+        move |result: Result<DecodedFrame<()>, shiguredo_amf::Error>| match result {
+            Ok(frame) => {
+                let _ = frame_tx.send(frame);
+            }
+            Err(e) => eprintln!("decode error: {e}"),
+        },
+    ),
+)?;
+
+// 1 フレーム分のビットストリームを読み込む
+let bitstream_data = std::fs::read("input.h264")?;
 
 // Buffer を確保してビットストリームデータをコピーし、デコードする
-let buffer = decoder.alloc_buffer(bitstream_data.len())?;
-// ここで buffer.get_native() に bitstream_data を書き込む...
+let mut buffer = decoder.alloc_buffer(bitstream_data.len())?;
+unsafe { buffer.as_mut_slice() }?[..bitstream_data.len()].copy_from_slice(&bitstream_data);
 decoder.decode(buffer, ())?;
 
 // 残りのフレームをすべて取得する (Drain → ワーカー完了待ち)
 decoder.finish()?;
-drop(decoder);
 
-for frame in decoded.lock().unwrap().iter() {
-    let y_plane = frame.surface()
-        .get_plane(shiguredo_amf::ffi::AMF_PLANE_TYPE::AMF_PLANE_Y)?;
+for frame in frame_rx.try_iter() {
+    let y_plane = frame.surface().get_plane(shiguredo_amf::PlaneType::Y)?;
     println!("decoded: {}x{}", y_plane.get_width(), y_plane.get_height());
 }
 ```
 
-デコーダーは初期化時に解像度 `0x0` で AMF コンポーネントを Init するため、ビットストリームのシーケンスヘッダーから解像度が自動検出される。出力 `Surface` は内部で `convert(AMF_MEMORY_HOST)` 済みのため、`get_plane()` 経由でホストメモリから直接読み出せる。
+デコーダーは初期化時に解像度 `0x0` で AMF コンポーネントを Init するため、ビットストリームのシーケンスヘッダーから解像度が自動検出される。出力 `Surface` は内部で `convert(MemoryType::Host)` 済みのため、`get_plane()` 経由でホストメモリから直接読み出せる。
+
+`DecoderConfig` ではデコーダーの遅延とサーフェスプールを調整できる。
+`DecoderConfig::new(codec)` で必須項目だけを指定し、公開フィールドを書き換えて
+残りの項目を指定する。
+
+`low_latency` は AMF の `LowLatencyDecode` を設定するが、出力フレームの順序は
+`reorder_mode` で決まる。`reorder_mode` に `DecoderReorderMode::LowLatency` を
+指定すると、DPB の遅延が 0 になる。このモードはフレームの並べ替えを伴わない
+ストリームを前提とし、B フレームと P フレームは並べ替えを伴わない場合に限り
+含められる。並べ替えを伴うストリームを投入した場合の出力順は保証されず、提示順の
+復元も行われない。
+
+`surface_pool_size` はデコード用サーフェスプールのサイズで、`0` は AMF が
+DPB サイズ + 5 を計算する。値が小さすぎる場合、出力サーフェスが不足して
+`decode()` がエラーになる。
+
+AMF の DPB サイズは Linux の AMF ランタイム 1.5.3.0 で設定が許可されないため、
+`DecoderConfig` では指定できない。
+
+`decode()` には 1 フレーム分のビットストリームを格納した `Buffer` を渡す。複数フレームを含むバッファを渡した場合の挙動は AMF の実装に依存する。B フレームを含むストリームでは出力順が入力順と異なるが、`decode()` に渡した `UserData` は対応する出力フレームに付く。`decode()` は入力 `Buffer` の PTS を変更せず、出力 `Surface` の PTS も設定しない。出力 `Surface` の PTS は AMF が付けた値になる。入出力の対応付けには `ShiguredoAmfFrameId` プロパティを使う。この名前はライブラリの予約名であり、利用者は入力 `Buffer` に設定しないこと。
+
+解像度が変化するストリームでも同じデコーダーへフレームを投入し続けられる。解像度変化の処理に成功した場合、投入したフレームは新しい解像度でデコードされ、他のフレームと同様にハンドラーへ通知される。処理が完了するまで `decode()` は戻らない。解像度変化の処理に失敗した場合は `decode()` がエラーを返し、そのフレームはハンドラーへ通知されない。`decode()` / `finish()` がエラーを返した後の操作は `Drop` 以外を保証しない。
+
+`Decoder::new` の第 1 引数には `Context` を渡す。同じ `Context` を Clone して `Encoder::new` にも渡すと、デコード結果の `Surface` をコピーせずにエンコードできる。
 
 ### エンコード中の動的プロパティ再設定
 
@@ -254,21 +453,25 @@ encoder.reconfigure(ReconfigureParams {
 `reconfigure` で変更できる項目は codec ごとに異なる:
 
 - **H.264**: `framerate_num` / `framerate_den` / `target_kbps` / `max_kbps` / `qpi` / `qpp` / `qpb` / `gop_pic_size`
-- **H.265**: `framerate_num` / `framerate_den` / `target_kbps` / `max_kbps` / `qpi` / `qpp` (B フレーム用 QP プロパティが存在しないため `qpb` / `gop_pic_size` は無視)
+- **H.265**: `framerate_num` / `framerate_den` / `target_kbps` / `max_kbps` / `qpi` / `qpp` (B フレーム用 QP プロパティが存在せず GOP サイズも初期化時のみ設定できるため、`qpb` / `gop_pic_size` を指定するとエラー)
 - **AV1**: `framerate_num` / `framerate_den` / `target_kbps` / `max_kbps` / `qpi` / `qpp` / `qpb` / `gop_pic_size`
 
 `framerate_num` と `framerate_den` は必ず同時に指定する。片方だけ指定すると `Err` を返す。`None` の項目はそのまま維持される。
 
-### IDR フレーム強制
+### フレームタイプの強制
 
 ```rust
 use shiguredo_amf::{EncodeOptions, frame_type};
 
 let surface = encoder.alloc_surface()?;
 // ...
-encoder.encode(surface, &EncodeOptions {
-    frame_type: frame_type::IDR | frame_type::I | frame_type::REF,
-}, ())?;
+encoder.encode(
+    surface,
+    EncodeOptions {
+        frame_type: frame_type::IDR,
+    },
+    (),
+)?;
 ```
 
 IDR 強制時は内部でコーデック別に AMF の `FORCE_PICTURE_TYPE` / `FORCE_FRAME_TYPE` プロパティを設定し、H.264 では `INSERT_SPS` / `INSERT_PPS`、HEVC では `INSERT_HEADER`、AV1 では `FORCE_INSERT_SEQUENCE_HEADER` を同時に有効化する (キーフレームに SPS/PPS 相当のヘッダーが付与される)。
@@ -278,21 +481,31 @@ IDR 強制時は内部でコーデック別に AMF の `FORCE_PICTURE_TYPE` / `F
 ```rust
 use shiguredo_amf::supported_codecs;
 
-let codecs = supported_codecs();
+let codecs = supported_codecs().expect("failed to query codec support");
 for info in &codecs {
     println!("{:?}:", info.codec);
-    println!(
-        "  decoding: supported={}, hw_accel={}",
-        info.decoding.supported, info.decoding.hardware_accelerated
-    );
-    println!(
-        "  encoding: supported={}, hw_accel={}",
-        info.encoding.supported, info.encoding.hardware_accelerated
-    );
+    match &info.decoding {
+        Some(decoding) => println!("  decoding: acceleration={:?}", decoding.acceleration),
+        None => println!("  decoding: not supported"),
+    }
+    match &info.encoding {
+        Some(encoding) => println!(
+            "  encoding: acceleration={:?}, profile={:?}, level={:?}, frame_reordering={:?}",
+            encoding.acceleration,
+            encoding.max_profile,
+            encoding.max_level,
+            encoding.supports_frame_reordering
+        ),
+        None => println!("  encoding: not supported"),
+    }
 }
 ```
 
-`supported_codecs()` は AMF ランタイムをロードして実際に `CreateComponent` を試行する。AMF ランタイムがロードできない環境では全コーデックが非対応として返される。
+`supported_codecs()` は AMF ランタイムをロードして利用可能なコーデックを判定する。AMF ランタイムまたは Vulkan デバイスを初期化できない場合は `Err` を返し、個々のコーデックの非対応は `decoding` / `encoding` の `None` になる。H.264 / HEVC / AV1 / VP9 の 4 件を返し、VP9 は AMF にエンコーダーがないため `encoding` が常に `None` になる。
+
+実機で確認済みの VP9 は Profile 0 (8bit 4:2:0) である。10bit (Profile 2) と 4:2:2 / 4:4:4 は、出力フォーマットが NV12 固定のため未検証である。
+
+VP9 の superframe は 1 フレームずつ分割して投入する必要がある。不可視フレーム (`show_frame=0`) や `show_existing_frame` を含むストリームは、入力と出力の対応付けができないため `DecodeHandler` にエラーが通知される。
 
 ### AMF ランタイムバージョンの取得
 
@@ -300,11 +513,34 @@ for info in &codecs {
 use shiguredo_amf::AmfLibrary;
 
 let lib = AmfLibrary::instance();
-let (major, minor, release, build) = lib.query_version()?;
-println!("AMF runtime: {major}.{minor}.{release}.{build}");
+let version = lib.query_version()?;
+println!("AMF runtime: {version}");
 ```
 
-`AmfLibrary::instance()` は `LazyLock` によるプロセスシングルトン。初回呼び出し時に `libamfrt64.so.1` を `dlopen` してファクトリを取得する。
+`AmfLibrary::instance()` は `LazyLock` によるプロセスシングルトンを返す。`libamfrt64.so.1` の `dlopen` とファクトリの取得は、初めて `query_version()` / `create_context()` を呼び出したとき、または Encoder / Decoder を作成したときに行われる。
+
+### Vulkan デバイスの選択
+
+```rust
+use shiguredo_amf::AmfLibrary;
+use shiguredo_amf::amf::VulkanDevice;
+
+let context = AmfLibrary::instance().create_uninitialized_context()?;
+
+// AMF が要求する Vulkan デバイス拡張を取得する
+let extensions = context.vulkan_device_extensions()?;
+
+// 利用者が Vulkan インスタンスと物理デバイスを選択し、extensions を有効にした
+// VkDevice を作成する (Vulkan の呼び出しは利用者が行う)
+let device = unsafe { VulkanDevice::from_raw(instance, physical_device, vk_device)? };
+let context = unsafe { context.init_vulkan_with_device(device)? };
+```
+
+`vulkan_device_extensions()` は Vulkan デバイスを作成する前に呼び出せる。AMF SDK のサンプルと実機では初期化前でも取得できるが、AMF の API リファレンスは未初期化の `Context` に対して `AMF_NO_DEVICE` を返すとしている。AMF が未初期化の `Context` を受け付けない場合は `Error::Amf` を返す。返った拡張名を `VkDeviceCreateInfo::ppEnabledExtensionNames` に指定する。AMF は既定で、コンピュート対応キューファミリ内のインデックス 0 のキューを使うため、そのキューを作成した `VkDevice` を渡す。インスタンス作成、物理デバイス選択、拡張と feature の有効化の手順は AMF SDK の `DeviceVulkan.cpp` を参照する。
+
+`Context::vulkan_device()` は `Context` が使用している Vulkan デバイスのハンドルを返す。ハンドルの寿命と破棄責任は「AMF オブジェクトラッパー」の Vulkan デバイスの節を参照する。複数 GPU を使う場合は GPU ごとに `Context` を作成する。
+
+`AmfLibrary::create_context()` は `AmfLibrary::create_uninitialized_context()` で `UninitializedContext` を作成し、`init_vulkan()` を呼ぶのと同じである。拡張一覧を先に取得したい場合は `create_uninitialized_context()` を使い、`vulkan_device_extensions()` を呼んでから `init_vulkan()` を呼ぶ。
 
 ### カスタムハンドラートレイトの実装
 
@@ -342,25 +578,35 @@ impl EncodeHandler for MyHandler {
 
 ## エンコーダー入力フォーマット (`FrameFormat`)
 
-| バリアント | 説明 |
-|---|---|
-| `Nv12` | Semi-Planar YUV 4:2:0 8bit |
-| `Yv12` | Planar YUV 4:2:0 8bit (Y+V+U) |
-| `I420` | Planar YUV 4:2:0 8bit (Y+U+V) |
-| `Bgra` | Packed BGRA 8bit |
-| `Argb` | Packed ARGB 8bit |
-| `Rgba` | Packed RGBA 8bit |
-| `Yuy2` | Packed YUV 4:2:2 8bit (YUY2) |
-| `Uyvy` | Packed YUV 4:2:2 8bit (UYVY) |
-| `P010` | Semi-Planar YUV 4:2:0 10bit |
-| `P012` | Semi-Planar YUV 4:2:0 12bit (16bit 格納) |
-| `P016` | Semi-Planar YUV 4:2:0 16bit |
-| `Y210` | Packed YUV 4:2:2 10bit (16bit 格納) |
-| `Ayuv` | Packed YUV 4:4:4 8bit |
-| `Y410` | Packed YUV 4:4:4 10bit |
-| `Y416` | Packed YUV 4:4:4 16bit |
+入力フォーマットのビット深度は `FrameFormat` ごとに決まる。
+H.264 は 8bit 入力のみ、HEVC と AV1 は 8bit と 10bit の入力に対応する。
+HEVC のプロファイルは `HevcProfile` で指定する。
+HEVC の 10bit 入力には `HevcProfile::Main10` が必要である。`HevcProfile::Main` またはプロファイル未指定 (既定の Main) との組み合わせは `Encoder::new` がエラーを返す。
+入力フォーマットとプロファイルの組み合わせを利用できるかは GPU と AMF の実装に依存し、利用できない場合はエラーになる。
+`HevcProfile::Main10` と 8bit 入力の組み合わせも、AMF が受け付ければ利用できる。
 
-`FrameFormat::frame_size(width, height) -> Option<usize>` で各フォーマットのフレームバイト数を計算できる (オーバーフロー時は `None`)。
+| バリアント | 説明 | 利用条件 |
+|---|---|---|
+| `Nv12` | Semi-Planar YUV 4:2:0 8bit | 利用できる |
+| `Yv12` | Planar YUV 4:2:0 8bit (Y+V+U) | 利用できる |
+| `I420` | Planar YUV 4:2:0 8bit (Y+U+V) | 利用できる |
+| `Bgra` | Packed BGRA 8bit | 利用できる |
+| `Argb` | Packed ARGB 8bit | 利用できる |
+| `Rgba` | Packed RGBA 8bit | 利用できる |
+| `Yuy2` | Packed YUV 4:2:2 8bit (YUY2) | 利用できる |
+| `Uyvy` | Packed YUV 4:2:2 8bit (UYVY) | GPU と AMF の実装に依存する |
+| `P010` | Semi-Planar YUV 4:2:0 10bit (16bit 格納、上位 10bit) | GPU と AMF の実装に依存する。HEVC は `HevcProfile::Main10` が必須、AV1 は `Av1Profile::Main` で利用できる |
+| `P012` | Semi-Planar YUV 4:2:0 12bit (16bit 格納、上位 12bit) | AMF が 8bit / 10bit 以外を扱えないため、初期化に失敗する |
+| `P016` | Semi-Planar YUV 4:2:0 16bit (16bit 格納、全ビット) | AMF が 8bit / 10bit 以外を扱えないため、初期化に失敗する |
+| `Y210` | Packed YUV 4:2:2 10bit (16bit ワードの上位 10bit) | GPU と AMF の実装に依存する |
+| `Ayuv` | Packed YUV 4:4:4 8bit | GPU と AMF の実装に依存する |
+| `Y410` | Packed YUV 4:4:4 10bit (32bit ワード、下位から U (10bit) / Y (10bit) / V (10bit) / A (2bit)) | GPU と AMF の実装に依存する |
+| `Y416` | Packed YUV 4:4:4 16bit (16bit ワード、全ビット) | AMF が 8bit / 10bit 以外を扱えないため、初期化に失敗する |
+
+AMD Radeon 780M Graphics (Phoenix1)、Ubuntu 26.04.1、AMF ランタイム 1.5.3.0 で確認した結果は次のとおり。
+
+- 利用できる: `Nv12` / `Yv12` / `I420` / `Bgra` / `Argb` / `Rgba` / `Yuy2` / `P010` (`P010` は HEVC / AV1)
+- 利用できない: `Uyvy` / `Ayuv` / `Y210` / `Y410` / `P012` / `P016` / `Y416`
 
 ## レート制御モード (`RateControlMode`)
 
@@ -376,6 +622,41 @@ impl EncodeHandler for MyHandler {
 
 H.264 / HEVC / AV1 で AMF SDK 内部の enum 値順序が異なるが、`shiguredo_amf` 側ではこの enum で抽象化されている。
 
+## エンコーダーの用途 (`EncoderUsage`)
+
+`EncoderConfig::usage` に指定する。
+
+| 用途 | `EncoderUsage` | 説明 |
+|---|---|---|
+| トランスコーディング | `EncoderUsage::Transcoding` | 変換・編集向け。圧縮効率とスループットを優先する |
+| 超低遅延 | `EncoderUsage::UltraLowLatency` | ゲームストリーミングなど、対話性を優先する用途向け |
+| 低遅延 | `EncoderUsage::LowLatency` | ビデオ会議やリモートデスクトップ向け。画質維持のためビットレートが一時的に超過することがある |
+| カメラ入力 | `EncoderUsage::Webcam` | 低遅延のビデオ会議向け |
+| 高画質 | `EncoderUsage::HighQuality` | 性能より主観画質を優先する |
+| 低遅延かつ高画質 | `EncoderUsage::LowLatencyHighQuality` | 低遅延と高画質の両立を重視する |
+
+既定は `EncoderUsage::Transcoding` である。
+用途は AMF が用意する既定パラメータ一式を選ぶ。
+`EncoderConfig` の他のフィールドで指定した値は用途の既定より優先される。
+`rate_control_mode` も常に設定されるため、用途ごとの既定レート制御メソッドより優先される。
+用途の既定に関係なく、`QueryOutput` のタイムアウトは 0 に設定する。これは出力の回収をブロックさせないためである。
+H.264 / HEVC と AV1 では `EncoderUsage` の enum 値の並びが異なる (AV1 は `UltraLowLatency` と `LowLatency` が逆) が、`shiguredo_amf` 側ではこの enum で抽象化されている。
+
+## 品質プリセット (`QualityPreset`)
+
+`EncoderConfig::quality_preset` に指定する。
+
+| プリセット | `QualityPreset` | 説明 |
+|---|---|---|
+| 速度優先 | `QualityPreset::Speed` | 画質よりエンコード速度を優先する |
+| バランス | `QualityPreset::Balanced` | エンコード速度と画質のバランスを取る |
+| 画質優先 | `QualityPreset::Quality` | エンコード速度より画質を優先する |
+| 高画質 | `QualityPreset::HighQuality` | 最も高い画質を優先する |
+
+`None` の場合は用途とコーデックに応じた AMF の既定値を使う。例えば `Webcam` の既定は H.264 が `Speed`、HEVC と AV1 が `Quality` である。`Some` の場合は、その既定値より指定した値が優先される。
+レート制御モードには `EncoderConfig::rate_control_mode` を使う。品質プリセットはそのモードの中でのエンコード速度と画質のバランスを変える。
+AMF SDK 内部の enum 値は H.264 / HEVC / AV1 で異なるが、`shiguredo_amf` 側ではこの enum で抽象化されている。
+
 ## EncoderConfig のバリデーション
 
 `Encoder::new` で以下を検証する:
@@ -386,21 +667,32 @@ H.264 / HEVC / AV1 で AMF SDK 内部の enum 値順序が異なるが、`shigur
 | `width > i32::MAX \|\| height > i32::MAX` | `invalid resolution: WxH (exceeds i32::MAX)` |
 | `width` または `height` が奇数 | `invalid resolution: WxH (must be even)` |
 | `framerate_num == 0 \|\| framerate_den == 0` | `invalid framerate: N/D (must be non-zero)` |
+| HEVC で `qpb` を指定 | `qpb is not supported for HEVC` |
+| HEVC で `b_pic_pattern` を指定 | `b_pic_pattern is not supported for HEVC` |
+| AMF が B フレーム非対応と報告した場合 (`b_pic_pattern > 0`) | `this GPU and AMF implementation do not support B frames` |
+| HEVC の 10bit 入力でプロファイルが `Main10` 以外 | `HEVC 10bit input requires HevcProfile::Main10: ...` |
+
+入力フォーマットとプロファイルの組み合わせ、および `b_pic_pattern` の値域は基本的に AMF に任せ、AMF が返すエラーをそのまま返す。B フレーム対応のケーパビリティが取得できない場合も、対応可否を決めずに AMF に任せる。HEVC の 10bit 入力と Main プロファイル (プロファイル未指定を含む) の組み合わせだけは `Encoder::new` がエラーを返す。
 
 ## スレッド設計
 
-- `AmfLibrary` はプロセスシングルトン (`LazyLock<AmfLibrary>`)。内部の `Mutex` で `AMFFactory` を遅延初期化する。
-- `Encoder<H>` / `Decoder<H>` は内部で `amf-encoder-worker` / `amf-decoder-worker` という名前のワーカースレッドを起動し、`mpsc::channel` で `Submit(UserData)` / `Finish` コマンドを受け取る。
-- `encode()` / `decode()` はメインスレッドから `SubmitInput` を呼び (必要に応じて `AMF_INPUT_FULL` / `AMF_REPEAT` / `AMF_DECODER_NO_FREE_SURFACES` で 1ms スリープしながら最大 100 回までリトライ)、その後ワーカーへ `UserData` を送る。
-- ワーカーは `pending` キューにマッチするように `QueryOutput` の結果を保持し、対応が取れたところで `on_encoded` / `on_decoded` を呼ぶ。
-- `finish()` は `Drain` を呼んだあと `Finish(sync_channel)` をワーカーに送り、最大 5 秒で完了を待つ。
-- `Drop` 実装は `cmd_tx` を落としてワーカーを停止させ、`Component::terminate()` / `Context::terminate()` を呼んでから AMF オブジェクトを解放する。
+- `AmfLibrary` はプロセスシングルトン (`LazyLock<AmfLibrary>`)。AMF ランタイムを遅延初期化し、`create_context()` で既定の Vulkan デバイスで初期化した `Context` を作成する。デバイスを選択する場合は `create_uninitialized_context()` で `UninitializedContext` を作成し、`UninitializedContext::init_vulkan_with_device()` で初期化する。
+- `Context` は `AMFContext` の参照カウントを直接管理する Clone 可能なハンドルである。`Clone` は `AMFContext::Acquire`、`Drop` は `AMFContext::Release` を呼ぶ。最後の参照が解放されたときに AMFContext のデストラクタが `Terminate` を呼ぶ。
+- `Encoder<H>` / `Decoder<H>` は内部で共通のワーカーモジュールを使い、`amf-encoder-worker` / `amf-decoder-worker` という名前のワーカースレッドを起動する。コマンドは `mpsc::channel` で受け取り、`RegisterUserData` / `WaitEof` / `Stop` を使う。出力の変換、ハンドラーへの通知、終了条件だけをクロージャで差し替える。
+- `encode()` / `decode()` はメインスレッドから `SubmitInput` を呼ぶ。共通のリトライ対象は `AMF_INPUT_FULL` と `AMF_DECODER_NO_FREE_SURFACES` で、1ms 間隔で最大 100 回リトライし、それ以外のステータスはそのまま返す。エンコーダーは `AMF_OK` / `AMF_NEED_MORE_INPUT` を受理し、`AMF_REPEAT` は想定外としてエラーにする。デコーダーは `AMF_OK` / `AMF_NEED_MORE_INPUT` / `AMF_RESOLUTION_CHANGED` を受理し、`AMF_REPEAT` はエラーにする。`AMF_DECODER_NO_FREE_SURFACES` はデコーダー専用だが、一時的なリソース枯渇を表すため共通のリトライ対象に含める。どちらも受理された後で、入力フレームに割り当てた `ShiguredoAmfFrameId` と `UserData` をワーカーへ送る。
+- ワーカーは frame ID から `UserData` を引く表を保持し、`QueryOutput` が返す出力から frame ID を読み取って対応する `UserData` を通知する。対応する `UserData` がまだ届いていない出力は保持する。ワーカーはコマンドを 1 つ処理した後と、コマンド待ちのタイムアウト時に `QueryOutput` を回収する。入力のリトライ中も出力を回収できるよう、保留中の入出力がある間は 1ms 間隔で `QueryOutput` を呼ぶ。
+- `QueryOutput` の出力は `amf::Data` で包む。`Data` は `AMFData` の RAII ラッパーで、`to_buffer` / `to_surface` で参照カウントを増やした `Buffer` / `Surface` を構築できる。
+- `WaitEof` を受け取ると、ワーカーは `Drain` を呼ぶ。`AMF_INPUT_FULL` の間は出力を回収しながら再試行し、受理後は `AMF_EOF` まで出力を回収する。エンコーダーとデコーダーで終了条件は同じで、`AMF_EOF` まで待つ。完了時は出力が得られなかった入力と、対応する入力がない出力をエラーとして通知する。`Drain` に失敗した場合はエラーを呼び出し側へ返し、ワーカーはコマンド待ちに戻る。`QueryOutput` が終端エラーを返した場合は、そのエラーをハンドラーへ通知してワーカーを終了する。
+- `Encoder::finish()` / `Decoder::finish()` は共通の処理で、入力が受理済みなら `WaitEof` で Drain と出力回収をさせてから `Stop` を送り、受理済みの入力がなければ `Stop` だけを送って join まで待つ。`SubmitInput` がハードエラーになって入力を受理していない場合も `Stop` だけを送る。2 回目の `finish()` はエラーを返す。`finish()` がエラーを返した後の操作は `Drop` 以外を保証しない。出力の回収中に発生した終端エラーはハンドラーへ通知される。
+- 解像度の変化を検出すると、`SubmitInput` は `AMF_RESOLUTION_CHANGED` を返し、投入したバッファは AMF に受理されない。`decode()` はワーカーへ `WaitEof` を送り、旧解像度の出力をすべて通知させてから `Terminate` と `Init` で AMF コンポーネントを作り直す。受理されなかったバッファを再投入して同じワーカーへ `RegisterUserData` を送り、ワーカーは通常ループへ戻る。
+- `Drop` は `Stop` コマンドを送り、キューにあるコマンドを処理してからワーカーを join する。drop の処理中に、`encode()` / `decode()` が成功したフレームの出力が通知されることがある。drop は、すべてのフレームの出力が通知されることを保証しない。コンポーネントが初期化済みなら `Component::terminate()` を呼んでから AMF オブジェクトを解放する。ハンドラーの panic は `tracing::error!` で記録する。
+- AMFContext は、それを保持する `Context` の Clone がすべてなくなった時点で破棄される。
 
 ## 公開モジュール
 
 | モジュール | 説明 |
 |-----------|------|
-| `amf` | AMF オブジェクトの RAII ラッパー (`Context`, `Component`, `Surface`, `Buffer`, `Plane`, `PropertyStorage`) |
+| `amf` | AMF オブジェクトの RAII ラッパー (`Context`, `Component`, `Surface`, `Buffer`, `Data`, `Plane`, `PropertyStorage`) |
 | `ffi` | `#[doc(hidden)]`。`sys` モジュールの再公開。semver 保証対象外 |
 
 ## docs.rs 向けビルド

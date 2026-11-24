@@ -1,8 +1,8 @@
 [package]
 name = "shiguredo_amf"
-version = "2026.3.0"
+version = "2026.4.0"
 edition = "2024"
-rust-version = "1.88"
+rust-version = "1.95"
 description = "Rust bindings for AMD AMF (Advanced Media Framework)"
 readme = "README.md"
 homepage = "https://github.com/shiguredo/amf-rs"
@@ -22,9 +22,15 @@ include = ["/build.rs", "/src/**/*", "LICENSE", "README.md"]
 url = "https://github.com/GPUOpen-LibrariesAndSDKs/AMF"
 version = "v1.5.2"
 
+[workspace]
+members = ["examples/amf-check"]
+
 [dependencies]
-log = "0.4"
+# ログ出力
+tracing = "0.1"
 
 [build-dependencies]
+# AMF SDK のヘッダーから FFI バインディングを生成する
 bindgen = "0.72"
+# Cargo.toml の package.metadata を読み取る
 shiguredo_toml = "2026.2"
