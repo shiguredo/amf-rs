@@ -11,6 +11,10 @@
 
 ## develop
 
+## 2026.4.0
+
+**リリース日**: 2026-11-24
+
 - [CHANGE] `AmfLibrary::query_version` の戻り値を `AmfVersion` に変更する
   - `AmfVersion` の `major` / `minor` / `release` / `build` フィールドで各成分を取得できる
   - `Display` は `major.minor.release.build` 形式で表示する

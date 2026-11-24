@@ -1,6 +1,6 @@
 [package]
 name = "shiguredo_amf"
-version = "2026.3.0"
+version = "2026.4.0"
 edition = "2024"
 rust-version = "1.95"
 description = "Rust bindings for AMD AMF (Advanced Media Framework)"
